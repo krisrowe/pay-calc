@@ -1,0 +1,70 @@
+# Pay Stub Processing Configuration
+# 
+# This file defines employers, their pay stub formats, and how to identify them
+
+employers:
+  # Employer A LLC - HIM
+  # Note: Text normalization automatically handles space variations (e.g., "Employer A LL C" matches "Employer A LLC")
+  - name: "Employer A LLC"
+    party: "him"
+    processor: "employer_a"
+    file_patterns:
+      - "Employer A LLC"
+    content_patterns:
+      - "Employer A LLC"
+      - "Senior Customer Solutions"
+    # Additional metadata
+    default_location: "US-DAL-ADD"  # Normalized form (spaces removed during matching)
+    
+  # Employer A LLC - HIM
+  # Note: Uses same processor as Employer A LLC (same pay stub format)
+  # Text normalization automatically handles space variations
+  - name: "Employer A LLC"
+    party: "him"
+    processor: "employer_a"
+    file_patterns:
+      - "Employer A"
+    content_patterns:
+      - "Employer A LLC"
+      - "Employer A Cloud, Customer En"
+      - "Employer A Public Sctr Salary"
+    # Additional metadata
+    default_location: "US-DAL-ADD"  # Normalized form (spaces removed during matching)
+    
+  # Employer B - HER
+  - name: "Employer B"
+    party: "her"
+    processor: "employer_b"
+    file_patterns:
+      - "Spouse"
+      - "HER"
+      - "Her"
+      - "her"
+      - "EB"
+      - "Employer B"
+    content_patterns:
+      - "Spouse"
+      - "Employer B"
+      - "EB"
+    # Additional metadata
+    default_location: "TBD"
+
+# Processor definitions
+# Each processor handles a specific pay stub format
+processors:
+  employer_a:
+    description: "Employer A LLC and Employer A LLC pay stub format"
+    class: "Employer AProcessor"
+    # Handled by processors/employer_a.py
+    # Used for both Employer A LLC and Employer A LLC (same format)
+    
+  employer_b:
+    description: "Employer B pay stub format"
+    class: "EBProcessor"
+    # Handled by processors/employer_b.py
+    
+  generic:
+    description: "Generic pay stub processor (defaults to Employer A format)"
+    class: "Employer AProcessor"
+    # Falls back to Employer A processor
+
