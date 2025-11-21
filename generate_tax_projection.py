@@ -1,234 +1,234 @@
 #!/usr/bin/env python3
 """
-Generate tax projection CSV file from YTD data
-
-Usage:
-    python3 generate_tax_projection.py [year]
-
-Generates a CSV file similar to 2025_tax_projection.csv with combined
-tax projections for both parties (him and her).
+Generate a tax projection based on W-2 or YTD data and output to CSV.
 """
 
 import sys
 import json
+import yaml
 import csv
 from pathlib import Path
-from datetime import datetime
+import traceback
+from collections import defaultdict
 
-
-# 2025 Tax brackets for MFJ (Married Filing Jointly)
-TAX_BRACKETS_2025 = [
-    (0, 0.10),
-    (23200, 0.12),
-    (94300, 0.22),
-    (201050, 0.24),
-    (383900, 0.32),
-    (487450, 0.35),
-    (731200, 0.37)
-]
-
-STANDARD_DEDUCTION_2025 = 31500.0
-SS_WAGE_BASE_2025 = 168600.0
-SS_TAX_RATE = 0.062
-
-
-def calculate_tax_brackets(taxable_income):
-    """Calculate tax using 2025 MFJ brackets."""
-    tax = 0.0
-    prev_bracket = 0
+def load_tax_rules(year):
+    """Load tax rules for a specific year from tax-rules/YYYY.yaml."""
+    config_file = Path(f"tax-rules/{year}.yaml")
+    if not config_file.exists():
+        raise FileNotFoundError(f"Tax rules file not found for year {year}: {config_file}")
     
-    for bracket, rate in TAX_BRACKETS_2025:
-        if taxable_income > bracket:
-            taxable_in_bracket = min(taxable_income, bracket) - prev_bracket
-            tax += taxable_in_bracket * rate
-            prev_bracket = bracket
-        else:
-            break
-    
-    if taxable_income > prev_bracket:
-        taxable_in_bracket = taxable_income - prev_bracket
-        tax += taxable_in_bracket * TAX_BRACKETS_2025[-1][1]
-    
-    return tax
+    with open(config_file, 'r') as f:
+        return yaml.safe_load(f)
 
+def calculate_federal_income_tax(taxable_income, tax_brackets):
+    """Calculate federal income tax based on taxable income and tax brackets."""
+    tax_owed = 0.0
+    previous_bracket_max = 0.0
+    
+    sorted_brackets = sorted(tax_brackets, key=lambda b: b.get("up_to", float('inf')))
+    
+    for bracket in sorted_brackets:
+        rate = bracket['rate']
+        
+        if 'up_to' in bracket:
+            current_bracket_max = bracket['up_to']
+            if taxable_income > previous_bracket_max:
+                income_in_this_bracket = min(taxable_income, current_bracket_max) - previous_bracket_max
+                tax_owed += income_in_this_bracket * rate
+            previous_bracket_max = current_bracket_max
+            
+        elif 'over' in bracket:
+            if taxable_income > bracket['over']:
+                income_in_this_bracket = taxable_income - bracket['over']
+                tax_owed += income_in_this_bracket * rate
+                
+    return tax_owed
 
-def load_ytd_data(year, party):
-    """Load YTD data for a specific year and party."""
+def calculate_additional_medicare_tax_amount(total_medicare_wages, threshold):
+    """Calculate the Additional Medicare Tax amount (0.9% of excess wages)."""
+    excess_medicare_wages = max(0, total_medicare_wages - threshold)
+    return excess_medicare_wages * 0.009
+
+def load_party_data(year, party):
+    """
+    Load and aggregate W-2 data for a party from the corresponding _w2_forms.json file.
+    Falls back to YTD pay stub data if W-2 data is not available.
+    """
     data_dir = Path("data")
+    w2_file = data_dir / f"{year}_{party}_w2_forms.json"
     ytd_file = data_dir / f"{year}_{party}_ytd.json"
-    
-    if not ytd_file.exists():
-        return None
-    
-    with open(ytd_file, 'r') as f:
-        return json.load(f)
 
+    if w2_file.exists():
+        print(f"Loading W-2 data for {party} from {w2_file.name}...")
+        with open(w2_file, 'r') as f:
+            w2_data = json.load(f)
+        
+        aggregated_data = defaultdict(float)
+        for form in w2_data.get("forms", []):
+            for key, value in form.get("data", {}).items():
+                aggregated_data[key] += value
+        
+        return dict(aggregated_data)
 
-def aggregate_by_party(ytd_data):
-    """Aggregate totals from all employers for a party."""
-    totals = ytd_data.get("totals", {})
-    
-    # Get earnings breakdown
-    earnings = totals.get("earnings", {})
-    taxes = totals.get("taxes", {})
-    deductions = totals.get("deductions", {})
-    
-    return {
-        "gross_pay": earnings.get("total_gross", 0.0),
-        "fit_taxable_wages": totals.get("fit_taxable_wages", 0.0),
-        "federal_tax_withheld": taxes.get("federal_income_tax_withheld", 0.0),
-        "ss_tax_withheld": taxes.get("social_security_withheld", 0.0),
-        "medicare_tax_withheld": taxes.get("medicare_withheld", 0.0),
-        "total_deductions": deductions.get("total_deductions", 0.0),
-        "ss_wages": min(totals.get("fit_taxable_wages", 0.0), SS_WAGE_BASE_2025),
-        "medicare_wages": totals.get("fit_taxable_wages", 0.0)
-    }
-
-
-def calculate_ss_overpayment(him_data):
-    """Calculate Social Security overpayment if applicable."""
-    ss_tax_paid = him_data.get("ss_tax_withheld", 0.0)
-    ss_tax_max = SS_WAGE_BASE_2025 * SS_TAX_RATE
-    
-    if ss_tax_paid > ss_tax_max:
-        return ss_tax_paid - ss_tax_max
-    return 0.0
-
-
-def generate_tax_projection(year=None):
-    """Generate tax projection CSV for the specified year."""
-    if year is None:
-        year = datetime.now().year
-    
-    year_str = str(year)
-    
-    print(f"Generating tax projection for {year_str}...")
-    
-    # Load YTD data for both parties
-    him_ytd = load_ytd_data(year_str, "him")
-    her_ytd = load_ytd_data(year_str, "her")
-    
-    if not him_ytd:
-        print(f"Error: No YTD data found for {year_str} (him)")
-        print(f"  Run: python3 calc_ytd.py {year_str} him")
-        sys.exit(1)
-    
-    if not her_ytd:
-        print(f"Warning: No YTD data found for {year_str} (her)")
-        print(f"  Run: python3 calc_ytd.py {year_str} her")
-        print(f"  Continuing with him data only...")
-        her_ytd = {
-            "totals": {
-                "earnings": {"total_gross": 0.0},
-                "taxes": {
-                    "federal_income_tax_withheld": 0.0,
-                    "social_security_withheld": 0.0,
-                    "medicare_withheld": 0.0
-                },
-                "deductions": {"total_deductions": 0.0},
-                "fit_taxable_wages": 0.0
+    elif ytd_file.exists():
+        print(f"Warning: W-2 data not found for {party}. Falling back to YTD pay stub data from {ytd_file.name}.")
+        with open(ytd_file, 'r') as f:
+            ytd_data = json.load(f)
+            return {
+                "wages_tips_other_comp": ytd_data["totals"]["fit_taxable_wages"],
+                "federal_income_tax_withheld": ytd_data["totals"]["taxes"]["federal_income_tax_withheld"],
+                "social_security_wages": ytd_data["totals"].get("social_security_wages", 0.0),
+                "social_security_tax_withheld": ytd_data["totals"]["taxes"]["social_security_withheld"],
+                "medicare_wages_and_tips": ytd_data["totals"].get("medicare_wages_and_tips", 0.0),
+                "medicare_tax_withheld": ytd_data["totals"]["taxes"]["medicare_withheld"],
             }
-        }
+    else:
+        raise FileNotFoundError(f"No data file found for {year} {party} in {data_dir}")
+
+def generate_csv_output(year, projection_data):
+    """Generates the CSV output string."""
+    output_filename = Path("data") / f"{year}_tax_projection.csv"
     
-    # Aggregate data by party
-    him_data = aggregate_by_party(him_ytd)
-    her_data = aggregate_by_party(her_ytd)
-    
-    # Calculate combined taxable income
-    combined_taxable_wages = him_data["fit_taxable_wages"] + her_data["fit_taxable_wages"]
-    taxable_income = combined_taxable_wages - STANDARD_DEDUCTION_2025
-    
-    # Calculate federal income tax
-    federal_tax_assessed = calculate_tax_brackets(taxable_income)
-    
-    # Calculate SS overpayment
-    ss_overpayment = calculate_ss_overpayment(him_data)
-    
-    # Calculate refund/owed
-    total_withheld = him_data["federal_tax_withheld"] + her_data["federal_tax_withheld"]
-    refund = total_withheld - federal_tax_assessed + ss_overpayment
-    
-    # Generate CSV
-    output_file = Path(f"{year_str}_tax_projection.csv")
-    
-    with open(output_file, 'w', newline='') as f:
-        writer = csv.writer(f)
+    with open(output_filename, 'w', newline='') as csvfile:
+        writer = csv.writer(csvfile)
         
-        # Header rows
-        writer.writerow(['', '', '', '', '', '', ''])
         writer.writerow(['', '', 'INCOME TAX BRACKETS (MFJ)', '', '', 'HIM', ''])
-        writer.writerow(['', '', 'Applied to income of', f'${taxable_income:,.2f}', '', '', ''])
-        writer.writerow(['', '', '', '', '', '', ''])
-        writer.writerow(['', 'Earnings Above', 'Rate / Bracket', 'Tax Assessed', '', '', ''])
+        writer.writerow(['', '', 'Applied to income of', f'${projection_data["final_taxable_income"]:,.2f}', '', 'Wages:', f'${projection_data["him_wages"]:,.2f}'])
+        writer.writerow(['', 'Earnings Above', 'Rate / Bracket', 'Tax Assessed', '', 'Fed Tax Withheld:', f'${projection_data["him_fed_withheld"]:,.2f}'])
         
-        # Tax brackets
-        prev_bracket = 0
-        for bracket, rate in TAX_BRACKETS_2025:
-            if taxable_income > prev_bracket:
-                bracket_tax = calculate_tax_brackets(min(taxable_income, bracket)) - calculate_tax_brackets(prev_bracket)
-                writer.writerow(['', f'${bracket:,}', f'{int(rate*100)}%', f'${bracket_tax:,.2f}', '', '', ''])
-                prev_bracket = bracket
+        previous_bracket_max = 0
+        for bracket in projection_data["tax_brackets"]:
+            rate = bracket['rate']
+            row_to_write = ['', '', '', '']
+            
+            if 'up_to' in bracket:
+                row_to_write[1] = f'${previous_bracket_max:,.2f}'
+                current_bracket_max = bracket['up_to']
+                income_in_bracket = min(projection_data["final_taxable_income"], current_bracket_max) - previous_bracket_max
+                if income_in_bracket < 0: income_in_bracket = 0
+                tax_assessed = income_in_bracket * rate
+                row_to_write[3] = f'${tax_assessed:,.2f}'
+                previous_bracket_max = current_bracket_max
+            elif 'over' in bracket:
+                row_to_write[1] = f'${bracket["over"]:,.2f}'
+                if projection_data["final_taxable_income"] > bracket['over']:
+                    income_in_bracket = projection_data["final_taxable_income"] - bracket['over']
+                    tax_assessed = income_in_bracket * rate
+                else: tax_assessed = 0
+                row_to_write[3] = f'${tax_assessed:,.2f}'
+
+            row_to_write[2] = f'{rate:.0%}'
+            writer.writerow(row_to_write)
+
+        writer.writerow(['', '', 'Total Assessed', f'${projection_data["federal_income_tax_assessed"]:,.2f}', '', '', ''])
+        writer.writerow([])
         
-        if taxable_income > prev_bracket:
-            bracket_tax = calculate_tax_brackets(taxable_income) - calculate_tax_brackets(prev_bracket)
-            writer.writerow(['', f'${prev_bracket:,}', f'{int(TAX_BRACKETS_2025[-1][1]*100)}%', f'${bracket_tax:,.2f}', '', '', ''])
-        
-        writer.writerow(['', '', 'Total Assessed', f'${federal_tax_assessed:,.2f}', '', '', ''])
-        writer.writerow(['', '', '', '', '', '', ''])
-        writer.writerow(['', '', '', '', '', f'${him_data["gross_pay"]:,.2f}', 'Gross pay'])
-        writer.writerow(['', '', '', '', '', '', ''])
-        writer.writerow(['', '', '', '', '', f'${him_data["fit_taxable_wages"]:,.2f}', 'Wages'])
-        writer.writerow(['', '', '', '', '', f'${him_data["medicare_wages"]:,.2f}', 'Medicare wages'])
-        writer.writerow(['', '', '', '', '', f'${him_data["ss_wages"]:,.2f}', 'SS wages'])
-        writer.writerow(['', '', '', '', '', '', ''])
         writer.writerow(['', '', '', '', '', 'HER', ''])
-        writer.writerow(['', '', '', '', '', f'${her_data["gross_pay"]:,.2f}', 'Gross pay YTD'])
-        writer.writerow(['', '', '', '', '', f'${her_data["fit_taxable_wages"]:,.2f}', 'Wages (should match W-2 to the penny)'])
-        writer.writerow(['', '', '', '', '', f'${her_data["ss_wages"]:,.2f}', 'SS wages'])
-        writer.writerow(['', '', '', '', '', f'${her_data["ss_tax_withheld"]:,.2f}', 'SS taxes'])
-        writer.writerow(['', '', '', '', '', f'${her_data["medicare_wages"]:,.2f}', 'Medicare wages'])
-        writer.writerow(['', '', '', '', '', f'${her_data["medicare_tax_withheld"]:,.2f}', 'Medicare tax withheld'])
-        writer.writerow(['', '', '', '', '', '', ''])
+        writer.writerow(['', '', '', '', '', 'Wages:', f'${projection_data["her_wages"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Fed Tax Withheld:', f'${projection_data["her_fed_withheld"]:,.2f}'])
+        writer.writerow([])
+        
         writer.writerow(['', '', '', '', '', 'TAXABLE INCOME', ''])
-        writer.writerow(['', '', '', '', '', f'${him_data["fit_taxable_wages"]:,.2f}', 'His wages per W-2'])
-        writer.writerow(['', '', '', '', '', f'${her_data["fit_taxable_wages"]:,.2f}', 'Her wages per W-2'])
-        writer.writerow(['', '', '', '', '', f'${combined_taxable_wages:,.2f}', 'Combined gross income'])
-        writer.writerow(['', '', '', '', '', f'-${STANDARD_DEDUCTION_2025:,.2f}', 'Standard deduction'])
-        writer.writerow(['', '', '', '', '', f'${taxable_income:,.2f}', 'Taxable income'])
-        writer.writerow(['', '', '', '', '', '', ''])
+        writer.writerow(['', '', '', '', '', 'His wages per W-2', f'${projection_data["him_wages"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Her wages per W-2', f'${projection_data["her_wages"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Combined gross income', f'${projection_data["combined_wages"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Standard deduction', f'-${projection_data["standard_deduction"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Taxable income', f'${projection_data["final_taxable_income"]:,.2f}'])
+        writer.writerow([])
+        
+        writer.writerow(['', '', '', '', '', 'MEDICARE TAXES OVER OR UNDERPAID', ''])
+        writer.writerow(['', '', '', '', '', 'Total medicare wages (his and hers)', f'${projection_data["combined_medicare_wages"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Total medicare taxes withheld', f'${projection_data["combined_medicare_withheld"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Total medicare taxes assessed', f'-${projection_data["total_medicare_taxes_assessed"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Refund on medicare taxes withheld (or amount owed if negative)', f'${projection_data["medicare_refund"]:,.2f}'])
+        writer.writerow([])
+        
         writer.writerow(['', '', '', '', '', 'TAX RETURN / REFUND PROJECTION', ''])
-        writer.writerow(['', '', '', '', '', f'-${federal_tax_assessed:,.2f}', 'Federal Income Tax (Taxable income applied to tax table)'])
-        writer.writerow(['', '', '', '', '', f'${him_data["federal_tax_withheld"]:,.2f}', 'His income tax withheld'])
-        writer.writerow(['', '', '', '', '', f'${her_data["federal_tax_withheld"]:,.2f}', 'Her income tax withheld'])
-        if ss_overpayment > 0:
-            writer.writerow(['', '', '', '', '', f'${ss_overpayment:,.2f}', 'Overpayment of SS from job switch'])
-        writer.writerow(['', '', '', '', '', f'${refund:,.2f}', 'Refund (or owed, if negative)'])
-    
-    print(f"\n{'='*60}")
-    print(f"Tax projection saved to {output_file}")
-    print(f"{'='*60}")
-    print(f"\nSummary:")
-    print(f"  Combined Taxable Wages: ${combined_taxable_wages:,.2f}")
-    print(f"  Taxable Income: ${taxable_income:,.2f}")
-    print(f"  Federal Tax Assessed: ${federal_tax_assessed:,.2f}")
-    print(f"  Total Withheld: ${total_withheld:,.2f}")
-    if ss_overpayment > 0:
-        print(f"  SS Overpayment: ${ss_overpayment:,.2f}")
-    print(f"  Refund/Owed: ${refund:,.2f}")
+        writer.writerow(['', '', '', '', '', 'Federal Income Tax', f'-${projection_data["federal_income_tax_assessed"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Additional Medicare Tax', f'${projection_data["medicare_refund"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Tentative tax per tax return', f'-${projection_data["tentative_tax_per_return"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'His income tax withheld', f'${projection_data["him_fed_withheld"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Her income tax withheld', f'${projection_data["her_fed_withheld"]:,.2f}'])
+        writer.writerow(['', '', '', '', '', 'Refund (or owed, if negative)', f'${projection_data["final_refund"]:,.2f}'])
+
+    print(f"\nSuccessfully generated tax projection CSV: {output_filename}")
 
 
 def main():
-    year = None
-    if len(sys.argv) > 1:
-        try:
-            year = int(sys.argv[1])
-        except ValueError:
-            print(f"Error: Invalid year: {sys.argv[1]}")
-            sys.exit(1)
+    if len(sys.argv) < 2:
+        print("Usage: python3 generate_tax_projection.py <year>")
+        sys.exit(1)
     
-    generate_tax_projection(year)
+    year = int(sys.argv[1])
+    
+    try:
+        tax_rules = load_tax_rules(year)
+        him_data = load_party_data(year, "him")
+        her_data = load_party_data(year, "her")
+        
+        him_wages = him_data["wages_tips_other_comp"]
+        her_wages = her_data["wages_tips_other_comp"]
+        combined_wages = him_wages + her_wages
+        
+        him_fed_withheld = him_data["federal_income_tax_withheld"]
+        her_fed_withheld = her_data["federal_income_tax_withheld"]
+        combined_fed_withheld = him_fed_withheld + her_fed_withheld
+        
+        him_medicare_wages = him_data.get("medicare_wages_and_tips", 0.0)
+        her_medicare_wages = her_data.get("medicare_wages_and_tips", 0.0)
+        combined_medicare_wages = him_medicare_wages + her_medicare_wages
 
+        him_medicare_withheld = him_data["medicare_tax_withheld"]
+        her_medicare_withheld = her_data["medicare_tax_withheld"]
+        combined_medicare_withheld = him_medicare_withheld + her_medicare_withheld
+        
+        mfj_rules = tax_rules["mfj"]
+        standard_deduction = mfj_rules["standard_deduction"]
+        tax_brackets = mfj_rules["tax_brackets"]
+        
+        additional_medicare_tax_threshold = tax_rules["additional_medicare_tax_threshold"]
+        
+        final_taxable_income = combined_wages - standard_deduction
+        
+        federal_income_tax_assessed = calculate_federal_income_tax(final_taxable_income, tax_brackets)
+        
+        additional_medicare_tax_amount = calculate_additional_medicare_tax_amount(combined_medicare_wages, additional_medicare_tax_threshold)
+
+        total_medicare_taxes_assessed = (combined_medicare_wages * 0.0145) + additional_medicare_tax_amount
+        medicare_refund = combined_medicare_withheld - total_medicare_taxes_assessed
+        
+        tentative_tax_per_return = federal_income_tax_assessed - medicare_refund
+
+        final_refund = combined_fed_withheld + medicare_refund - federal_income_tax_assessed
+        
+        projection_data = {
+            "year": year, 
+            "him_wages": him_wages, "her_wages": her_wages, "combined_wages": combined_wages,
+            "him_fed_withheld": him_fed_withheld, "her_fed_withheld": her_fed_withheld,
+            "combined_fed_withheld": combined_fed_withheld,
+            "combined_medicare_wages": combined_medicare_wages,
+            "combined_medicare_withheld": combined_medicare_withheld,
+            "standard_deduction": standard_deduction, 
+            "final_taxable_income": final_taxable_income,
+            "federal_income_tax_assessed": federal_income_tax_assessed, 
+            "tax_brackets": tax_brackets,
+            "additional_medicare_tax": additional_medicare_tax_amount,
+            "total_medicare_taxes_assessed": total_medicare_taxes_assessed,
+            "medicare_refund": medicare_refund,
+            "tentative_tax_per_return": tentative_tax_per_return,
+            "final_refund": final_refund
+        }
+
+        generate_csv_output(year, projection_data)
+        
+    except FileNotFoundError as e:
+        print(f"Error: {e}")
+        traceback.print_exc()
+        sys.exit(1)
+    except Exception as e:
+        print(f"An unexpected error occurred: {e}")
+        traceback.print_exc()
+        sys.exit(1)
 
 if __name__ == "__main__":
     main()
-

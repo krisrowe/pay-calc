@@ -1,0 +1,11 @@
+mfj:
+  standard_deduction: 29200
+  tax_brackets:
+    - { up_to: 23200, rate: 0.10 }
+    - { up_to: 94300, rate: 0.12 }
+    - { up_to: 201050, rate: 0.22 }
+    - { up_to: 383900, rate: 0.24 }
+    - { up_to: 487450, rate: 0.32 }
+    - { up_to: 731200, rate: 0.35 }
+    - { over: 731200, rate: 0.37 }
+additional_medicare_tax_threshold: 250000.00
