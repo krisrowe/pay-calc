@@ -560,21 +560,28 @@ def generate_noncash_bonus_summary(stubs: List[Dict[str, Any]]) -> Dict[str, Any
     - Tax Gross-Up in Earnings (covers taxes so employee gets full value)
 
     Both amounts are added to gross income for W-2 purposes.
+    Combines across all employer segments.
     """
     if not stubs:
         return {}
 
-    last_stub = stubs[-1]
+    # Combine across all employer segments
+    segments = detect_employer_segments(stubs)
     prize_gift = 0.0
     tax_gross_up = 0.0
 
-    for earning in last_stub.get("earnings", []):
-        etype = earning.get("type", "").lower()
-        ytd = earning.get("ytd_amount", 0)
-        if "prize" in etype and "gift" in etype:
-            prize_gift = ytd
-        elif "tax gross" in etype or "gross-up" in etype or "grossup" in etype:
-            tax_gross_up = ytd
+    for segment in segments:
+        if not segment:
+            continue
+        last_stub = segment[-1]
+
+        for earning in last_stub.get("earnings", []):
+            etype = earning.get("type", "").lower()
+            ytd = earning.get("ytd_amount", 0)
+            if "prize" in etype and "gift" in etype:
+                prize_gift += ytd
+            elif "tax gross" in etype or "gross-up" in etype or "grossup" in etype:
+                tax_gross_up += ytd
 
     if prize_gift == 0 and tax_gross_up == 0:
         return {}
@@ -681,11 +688,17 @@ def generate_projection(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any
                 "projected": stock_projection
             }
 
-    # Get actual YTD totals from last stub
-    actual_ytd = last_stub.get("pay_summary", {}).get("ytd", {})
-    actual_gross = actual_ytd.get("gross", 0)
-    actual_fit_taxable = actual_ytd.get("fit_taxable_wages", 0)
-    actual_taxes = actual_ytd.get("taxes", 0)
+    # Get actual YTD totals combined across all employer segments
+    segments = detect_employer_segments(stubs)
+    actual_gross = 0.0
+    actual_fit_taxable = 0.0
+    actual_taxes = 0.0
+    for segment in segments:
+        if segment:
+            seg_ytd = segment[-1].get("pay_summary", {}).get("ytd", {})
+            actual_gross += seg_ytd.get("gross", 0)
+            actual_fit_taxable += seg_ytd.get("fit_taxable_wages", 0)
+            actual_taxes += seg_ytd.get("taxes", 0)
 
     # Calculate projected totals
     total_projection = regular_projection + stock_projection
@@ -720,29 +733,36 @@ def generate_projection(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any
 
 
 def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """Generate detailed YTD breakdown from the last stub."""
+    """Generate detailed YTD breakdown combining all employer segments."""
     if not stubs:
         return {}
 
-    last_stub = stubs[-1]
+    # Get all employer segments (YTD resets at employer changes)
+    segments = detect_employer_segments(stubs)
 
-    # Aggregate earnings by type
+    # Aggregate earnings and taxes across all segments
     earnings_breakdown = {}
-    for earning in last_stub.get("earnings", []):
-        etype = earning.get("type", "Unknown")
-        ytd = earning.get("ytd_amount", 0)
-        if ytd > 0:
-            earnings_breakdown[etype] = ytd
-
-    # Aggregate taxes
     taxes_breakdown = {}
-    taxes = last_stub.get("taxes", {})
-    for tax_name, tax_data in taxes.items():
-        ytd_withheld = tax_data.get("ytd_withheld", 0)
-        if ytd_withheld > 0:
-            # Format tax name nicely
-            display_name = tax_name.replace("_", " ").title()
-            taxes_breakdown[display_name] = ytd_withheld
+
+    for segment in segments:
+        if not segment:
+            continue
+        last_stub = segment[-1]
+
+        # Add earnings from this segment's final YTD
+        for earning in last_stub.get("earnings", []):
+            etype = earning.get("type", "Unknown")
+            ytd = earning.get("ytd_amount", 0)
+            if ytd > 0:
+                earnings_breakdown[etype] = earnings_breakdown.get(etype, 0) + ytd
+
+        # Add taxes from this segment's final YTD
+        taxes = last_stub.get("taxes", {})
+        for tax_name, tax_data in taxes.items():
+            ytd_withheld = tax_data.get("ytd_withheld", 0)
+            if ytd_withheld > 0:
+                display_name = tax_name.replace("_", " ").title()
+                taxes_breakdown[display_name] = taxes_breakdown.get(display_name, 0) + ytd_withheld
 
     return {
         "earnings": earnings_breakdown,
@@ -778,25 +798,35 @@ def generate_summary(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any]:
         if abs(first_ytd - first_current) <= 0.01:
             first_is_first_of_year = True
 
-    # Get final YTD numbers from last stub
-    last_stub = stubs[-1]
-    final_ytd = last_stub.get("pay_summary", {}).get("ytd", {})
+    # Calculate combined YTD across all employer segments
+    # (YTD resets when employer changes, so we sum the final YTD from each segment)
+    segments = detect_employer_segments(stubs)
+    combined_ytd = {
+        "gross": 0.0,
+        "fit_taxable_wages": 0.0,
+        "taxes": 0.0,
+        "net_pay": 0.0,
+    }
+    for segment in segments:
+        if segment:
+            last_seg_stub = segment[-1]
+            seg_ytd = last_seg_stub.get("pay_summary", {}).get("ytd", {})
+            combined_ytd["gross"] += seg_ytd.get("gross", 0)
+            combined_ytd["fit_taxable_wages"] += seg_ytd.get("fit_taxable_wages", 0)
+            combined_ytd["taxes"] += seg_ytd.get("taxes", 0)
+            combined_ytd["net_pay"] += seg_ytd.get("net_pay", 0)
 
     return {
         "year": year,
         "total_stubs": len(stubs),
         "stubs_by_type": type_counts,
         "first_stub_is_first_of_year": first_is_first_of_year,
+        "employer_segments": len(segments),
         "date_range": {
             "start": min(valid_dates).strftime("%Y-%m-%d") if valid_dates else None,
             "end": max(valid_dates).strftime("%Y-%m-%d") if valid_dates else None,
         },
-        "final_ytd": {
-            "gross": final_ytd.get("gross", 0),
-            "fit_taxable_wages": final_ytd.get("fit_taxable_wages", 0),
-            "taxes": final_ytd.get("taxes", 0),
-            "net_pay": final_ytd.get("net_pay", 0),
-        }
+        "final_ytd": combined_ytd
     }
 
 
