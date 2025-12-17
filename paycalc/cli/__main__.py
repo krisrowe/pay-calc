@@ -41,12 +41,13 @@ cli.add_command(config_group)
 @cli.command("w2-extract")
 @click.argument("year")
 @click.option("--cache", is_flag=True, help="Cache downloaded files locally for reuse.")
-def w2_extract(year, cache):
+@click.option("--output-dir", "-o", type=click.Path(), help="Output directory for W-2 JSON files (default: XDG data dir)")
+def w2_extract(year, cache, output_dir):
     """Extract W-2 data from PDFs stored in Google Drive.
 
     Downloads W-2 PDFs and manual JSON files from the configured
     Google Drive folder for YEAR, parses them, and outputs
-    aggregated W-2 data to XDG data directory.
+    aggregated W-2 data to XDG data directory or --output-dir.
     """
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
@@ -61,7 +62,8 @@ def w2_extract(year, cache):
     from collections import defaultdict
     import json
 
-    data_dir = get_data_path()
+    data_dir = Path(output_dir) if output_dir else get_data_path()
+    data_dir.mkdir(parents=True, exist_ok=True)
 
     try:
         config = load_config()
@@ -172,26 +174,29 @@ def w2_extract(year, cache):
 
 @cli.command("tax-projection")
 @click.argument("year")
-def tax_projection(year):
+@click.option("--output", "-o", type=click.Path(), help="Output CSV path (default: XDG data dir)")
+@click.option("--w2-dir", type=click.Path(exists=True), help="Directory containing W-2 JSON files (default: XDG data dir)")
+def tax_projection(year, output, w2_dir):
     """Generate tax projection from W-2 data.
 
     Reads W-2 data from XDG data directory and calculates federal
     income tax, medicare taxes, and projected refund or amount owed.
 
-    Output is written to XDG data directory.
+    Output is written to XDG data directory by default, or to --output path.
     """
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
     from paycalc.sdk import generate_tax_projection, get_data_path
 
-    data_dir = get_data_path()
+    data_path = Path(w2_dir) if w2_dir else get_data_path()
+    output_path = Path(output) if output else None
 
     try:
-        output_path = generate_tax_projection(year)
-        click.echo(f"Loading W-2 data for him from {data_dir / f'{year}_him_w2_forms.json'}...")
-        click.echo(f"Loading W-2 data for her from {data_dir / f'{year}_her_w2_forms.json'}...")
-        click.echo(f"\nSuccessfully generated tax projection CSV: {output_path}")
+        click.echo(f"Loading W-2 data for him from {data_path / f'{year}_him_w2_forms.json'}...")
+        click.echo(f"Loading W-2 data for her from {data_path / f'{year}_her_w2_forms.json'}...")
+        result_path = generate_tax_projection(year, data_dir=data_path, output_path=output_path)
+        click.echo(f"\nSuccessfully generated tax projection CSV: {result_path}")
 
     except FileNotFoundError as e:
         raise click.ClickException(str(e))
