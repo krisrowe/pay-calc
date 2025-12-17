@@ -17,6 +17,7 @@ pay-calc --help
 pay-calc w2-extract 2024 --cache      # Extract W-2 data from Google Drive
 pay-calc tax-projection 2024          # Generate tax projection
 pay-calc pay-analysis 2025 --cache    # Process pay stubs (single party)
+pay-calc pay-projection 2025          # Project year-end (requires pay-analysis first)
 pay-calc household-ytd 2025           # Aggregate YTD across all parties
 pay-calc config path                  # Show config location
 pay-calc config show                  # Show current config
@@ -29,6 +30,7 @@ pay-calc config show                  # Show current config
 | `w2-extract` | Parse W-2 PDFs from Drive | W-2 PDFs, manual JSON | `YYYY_party_w2_forms.json` | Single |
 | `tax-projection` | Calculate tax liability | W-2 JSON (or YTD JSON fallback) | `YYYY_tax_projection.csv` | Both (combined) |
 | `pay-analysis` | Validate pay stubs, report YTD | Pay stub PDFs from Drive | `YYYY_pay_stubs_full.json` | Single |
+| `pay-projection` | Project year-end totals | `YYYY_pay_stubs_full.json` | Projection report | Single |
 | `household-ytd` | Aggregate YTD across parties | `YYYY_party_pay_stubs.json` | `YYYY_party_ytd.json` | Both (per-party + combined) |
 
 ### Command Details
@@ -64,7 +66,27 @@ We need source-of-truth data from pay stubs showing when money was earned and in
 
 **Why single-party**: This is personal finance tracking, not joint tax calculation. Each person has their own pay stubs, 401k accounts, stock grants, and investment timing. The `household-ytd` and `tax-projection` commands handle the joint/combined view for tax purposes.
 
-Note: Currently outputs `_pay_stubs_full.json` format not consumed by other commands (see Future Considerations)
+Outputs `YYYY_pay_stubs_full.json` which serves as input for `pay-projection`.
+
+**`pay-projection`** - Year-end projection from partial year data
+
+**Prerequisite**: Requires `pay-analysis` output - run `pay-analysis` first.
+
+Reads the JSON output from `pay-analysis` and projects year-end totals:
+- Analyzes regular pay cadence to project remaining pay periods
+- Detects stock vesting pattern to project remaining vests
+- Projects 401k contributions to annual limit
+- Estimates tax withholding based on effective rate
+
+Use for mid-year tax planning when W-2 data is not yet available.
+
+```bash
+# Step 1: Run pay-analysis to generate the JSON
+pay-calc pay-analysis 2025 --cache
+
+# Step 2: Run pay-projection using that output
+pay-calc pay-projection 2025
+```
 
 **`household-ytd`** - Multi-party YTD aggregation
 - Reads local pay stub JSON files for all parties

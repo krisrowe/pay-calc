@@ -255,6 +255,73 @@ def pay_analysis(year, cache, through_date):
         raise click.ClickException(f"Pay projection failed with exit code {e.returncode}")
 
 
+@cli.command("pay-projection")
+@click.argument("year")
+@click.option("--input", "-i", "input_file", type=click.Path(exists=True), help="Input JSON from pay-analysis (default: XDG data dir)")
+def pay_projection(year, input_file):
+    """Project year-end totals from partial year pay data.
+
+    Reads pay stub data from pay-analysis output and projects year-end
+    totals based on observed pay patterns (regular pay cadence, stock
+    vesting schedule).
+
+    \b
+    Prerequisite: Run pay-analysis first to generate the input file.
+        pay-calc pay-analysis <year> --cache
+
+    \b
+    Input:  YYYY_pay_stubs_full.json (from pay-analysis)
+    Output: Year-end projection report
+
+    Use this for mid-year tax planning when full W-2 data is not yet available.
+
+    YEAR should be a 4-digit year (e.g., 2025).
+    """
+    if not year.isdigit() or len(year) != 4:
+        raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
+
+    import json
+    from paycalc.sdk import get_data_path
+
+    # Determine input file path
+    if input_file:
+        input_path = Path(input_file)
+    else:
+        input_path = get_data_path() / f"{year}_pay_stubs_full.json"
+
+    # Check if input file exists with clear guidance
+    if not input_path.exists():
+        click.echo(f"Error: Input file not found: {input_path}", err=True)
+        click.echo("", err=True)
+        click.echo("Run pay-analysis first to generate the required input:", err=True)
+        click.echo(f"    pay-calc pay-analysis {year} --cache", err=True)
+        click.echo("", err=True)
+        click.echo("Then run pay-projection again:", err=True)
+        click.echo(f"    pay-calc pay-projection {year}", err=True)
+        raise SystemExit(1)
+
+    # Load the pay stub data
+    with open(input_path, "r") as f:
+        data = json.load(f)
+
+    stubs = data.get("stubs", [])
+    if not stubs:
+        raise click.ClickException(f"No pay stub data found in {input_path}")
+
+    # Import and run projection
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from process_year import generate_projection, print_projection_report
+
+    projection = generate_projection(stubs, year)
+
+    if not projection:
+        click.echo(f"No projection generated - year may be complete or insufficient data.")
+        return
+
+    # Print projection report (pass full data for ytd_breakdown, 401k info)
+    print_projection_report(projection, data)
+
+
 @cli.command("household-ytd")
 @click.argument("year")
 @click.option("--party", type=click.Choice(["him", "her"]), help="Process only one party (default: both)")
