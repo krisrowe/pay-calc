@@ -269,15 +269,21 @@ def profile_get(key):
     """Get a profile configuration value.
 
     KEY is a dot-notation path like 'drive.w2_pay_records.2024'
+
+    For scalar values, outputs the plain value.
+    For complex values (dicts/lists), use 'profile show' instead.
     """
     value = get_profile_value(key)
     if value is None:
         raise click.ClickException(f"Key '{key}' not found in profile")
 
     if isinstance(value, (dict, list)):
-        click.echo(yaml.dump(value, default_flow_style=False))
-    else:
-        click.echo(value)
+        raise click.ClickException(
+            f"Key '{key}' is a complex value. Use 'pay-calc profile show' to view, "
+            f"or 'pay-calc profile edit' to modify."
+        )
+
+    click.echo(value)
 
 
 @profile.command("set")
@@ -287,7 +293,9 @@ def profile_set(key, value):
     """Set a profile configuration value.
 
     KEY is a dot-notation path like 'drive.w2_pay_records.2024'
-    VALUE is the value to set (strings, numbers supported)
+    VALUE is the value to set (string or number)
+
+    For complex values (objects/arrays), use 'profile edit' instead.
 
     Examples:
         pay-calc profile set drive.pay_stubs_folder_id YOUR_FOLDER_ID
