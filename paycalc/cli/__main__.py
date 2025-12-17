@@ -50,8 +50,17 @@ def w2_extract(year, cache, output_dir):
     Google Drive folder for YEAR, parses them, and outputs
     aggregated W-2 data to XDG data directory or --output-dir.
     """
+    from paycalc.sdk import validate_profile, ProfileNotFoundError
+
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
+
+    # Validate profile has required configuration
+    try:
+        validation = validate_profile()
+        validation.require_feature("w2_extract")
+    except (ProfileNotFoundError, ConfigNotFoundError) as e:
+        raise click.ClickException(str(e))
 
     from drive_sync import sync_w2_pay_records, load_config
     from extract_w2 import (
@@ -230,8 +239,17 @@ def pay_analysis(year, cache, through_date):
 
     YEAR should be a 4-digit year (e.g., 2025).
     """
+    from paycalc.sdk import validate_profile, ProfileNotFoundError
+
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
+
+    # Validate profile has required configuration
+    try:
+        validation = validate_profile()
+        validation.require_feature("pay_stubs")
+    except (ProfileNotFoundError, ConfigNotFoundError) as e:
+        raise click.ClickException(str(e))
 
     if through_date:
         # Validate date format

@@ -470,7 +470,7 @@ class ProfileValidationResult:
                 f"Profile not configured for '{feature}'.\n\n"
                 f"Missing:\n  - {missing_str}\n\n"
                 f"Profile: {self.location_path}\n"
-                f"Edit with: pay-calc profile edit"
+                f"View with: pay-calc profile show"
             )
 
 

@@ -222,21 +222,41 @@ def profile():
 @profile.command("show")
 def profile_show():
     """Show the active profile, its location, and feature readiness."""
+    from paycalc.sdk import load_profile
+
+    # Get profile path (doesn't require it to exist)
+    profile_path = get_profile_path(require_exists=False)
+
+    # Determine location type
+    settings = load_settings()
+    custom_profile_setting = settings.get("profile")
+    if custom_profile_setting:
+        location_type = "custom"
+    elif profile_path.exists():
+        location_type = "central"
+    else:
+        location_type = "none"
+
+    location_label = {
+        "central": "central (default)",
+        "custom": "custom",
+        "none": "not created",
+    }.get(location_type, location_type)
+
+    click.echo(f"Profile: {profile_path}")
+    click.echo(f"Location: {location_label}")
+
+    if not profile_path.exists():
+        click.echo()
+        click.echo("Profile does not exist yet. Create with:")
+        click.echo("  pay-calc profile set drive.pay_stubs_folder_id YOUR_FOLDER_ID")
+        return
+
+    # Profile exists - show validation
     try:
         validation = validate_profile()
 
-        # Location info
-        location_label = {
-            "central": "central (default)",
-            "custom": "custom",
-            "legacy": "legacy (migrate recommended)",
-        }.get(validation.location_type, validation.location_type)
-
-        click.echo(f"Profile: {validation.location_path}")
-        click.echo(f"Location: {location_label}")
         click.echo()
-
-        # Feature readiness
         click.echo("Feature Readiness:")
         for feature, status in validation.features.items():
             icon = "+" if status["ready"] else "-"
@@ -328,84 +348,6 @@ def profile_set(key, value):
     profile_file = set_profile_value(key, parsed_value)
     click.echo(f"Set {key} = {parsed_value}")
     click.echo(f"Saved to: {profile_file}")
-
-
-@profile.command("init")
-@click.option("--path", "profile_path", type=click.Path(), help="Create profile at custom path")
-def profile_init(profile_path):
-    """Initialize a new profile configuration.
-
-    Creates a profile.yaml with default structure.
-    Use --path to create in a custom location (e.g., your config repo).
-
-    Examples:
-        pay-calc profile init
-        pay-calc profile init --path ~/repos/my-config/pay-calc/profile.yaml
-    """
-    from pathlib import Path
-
-    if profile_path:
-        target_path = Path(profile_path).expanduser().resolve()
-    else:
-        target_path = get_config_dir() / "profile.yaml"
-
-    if target_path.exists():
-        raise click.ClickException(f"Profile already exists at {target_path}")
-
-    target_path.parent.mkdir(parents=True, exist_ok=True)
-
-    default_profile = {
-        "drive": {
-            "pay_stubs_folder_id": "",
-            "w2_pay_records": {},
-            "output_folder_id": "",
-        },
-        "parties": {
-            "him": {
-                "companies": [],
-            },
-            "her": {
-                "companies": [],
-            },
-        },
-    }
-
-    with open(target_path, "w") as f:
-        yaml.dump(default_profile, f, default_flow_style=False, sort_keys=False)
-
-    click.echo(f"Created profile at: {target_path}")
-
-    # If custom path, offer to set it in settings
-    if profile_path:
-        click.echo()
-        click.echo("To use this profile, run:")
-        click.echo(f"  pay-calc config set-profile {target_path}")
-    else:
-        click.echo()
-        click.echo("Next steps:")
-        click.echo("  pay-calc profile set drive.pay_stubs_folder_id YOUR_FOLDER_ID")
-        click.echo("  pay-calc profile set drive.w2_pay_records.2024 FOLDER_ID")
-
-
-@profile.command("edit")
-def profile_edit():
-    """Open profile configuration in default editor."""
-    import os
-    import subprocess
-
-    try:
-        prof_path = get_profile_path(require_exists=True)
-    except ProfileNotFoundError as e:
-        raise click.ClickException(str(e))
-
-    editor = os.environ.get("EDITOR", os.environ.get("VISUAL", "nano"))
-
-    try:
-        subprocess.run([editor, str(prof_path)], check=True)
-    except FileNotFoundError:
-        raise click.ClickException(f"Editor '{editor}' not found. Set EDITOR env var.")
-    except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Editor exited with code {e.returncode}")
 
 
 @profile.command("import")
