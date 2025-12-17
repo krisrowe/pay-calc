@@ -14,6 +14,9 @@ from .config import (
     get_profile_value,
     set_profile_value,
     ProfileNotFoundError,
+    # Profile validation
+    validate_profile,
+    ProfileValidationResult,
     # Legacy (deprecated, but kept for compatibility)
     get_config_path,
     load_config,
@@ -51,6 +54,9 @@ __all__ = [
     "get_profile_value",
     "set_profile_value",
     "ProfileNotFoundError",
+    # Profile validation
+    "validate_profile",
+    "ProfileValidationResult",
     # Legacy (deprecated)
     "get_config_path",
     "load_config",

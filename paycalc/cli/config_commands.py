@@ -24,6 +24,8 @@ from paycalc.sdk import (
     get_profile_value,
     set_profile_value,
     ProfileNotFoundError,
+    # Profile validation
+    validate_profile,
     # XDG paths
     get_cache_path,
     get_data_path,
@@ -216,15 +218,46 @@ def profile():
 
 
 @profile.command("show")
-def profile_show():
-    """Show the active profile and its contents."""
+@click.option("--no-contents", is_flag=True, help="Show only location and health, not profile contents")
+def profile_show(no_contents):
+    """Show the active profile, its location, and feature readiness."""
     try:
-        profile_path = get_profile_path(require_exists=True)
-        prof = load_profile(require_exists=True)
+        validation = validate_profile()
 
-        click.echo(f"# Profile: {profile_path}")
+        # Location info
+        location_label = {
+            "central": "central (default)",
+            "custom": "custom",
+            "legacy": "legacy (migrate recommended)",
+        }.get(validation.location_type, validation.location_type)
+
+        click.echo(f"Profile: {validation.location_path}")
+        click.echo(f"Location: {location_label}")
         click.echo()
-        click.echo(yaml.dump(prof, default_flow_style=False, sort_keys=False))
+
+        # Feature readiness
+        click.echo("Feature Readiness:")
+        for feature, status in validation.features.items():
+            icon = "+" if status["ready"] else "-"
+            click.echo(f"  {icon} {feature}: {status['message']}")
+
+        # Show missing items if any
+        all_missing = []
+        for feature, status in validation.features.items():
+            if status["missing"]:
+                all_missing.extend(status["missing"])
+
+        if all_missing:
+            click.echo()
+            click.echo("Missing configuration:")
+            for item in sorted(set(all_missing)):
+                click.echo(f"  - {item}")
+
+        # Profile contents
+        if not no_contents:
+            click.echo()
+            click.echo("---")
+            click.echo(yaml.dump(validation.profile, default_flow_style=False, sort_keys=False))
 
     except ProfileNotFoundError as e:
         raise click.ClickException(str(e))
@@ -360,3 +393,118 @@ def profile_path_cmd():
         click.echo(prof_path)
     except ProfileNotFoundError as e:
         raise click.ClickException(str(e))
+
+
+@profile.command("import")
+@click.argument("source_path", type=click.Path(exists=True))
+@click.option("--force", is_flag=True, help="Overwrite existing central profile")
+def profile_import(source_path, force):
+    """Import a profile from an external location into central config.
+
+    Copies SOURCE_PATH to ~/.config/pay-calc/profile.yaml and clears
+    any custom profile path in settings.json so the central location is used.
+
+    Use this when you want to consolidate a profile from a config repo
+    into the standard XDG location.
+
+    Examples:
+        pay-calc profile import ~/repos/my-config/pay-calc/profile.yaml
+        pay-calc profile import ./profile.yaml --force
+    """
+    from pathlib import Path
+    import shutil
+
+    source = Path(source_path).expanduser().resolve()
+    target = get_config_dir() / "profile.yaml"
+
+    # Validate source is YAML
+    if source.suffix not in (".yaml", ".yml"):
+        raise click.ClickException(f"Source must be a YAML file: {source}")
+
+    # Check target
+    if target.exists() and not force:
+        raise click.ClickException(
+            f"Central profile already exists: {target}\n"
+            f"Use --force to overwrite, or 'profile export' to back it up first."
+        )
+
+    # Validate source is valid YAML
+    try:
+        with open(source, "r") as f:
+            yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise click.ClickException(f"Invalid YAML in source file: {e}")
+
+    # Copy file
+    target.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(source, target)
+    click.echo(f"Copied: {source}")
+    click.echo(f"    to: {target}")
+
+    # Clear custom profile path if set
+    settings = load_settings()
+    if settings.get("profile"):
+        old_path = settings["profile"]
+        del settings["profile"]
+        save_settings(settings)
+        click.echo()
+        click.echo(f"Cleared custom profile path from settings.json")
+        click.echo(f"  (was: {old_path})")
+
+    click.echo()
+    click.echo(f"Active profile is now: {target}")
+
+
+@profile.command("export")
+@click.argument("dest_path", type=click.Path())
+@click.option("--force", is_flag=True, help="Overwrite existing destination file")
+@click.option("--set-path", is_flag=True, help="Also set this as the active profile path")
+def profile_export(dest_path, force, set_path):
+    """Export the active profile to an external location.
+
+    Copies the currently active profile.yaml to DEST_PATH.
+    Use this to back up your profile or move it to a config repo.
+
+    With --set-path, also updates settings.json to point to the
+    new location, so pay-calc will use the exported copy going forward.
+
+    Examples:
+        pay-calc profile export ~/repos/my-config/pay-calc/profile.yaml
+        pay-calc profile export ./backup-profile.yaml
+        pay-calc profile export ~/config-repo/profile.yaml --set-path
+    """
+    from pathlib import Path
+    import shutil
+
+    dest = Path(dest_path).expanduser().resolve()
+
+    # Get current profile
+    try:
+        source = get_profile_path(require_exists=True)
+    except ProfileNotFoundError as e:
+        raise click.ClickException(str(e))
+
+    # Check if source and dest are the same
+    if source.resolve() == dest.resolve():
+        raise click.ClickException(f"Source and destination are the same file: {source}")
+
+    # Check destination
+    if dest.exists() and not force:
+        raise click.ClickException(
+            f"Destination already exists: {dest}\n"
+            f"Use --force to overwrite."
+        )
+
+    # Create parent directories
+    dest.parent.mkdir(parents=True, exist_ok=True)
+
+    # Copy file
+    shutil.copy2(source, dest)
+    click.echo(f"Exported: {source}")
+    click.echo(f"      to: {dest}")
+
+    # Optionally set as active profile
+    if set_path:
+        set_setting("profile", str(dest))
+        click.echo()
+        click.echo(f"Updated settings.json to use: {dest}")

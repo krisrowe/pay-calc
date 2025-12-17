@@ -413,3 +413,269 @@ def ensure_config_exists() -> bool:
         return bool(profile)
     except ProfileNotFoundError:
         return False
+
+
+# =============================================================================
+# Profile validation and health assessment
+# =============================================================================
+
+class ProfileValidationResult:
+    """Result of profile validation with feature readiness status."""
+
+    def __init__(
+        self,
+        location_type: str,
+        location_path: Path,
+        features: dict,
+        profile: dict,
+    ):
+        """
+        Args:
+            location_type: "central", "custom", or "legacy"
+            location_path: Path to the profile file
+            features: Dict of feature_name -> dict with keys:
+                      ready (bool), missing (list), message (str)
+            profile: The loaded profile dict
+        """
+        self.location_type = location_type
+        self.location_path = location_path
+        self.features = features
+        self.profile = profile
+
+    @property
+    def all_ready(self) -> bool:
+        """True if all features are ready."""
+        return all(f["ready"] for f in self.features.values())
+
+    def is_ready(self, feature: str) -> bool:
+        """Check if a specific feature is ready."""
+        return self.features.get(feature, {}).get("ready", False)
+
+    def require_feature(self, feature: str) -> None:
+        """Raise exception if feature is not ready (for fail-fast).
+
+        Args:
+            feature: Feature name to check
+
+        Raises:
+            ConfigNotFoundError: If feature is not ready
+        """
+        if feature not in self.features:
+            raise ConfigNotFoundError(f"Unknown feature: {feature}")
+
+        status = self.features[feature]
+        if not status["ready"]:
+            missing_str = "\n  - ".join(status["missing"])
+            raise ConfigNotFoundError(
+                f"Profile not configured for '{feature}'.\n\n"
+                f"Missing:\n  - {missing_str}\n\n"
+                f"Profile: {self.location_path}\n"
+                f"Edit with: pay-calc profile edit"
+            )
+
+
+def validate_profile(profile: Optional[dict] = None) -> ProfileValidationResult:
+    """Validate profile and check feature readiness.
+
+    Args:
+        profile: Optional profile dict (loads from file if not provided)
+
+    Returns:
+        ProfileValidationResult with location info and feature status
+
+    Raises:
+        ProfileNotFoundError: If no profile exists
+    """
+    # Determine location type
+    config_dir = get_config_dir()
+    settings = load_settings()
+    custom_profile_setting = settings.get("profile")
+
+    if custom_profile_setting:
+        location_type = "custom"
+        location_path = Path(custom_profile_setting)
+    else:
+        # Check which file exists
+        profile_path = config_dir / PROFILE_FILENAME
+        legacy_path = config_dir / LEGACY_CONFIG_FILENAME
+
+        if profile_path.exists():
+            location_type = "central"
+            location_path = profile_path
+        elif legacy_path.exists():
+            location_type = "legacy"
+            location_path = legacy_path
+        else:
+            location_type = "central"
+            location_path = profile_path
+
+    # Load profile if not provided
+    if profile is None:
+        profile = load_profile(require_exists=True)
+
+    # Validate each feature
+    features = {}
+
+    # Feature: pay_stubs (pay-analysis command)
+    features["pay_stubs"] = _validate_pay_stubs(profile)
+
+    # Feature: w2_extract (w2-extract command)
+    features["w2_extract"] = _validate_w2_extract(profile)
+
+    # Feature: tax_projection (tax-projection command)
+    features["tax_projection"] = _validate_tax_projection(profile)
+
+    # Feature: employers (employer identification)
+    features["employers"] = _validate_employers(profile)
+
+    return ProfileValidationResult(
+        location_type=location_type,
+        location_path=location_path,
+        features=features,
+        profile=profile,
+    )
+
+
+def _get_all_employers(profile: dict) -> list:
+    """Extract all employers from profile (handles both schema variants).
+
+    Supports:
+    - employers[] (flat list)
+    - parties.<party>.companies[] (nested in parties)
+    """
+    employers = []
+
+    # Check top-level employers[]
+    employers.extend(profile.get("employers", []))
+
+    # Check parties.<party>.companies[]
+    parties = profile.get("parties", {})
+    for party_name, party_data in parties.items():
+        if isinstance(party_data, dict):
+            companies = party_data.get("companies", [])
+            for company in companies:
+                # Add party info if not present
+                emp = dict(company)
+                emp.setdefault("party", party_name)
+                employers.append(emp)
+
+    return employers
+
+
+def _validate_pay_stubs(profile: dict) -> dict:
+    """Validate configuration for pay stub processing."""
+    missing = []
+
+    # Check drive.pay_stubs_folder_id
+    drive = profile.get("drive", {})
+    folder_id = drive.get("pay_stubs_folder_id")
+    if not folder_id:
+        missing.append("drive.pay_stubs_folder_id (Google Drive folder for pay stubs)")
+
+    # Check employers are configured (either schema)
+    employers = _get_all_employers(profile)
+    if not employers:
+        missing.append("employers[] or parties.<party>.companies[] (employer configurations)")
+
+    if missing:
+        return {
+            "ready": False,
+            "missing": missing,
+            "message": "Pay stub processing requires Drive folder and employer config",
+        }
+
+    return {
+        "ready": True,
+        "missing": [],
+        "message": f"Ready ({len(employers)} employer(s) configured)",
+    }
+
+
+def _validate_w2_extract(profile: dict) -> dict:
+    """Validate configuration for W-2 extraction."""
+    missing = []
+
+    # Check drive.w2_pay_records has at least one year
+    drive = profile.get("drive", {})
+    w2_records = drive.get("w2_pay_records", {})
+    if not w2_records:
+        missing.append("drive.w2_pay_records.<year> (Drive folder IDs by year)")
+
+    # Check parties are configured
+    parties = profile.get("parties", {})
+    if not parties:
+        missing.append("parties (him/her party definitions)")
+
+    if missing:
+        return {
+            "ready": False,
+            "missing": missing,
+            "message": "W-2 extraction requires Drive folders and party config",
+        }
+
+    years = list(w2_records.keys())
+    return {
+        "ready": True,
+        "missing": [],
+        "message": f"Ready (years: {', '.join(years)})",
+    }
+
+
+def _validate_tax_projection(profile: dict) -> dict:
+    """Validate configuration for tax projection."""
+    missing = []
+
+    # Check parties are configured
+    parties = profile.get("parties", {})
+    if "him" not in parties and "her" not in parties:
+        missing.append("parties.him and/or parties.her (party definitions)")
+
+    if missing:
+        return {
+            "ready": False,
+            "missing": missing,
+            "message": "Tax projection requires party configuration",
+        }
+
+    party_names = [p for p in ["him", "her"] if p in parties]
+    return {
+        "ready": True,
+        "missing": [],
+        "message": f"Ready (parties: {', '.join(party_names)})",
+    }
+
+
+def _validate_employers(profile: dict) -> dict:
+    """Validate employer configurations."""
+    employers = _get_all_employers(profile)
+
+    if not employers:
+        return {
+            "ready": False,
+            "missing": ["employers[] or parties.<party>.companies[] (employer configurations)"],
+            "message": "No employers configured",
+        }
+
+    # Check each employer has required fields
+    issues = []
+    for i, emp in enumerate(employers):
+        if not emp.get("name"):
+            issues.append(f"employer[{i}].name")
+        if not emp.get("party"):
+            issues.append(f"employer[{i}].party")
+        # Accept keywords (old schema) or content_patterns/file_patterns (new schema)
+        if not emp.get("content_patterns") and not emp.get("file_patterns") and not emp.get("keywords"):
+            issues.append(f"employer[{i}] needs keywords, content_patterns, or file_patterns")
+
+    if issues:
+        return {
+            "ready": False,
+            "missing": issues,
+            "message": f"Employer config incomplete ({len(issues)} issue(s))",
+        }
+
+    return {
+        "ready": True,
+        "missing": [],
+        "message": f"Ready ({len(employers)} employer(s))",
+    }
