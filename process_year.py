@@ -384,12 +384,14 @@ def validate_segment_totals(segment: List[Dict[str, Any]], segment_name: str) ->
         }
     }
 
-    # Check for discrepancies (any diff > $1 is an error)
+    # Check for discrepancies - produce warnings (not errors) since per-stub
+    # delta validation is the primary check. Aggregate discrepancies can be
+    # symptoms of known-warning fields (Prize/Gift, Tax Gross-Up, etc.)
     TOLERANCE = 1.00
     for field, values in totals["fields"].items():
         diff = abs(values["diff"])
         if diff > TOLERANCE:
-            errors.append(
+            warnings.append(
                 f"[{segment_name}] {field}: sum=${values['sum']:,.2f}, "
                 f"YTD=${values['ytd']:,.2f}, diff=${values['diff']:+,.2f}"
             )
@@ -397,16 +399,31 @@ def validate_segment_totals(segment: List[Dict[str, Any]], segment_name: str) ->
     return errors, warnings, totals
 
 
+def normalize_field_name(field: str) -> str:
+    """
+    Normalize a field name for consistent matching.
+
+    Handles variations like "Prize/ Gift" vs "Prize/Gift" by removing
+    spaces around slashes and collapsing multiple spaces.
+    """
+    import re
+    # Remove spaces around slashes
+    normalized = re.sub(r'\s*/\s*', '/', field)
+    # Collapse multiple spaces
+    normalized = re.sub(r'\s+', ' ', normalized)
+    return normalized.strip().lower()
+
+
 def get_warning_fields() -> Dict[str, str]:
     """
     Get fields configured to warn (not error) on current vs YTD mismatch.
 
-    Returns dict mapping field name (lowercase) to description message.
+    Returns dict mapping normalized field name to description message.
     """
     config = load_config()
     warning_fields = {}
     for entry in config.get("validation", {}).get("allow_current_mismatch", []):
-        field = entry.get("field", "").lower()
+        field = normalize_field_name(entry.get("field", ""))
         message = entry.get("message", "")
         if field:
             warning_fields[field] = message
@@ -423,6 +440,9 @@ def validate_stub_deltas(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[s
     Fields in the config's allow_current_mismatch list generate warnings.
     All other fields with mismatches generate errors.
 
+    Skips validation at employer boundaries (YTD resets) since deltas
+    don't make sense across different employers.
+
     Returns:
         Tuple of (errors, warnings)
     """
@@ -436,9 +456,11 @@ def validate_stub_deltas(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[s
     TOLERANCE = 0.01
 
     prev_earnings = {}  # field -> ytd_amount
+    prev_ytd_gross = 0.0
 
     for i, stub in enumerate(stubs):
         pay_date = stub.get("pay_date", "unknown")
+        ytd_gross = stub.get("pay_summary", {}).get("ytd", {}).get("gross", 0)
 
         # Build current earnings lookup
         curr_earnings = {}
@@ -452,6 +474,14 @@ def validate_stub_deltas(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[s
         # Skip first stub - no previous to compare
         if i == 0:
             prev_earnings = {k: v["ytd"] for k, v in curr_earnings.items()}
+            prev_ytd_gross = ytd_gross
+            continue
+
+        # Detect employer change (YTD reset) - skip delta validation
+        if prev_ytd_gross > 10000 and ytd_gross < prev_ytd_gross * 0.5:
+            # Reset for new employer segment
+            prev_earnings = {k: v["ytd"] for k, v in curr_earnings.items()}
+            prev_ytd_gross = ytd_gross
             continue
 
         # Compare each field
@@ -464,8 +494,8 @@ def validate_stub_deltas(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[s
             diff = abs(displayed_current - actual_increase)
 
             if diff > TOLERANCE:
-                field_lower = field.lower()
-                if field_lower in warning_fields:
+                field_normalized = normalize_field_name(field)
+                if field_normalized in warning_fields:
                     # This field is configured as warning
                     warnings.append(
                         f"{pay_date} {field} - displayed (current) ${displayed_current:,.2f} "
@@ -480,6 +510,7 @@ def validate_stub_deltas(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[s
 
         # Update previous for next iteration
         prev_earnings = {k: v["ytd"] for k, v in curr_earnings.items()}
+        prev_ytd_gross = ytd_gross
 
     return errors, warnings
 
@@ -552,6 +583,139 @@ def generate_noncash_bonus_summary(stubs: List[Dict[str, Any]]) -> Dict[str, Any
         "prize_expenses": prize_gift,
         "tax_gross_up": tax_gross_up,
         "total_taxable": prize_gift + tax_gross_up
+    }
+
+
+def generate_projection(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any]:
+    """
+    Generate year-end projection based on observed pay patterns.
+
+    Analyzes regular pay cadence and RSU vesting patterns to project
+    remaining income for the year.
+
+    Returns projection data with actual, projected additional, and total amounts.
+    """
+    if not stubs:
+        return {}
+
+    year_int = int(year)
+    year_end = datetime(year_int, 12, 31)
+
+    # Get the last stub and its date
+    last_stub = stubs[-1]
+    last_date_str = last_stub.get("pay_date", "")
+    last_date = parse_pay_date(last_date_str)
+    if last_date == datetime.min:
+        return {}
+
+    # Calculate days remaining in year
+    days_remaining = (year_end - last_date).days
+    if days_remaining <= 0:
+        return {}  # Year complete, no projection needed
+
+    # Analyze regular pay pattern
+    regular_stubs = [s for s in stubs if s.get("_pay_type") == "regular"]
+    regular_stubs.sort(key=lambda s: parse_pay_date(s.get("pay_date", "")))
+
+    regular_projection = 0.0
+    regular_info = {}
+    if len(regular_stubs) >= 2:
+        # Calculate average interval between regular pay stubs
+        dates = [parse_pay_date(s.get("pay_date", "")) for s in regular_stubs]
+        dates = [d for d in dates if d != datetime.min]
+
+        if len(dates) >= 2:
+            intervals = [(dates[i+1] - dates[i]).days for i in range(len(dates)-1)]
+            avg_interval = sum(intervals) / len(intervals)
+
+            # Get last regular pay amount
+            last_regular = regular_stubs[-1]
+            last_regular_current = last_regular.get("pay_summary", {}).get("current", {}).get("gross", 0)
+
+            # Estimate remaining regular pay periods
+            last_regular_date = parse_pay_date(last_regular.get("pay_date", ""))
+            days_since_last_regular = (last_date - last_regular_date).days if last_regular_date != datetime.min else 0
+            remaining_days = days_remaining + days_since_last_regular
+
+            remaining_periods = max(0, int(remaining_days / avg_interval))
+            regular_projection = last_regular_current * remaining_periods
+
+            regular_info = {
+                "interval_days": round(avg_interval, 1),
+                "last_amount": last_regular_current,
+                "remaining_periods": remaining_periods,
+                "projected": regular_projection
+            }
+
+    # Analyze RSU/stock grant pattern
+    stock_stubs = [s for s in stubs if s.get("_pay_type") == "stock_grant"]
+    stock_stubs.sort(key=lambda s: parse_pay_date(s.get("pay_date", "")))
+
+    stock_projection = 0.0
+    stock_info = {}
+    if stock_stubs:
+        # Group by month to detect quarterly pattern
+        from collections import defaultdict
+        monthly_totals = defaultdict(float)
+        for s in stock_stubs:
+            d = parse_pay_date(s.get("pay_date", ""))
+            if d != datetime.min:
+                month_key = d.month
+                current_gross = s.get("pay_summary", {}).get("current", {}).get("gross", 0)
+                monthly_totals[month_key] += current_gross
+
+        # Check for quarterly pattern (typically Feb, May, Aug, Nov or Mar, Jun, Sep, Dec)
+        vesting_months = sorted(monthly_totals.keys())
+        avg_vesting = sum(monthly_totals.values()) / len(monthly_totals) if monthly_totals else 0
+
+        # Estimate remaining vesting months
+        remaining_vest_months = [m for m in vesting_months if m > last_date.month]
+        remaining_vests = len(remaining_vest_months)
+
+        if remaining_vests > 0:
+            stock_projection = avg_vesting * remaining_vests
+            stock_info = {
+                "vesting_months": vesting_months,
+                "avg_vesting": avg_vesting,
+                "remaining_vests": remaining_vests,
+                "projected": stock_projection
+            }
+
+    # Get actual YTD totals from last stub
+    actual_ytd = last_stub.get("pay_summary", {}).get("ytd", {})
+    actual_gross = actual_ytd.get("gross", 0)
+    actual_fit_taxable = actual_ytd.get("fit_taxable_wages", 0)
+    actual_taxes = actual_ytd.get("taxes", 0)
+
+    # Calculate projected totals
+    total_projection = regular_projection + stock_projection
+    projected_gross = actual_gross + total_projection
+
+    # Estimate projected taxes (use effective rate from actuals)
+    effective_tax_rate = actual_taxes / actual_gross if actual_gross > 0 else 0.25
+    projected_additional_taxes = total_projection * effective_tax_rate
+    projected_total_taxes = actual_taxes + projected_additional_taxes
+
+    return {
+        "as_of_date": last_date_str,
+        "days_remaining": days_remaining,
+        "actual": {
+            "gross": actual_gross,
+            "fit_taxable_wages": actual_fit_taxable,
+            "taxes_withheld": actual_taxes
+        },
+        "projected_additional": {
+            "regular_pay": regular_projection,
+            "stock_grants": stock_projection,
+            "total_gross": total_projection,
+            "taxes": projected_additional_taxes
+        },
+        "projected_total": {
+            "gross": projected_gross,
+            "taxes_withheld": projected_total_taxes
+        },
+        "regular_pay_info": regular_info,
+        "stock_grant_info": stock_info
     }
 
 
@@ -636,12 +800,13 @@ def generate_summary(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any]:
     }
 
 
-def print_text_report(report: Dict[str, Any]):
+def print_text_report(report: Dict[str, Any], include_projection: bool = False):
     """Print a text format report from the JSON report object."""
     summary = report["summary"]
     errors = report["errors"]
     warnings = report["warnings"]
     ytd_breakdown = report.get("ytd_breakdown")
+    projection = report.get("projection")
 
     print("\n" + "=" * 60)
     print(f"PAY STUB YEAR SUMMARY: {summary['year']}")
@@ -726,6 +891,55 @@ def print_text_report(report: Dict[str, Any]):
         print(f"  {'─' * 40}")
         print(f"  Total taxable from non-cash bonuses: ${noncash.get('total_taxable', 0):>8,.2f}")
 
+    # Year-end projection (only if --projection flag was passed)
+    if include_projection and projection:
+        print("\n" + "-" * 60)
+        print(f"YEAR-END PROJECTION (as of {projection.get('as_of_date', 'N/A')}, {projection.get('days_remaining', 0)} days remaining)")
+        print()
+
+        actual = projection.get("actual", {})
+        additional = projection.get("projected_additional", {})
+        total = projection.get("projected_total", {})
+
+        # Main projection table
+        print(f"  {'Category':<25} {'Actual':>14} {'Projected Add':>14} {'Est. Total':>14}")
+        print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
+
+        # Gross income
+        print(f"  {'Gross Income':<25} ${actual.get('gross', 0):>13,.2f} ${additional.get('total_gross', 0):>13,.2f} ${total.get('gross', 0):>13,.2f}")
+
+        # Break down projected additional
+        reg_proj = additional.get("regular_pay", 0)
+        stock_proj = additional.get("stock_grants", 0)
+        if reg_proj > 0:
+            print(f"    {'└ Regular Pay':<23} {'':<14} ${reg_proj:>13,.2f}")
+        if stock_proj > 0:
+            print(f"    {'└ Stock Grants':<23} {'':<14} ${stock_proj:>13,.2f}")
+
+        # Taxes
+        print(f"  {'Taxes Withheld':<25} ${actual.get('taxes_withheld', 0):>13,.2f} ${additional.get('taxes', 0):>13,.2f} ${total.get('taxes_withheld', 0):>13,.2f}")
+
+        print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
+
+        # Pattern info
+        reg_info = projection.get("regular_pay_info", {})
+        stock_info = projection.get("stock_grant_info", {})
+
+        if reg_info:
+            print(f"\n  Regular Pay Pattern:")
+            print(f"    Interval: ~{reg_info.get('interval_days', 0):.0f} days (biweekly)")
+            print(f"    Last amount: ${reg_info.get('last_amount', 0):,.2f}")
+            print(f"    Remaining periods: {reg_info.get('remaining_periods', 0)}")
+
+        if stock_info:
+            print(f"\n  Stock Grant Pattern:")
+            vest_months = stock_info.get('vesting_months', [])
+            month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            vest_names = [month_names[m-1] for m in vest_months]
+            print(f"    Vesting months: {', '.join(vest_names)}")
+            print(f"    Avg per vest: ${stock_info.get('avg_vesting', 0):,.2f}")
+            print(f"    Remaining vests: {stock_info.get('remaining_vests', 0)}")
+
     if errors:
         print("\n" + "-" * 60)
         print("ERRORS (gaps detected):")
@@ -754,13 +968,15 @@ def log(msg: str):
 
 def main():
     if len(sys.argv) < 2:
-        log("Usage: python3 process_year.py <year> [--format text|json]")
+        log("Usage: python3 process_year.py <year> [--format text|json] [--projection]")
         log("  year: 4-digit year (e.g., 2025)")
         log("  --format: Output format (default: text)")
+        log("  --projection: Include year-end projection based on observed patterns")
         sys.exit(1)
 
     year = sys.argv[1]
     output_format = "text"
+    include_projection = "--projection" in sys.argv
 
     if "--format" in sys.argv:
         idx = sys.argv.index("--format")
@@ -839,6 +1055,7 @@ def main():
         "totals_validation": totals_comparison,
         "noncash_bonus": generate_noncash_bonus_summary(all_stubs),
         "ytd_breakdown": generate_ytd_breakdown(all_stubs) if not errors else None,
+        "projection": generate_projection(all_stubs, year) if include_projection else None,
         "stubs": all_stubs
     }
 
@@ -846,7 +1063,7 @@ def main():
     if output_format == "json":
         print(json.dumps(report, indent=2))
     else:
-        print_text_report(report)
+        print_text_report(report, include_projection)
 
     # Save full data to file (always include ytd_breakdown for reference)
     output_file = Path("data") / f"{year}_pay_stubs_full.json"

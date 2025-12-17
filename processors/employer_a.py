@@ -171,9 +171,9 @@ class Employer AProcessor:
         normalized = re.sub(r'Earnings\s+Pay\s+T\s*ype\s+Hours\s*Pay\s*Rate\s+Current\s+YTD\s*', '', normalized)
         normalized = re.sub(r'Total\s+Hours\s+W\s*orked.*', '', normalized)
 
-        # Pattern 1: Type with Hours/Rate
+        # Pattern 1: Type with Hours/Rate and YTD
         # e.g., "Regular Pay 80.000000 $75.00 $5,000.00 $10,000.00"
-        pattern_with_hours = re.compile(
+        pattern_with_ytd = re.compile(
             r'([A-Za-z][A-Za-z\s/\-]*?)\s*'  # Type name (starts with letter)
             r'(\d+\.\d+)\s+'                  # Hours
             r'\$?([\d,]+\.?\d*)\s+'           # Rate
@@ -182,59 +182,84 @@ class Employer AProcessor:
             re.IGNORECASE
         )
 
-        # Pattern 2: Type without Hours/Rate (just Current and YTD)
+        # Pattern 2: Type with Hours/Rate but NO YTD (continuation lines)
+        # e.g., "Regular Pay 40.000000 $85.5769 $3,400.00"
+        # These are additional lines for same type where YTD appears only on last line
+        pattern_no_ytd = re.compile(
+            r'([A-Za-z][A-Za-z\s/\-]*?)\s+'   # Type name
+            r'(\d+\.\d+)\s+'                   # Hours
+            r'\$?([\d,]+\.?\d*)\s+'            # Rate
+            r'\$?([\d,]+\.?\d*)(?:\s|$)',      # Current (followed by space or end, not another $)
+            re.IGNORECASE
+        )
+
+        # Pattern 3: Type without Hours/Rate (just Current and YTD)
         # e.g., "Prize/ Gift $321.67 $2,000.00"
-        pattern_no_hours = re.compile(
+        pattern_simple = re.compile(
             r'([A-Za-z][A-Za-z\s/\-]*?)\s+'   # Type name
             r'\$([\d,]+\.?\d*)\s+'             # Current
             r'\$([\d,]+\.?\d*)',               # YTD
             re.IGNORECASE
         )
 
-        # First, extract all with-hours matches (more specific pattern first)
-        for match in pattern_with_hours.finditer(normalized):
-            etype = match.group(1).strip()
+        # Collect all earnings, aggregating same-type entries
+        # Key: normalized type name -> {"current": sum, "ytd": last seen}
+        earnings_map = {}
+
+        # First pass: lines with YTD (these have the authoritative YTD)
+        for match in pattern_with_ytd.finditer(normalized):
+            etype = re.sub(r'\s+', ' ', match.group(1).strip()).strip()
             current = extract_amount(match.group(4))
             ytd = extract_amount(match.group(5))
 
-            # Skip if both values are zero and not a known type
-            if current == 0.0 and ytd == 0.0 and etype.lower() not in ['regular pay', 'recognition bonus', 'sales bonus']:
-                continue
+            key = etype.lower()
+            if key in earnings_map:
+                earnings_map[key]["current"] += current
+                earnings_map[key]["ytd"] = ytd  # Last YTD wins
+            else:
+                earnings_map[key] = {"type": etype, "current": current, "ytd": ytd}
 
-            # Clean up type name
-            etype = re.sub(r'\s+', ' ', etype).strip()
+        # Second pass: lines without YTD (add to current, don't overwrite YTD)
+        for match in pattern_no_ytd.finditer(normalized):
+            etype = re.sub(r'\s+', ' ', match.group(1).strip()).strip()
+            current = extract_amount(match.group(4))
 
-            earnings.append({
-                "type": etype,
-                "current_amount": current,
-                "ytd_amount": ytd
-            })
+            # Check this isn't a false match from pattern_with_ytd
+            # (pattern_no_ytd might match beginning of a line that has YTD)
+            match_end = match.end()
+            if match_end < len(normalized) and normalized[match_end:match_end+1] == '$':
+                continue  # This line has YTD, skip (already captured above)
 
-        # Now look for no-hours patterns that weren't captured
-        # Create a version with matched parts removed to avoid duplicates
-        remaining = normalized
-        for e in earnings:
-            # Remove matched earnings from remaining text to find additional ones
-            remaining = remaining.replace(e["type"], '')
+            key = etype.lower()
+            if key in earnings_map:
+                earnings_map[key]["current"] += current
+            else:
+                # No YTD seen yet for this type
+                earnings_map[key] = {"type": etype, "current": current, "ytd": 0.0}
 
-        for match in pattern_no_hours.finditer(remaining):
-            etype = match.group(1).strip()
+        # Third pass: simple patterns (no hours/rate)
+        for match in pattern_simple.finditer(normalized):
+            etype = re.sub(r'\s+', ' ', match.group(1).strip()).strip()
             current = extract_amount(match.group(2))
             ytd = extract_amount(match.group(3))
 
-            # Skip if already found (by name similarity)
-            etype_clean = re.sub(r'\s+', ' ', etype).strip()
-            if any(e["type"].lower() == etype_clean.lower() for e in earnings):
-                continue
-
             # Skip obvious non-earnings
-            if etype_clean.lower() in ['current', 'ytd', 'total']:
+            if etype.lower() in ['current', 'ytd', 'total']:
                 continue
 
+            key = etype.lower()
+            if key not in earnings_map:
+                earnings_map[key] = {"type": etype, "current": current, "ytd": ytd}
+
+        # Convert to list, filtering zero-value entries
+        for key, data in earnings_map.items():
+            if data["current"] == 0.0 and data["ytd"] == 0.0:
+                if key not in ['regular pay', 'recognition bonus', 'sales bonus']:
+                    continue
             earnings.append({
-                "type": etype_clean,
-                "current_amount": current,
-                "ytd_amount": ytd
+                "type": data["type"],
+                "current_amount": data["current"],
+                "ytd_amount": data["ytd"]
             })
 
         return earnings

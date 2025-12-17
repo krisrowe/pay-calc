@@ -28,13 +28,14 @@ The `process_year.py` script downloads and processes all pay stubs for a given y
 
 **Usage:**
 ```bash
-python3 process_year.py <year> [--format text|json]
+python3 process_year.py <year> [--format text|json] [--projection]
 ```
 
 Example:
 ```bash
 python3 process_year.py 2025
 python3 process_year.py 2025 --format json
+python3 process_year.py 2025 --projection
 ```
 
 **What it does:**
@@ -55,6 +56,22 @@ python3 process_year.py 2025 --format json
 - Text report to stdout (default)
 - JSON report with `--format json`
 - Full data saved to `data/YYYY_pay_stubs_full.json`
+
+**Projection (--projection flag):**
+When the `--projection` flag is passed, the script analyzes pay patterns and projects year-end totals:
+
+- **Regular Pay**: Detects pay frequency (biweekly) and projects remaining pay periods
+- **Stock Grants**: Detects vesting pattern by month and projects remaining vests
+- **Taxes**: Estimates additional withholding using effective tax rate from actuals
+
+The projection table shows:
+| Column | Description |
+|--------|-------------|
+| Actual | Current YTD totals from last pay stub |
+| Projected Add | Estimated additional income before year-end |
+| Est. Total | Projected year-end totals (Actual + Projected) |
+
+This is useful for mid-year tax planning and estimating quarterly payments.
 
 ---
 
