@@ -551,6 +551,76 @@ def validate_year_totals(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[s
     return errors, warnings, validation_results
 
 
+def generate_401k_contributions(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Generate 401k contributions breakdown by month.
+
+    Tracks:
+    - Pre-tax employee contributions (traditional 401k)
+    - After-tax employee contributions (mega backdoor Roth)
+    - Employer match
+
+    Combines across all employer segments.
+    """
+    if not stubs:
+        return {}
+
+    from collections import defaultdict
+
+    # Track by month: {month_num: {pretax, aftertax, employer}}
+    monthly = defaultdict(lambda: {"pretax": 0.0, "aftertax": 0.0, "employer": 0.0})
+
+    # Track previous YTD for employer match delta calculation
+    prev_employer_ytd = 0.0
+    prev_month = None
+
+    for stub in stubs:
+        pay_date = stub.get("pay_date", "")
+        if not pay_date:
+            continue
+
+        month = int(pay_date[5:7])  # Extract month from YYYY-MM-DD
+
+        for d in stub.get("deductions", []):
+            dtype = d.get("type", "")
+            current = d.get("current_amount", 0)
+
+            if dtype == "K Pretax":
+                monthly[month]["pretax"] += current
+                # Track employer match via YTD delta
+                employer_ytd = d.get("employer_match_ytd", 0)
+                if employer_ytd > prev_employer_ytd:
+                    # Attribute the delta to current month
+                    delta = employer_ytd - prev_employer_ytd
+                    monthly[month]["employer"] += delta
+                    prev_employer_ytd = employer_ytd
+            elif dtype == "K AT":
+                monthly[month]["aftertax"] += current
+
+    # Build result with monthly and yearly totals
+    months_data = {}
+    yearly_totals = {"pretax": 0.0, "aftertax": 0.0, "employer": 0.0, "total": 0.0}
+
+    for month in range(1, 13):
+        m = monthly[month]
+        total = m["pretax"] + m["aftertax"] + m["employer"]
+        months_data[month] = {
+            "pretax": m["pretax"],
+            "aftertax": m["aftertax"],
+            "employer": m["employer"],
+            "total": total
+        }
+        yearly_totals["pretax"] += m["pretax"]
+        yearly_totals["aftertax"] += m["aftertax"]
+        yearly_totals["employer"] += m["employer"]
+        yearly_totals["total"] += total
+
+    return {
+        "by_month": months_data,
+        "yearly_totals": yearly_totals
+    }
+
+
 def generate_imputed_income_summary(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Generate imputed income summary from final YTD values.
@@ -970,6 +1040,31 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
                 diff_str = f"{diff:+,.2f}" if abs(diff) > 0.01 else "OK"
                 print(f"  {field:<20} ${vals['sum']:>11,.2f} ${vals['ytd']:>11,.2f} {diff_str:>10}")
 
+    # 401k contributions table
+    contrib_401k = report.get("contributions_401k", {})
+    if contrib_401k:
+        print("\n" + "-" * 60)
+        print("401(k) CONTRIBUTIONS BY MONTH:")
+        print()
+        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+        print(f"  {'Month':<6} {'Pre-Tax':>12} {'After-Tax':>12} {'Employer':>12} {'Total':>12}")
+        print(f"  {'─' * 6} {'─' * 12} {'─' * 12} {'─' * 12} {'─' * 12}")
+
+        by_month = contrib_401k.get("by_month", {})
+        for m in range(1, 13):
+            month_data = by_month.get(m, by_month.get(str(m), {}))
+            pretax = month_data.get("pretax", 0)
+            aftertax = month_data.get("aftertax", 0)
+            employer = month_data.get("employer", 0)
+            total = month_data.get("total", 0)
+            # Only show months with contributions
+            if total > 0:
+                print(f"  {month_names[m-1]:<6} ${pretax:>11,.2f} ${aftertax:>11,.2f} ${employer:>11,.2f} ${total:>11,.2f}")
+
+        print(f"  {'─' * 6} {'─' * 12} {'─' * 12} {'─' * 12} {'─' * 12}")
+        yearly = contrib_401k.get("yearly_totals", {})
+        print(f"  {'TOTAL':<6} ${yearly.get('pretax', 0):>11,.2f} ${yearly.get('aftertax', 0):>11,.2f} ${yearly.get('employer', 0):>11,.2f} ${yearly.get('total', 0):>11,.2f}")
+
     # Imputed income summary
     imputed = report.get("imputed_income", {})
     if imputed:
@@ -1178,6 +1273,7 @@ def main():
         "errors": errors,
         "warnings": warnings,
         "totals_validation": totals_comparison,
+        "contributions_401k": generate_401k_contributions(all_stubs),
         "imputed_income": generate_imputed_income_summary(all_stubs),
         "ytd_breakdown": generate_ytd_breakdown(all_stubs) if not errors else None,
         "projection": generate_projection(all_stubs, year) if include_projection else None,
@@ -1199,6 +1295,14 @@ def main():
     with open(output_file, "w") as f:
         json.dump(report_with_breakdown, f, indent=2)
     log(f"\nFull data saved to: {output_file}")
+
+    # Save 401k contributions to separate file for easy reference
+    contrib_401k = report.get("contributions_401k", {})
+    if contrib_401k:
+        contrib_file = Path("data") / f"{year}_401k_contributions.json"
+        with open(contrib_file, "w") as f:
+            json.dump(contrib_401k, f, indent=2)
+        log(f"401k contributions saved to: {contrib_file}")
 
     # Exit with error code if gaps detected
     if errors:
