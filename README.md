@@ -44,9 +44,27 @@ pay-calc config show                  # Show current config
 - Applies tax brackets, calculates liability, determines refund/owed
 
 **`pay-analysis`** - Pay stub analysis (single party)
-- Downloads pay stub PDFs from Drive, validates continuity
-- Detects gaps, employer changes, validates current vs YTD
-- Note: Currently outputs format not consumed by other commands (see Future Considerations)
+
+Multi-level validation:
+- **Completeness**: Detects gaps in pay history (missing pay periods)
+- **Consistency**: Validates current amounts vs YTD increases
+- **Continuity**: Detects employer changes and YTD resets
+
+Financial event timeline extraction:
+- 401k contributions with dates (for month-to-month accounting)
+- Pay breakdown by type (regular, bonus, stock grants)
+- Future: Stock vesting timeline for investment tracking
+
+**Why this exists**: Personal accounting software like Monarch tracks balance changes over time, but those include market fluctuations. To accurately track:
+- Income/expense by month (not just balance changes)
+- Timing of investments for true ROI calculation
+- 401k contributions separate from employer match
+
+We need source-of-truth data from pay stubs showing when money was earned and invested, not just when account balances changed.
+
+**Why single-party**: This is personal finance tracking, not joint tax calculation. Each person has their own pay stubs, 401k accounts, stock grants, and investment timing. The `household-ytd` and `tax-projection` commands handle the joint/combined view for tax purposes.
+
+Note: Currently outputs `_pay_stubs_full.json` format not consumed by other commands (see Future Considerations)
 
 **`household-ytd`** - Multi-party YTD aggregation
 - Reads local pay stub JSON files for all parties
