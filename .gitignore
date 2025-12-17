@@ -26,3 +26,4 @@ Thumbs.db
 # Data directory contains personal pay information - do not commit
 data/
 
+cache/

@@ -968,15 +968,17 @@ def log(msg: str):
 
 def main():
     if len(sys.argv) < 2:
-        log("Usage: python3 process_year.py <year> [--format text|json] [--projection]")
+        log("Usage: python3 process_year.py <year> [--format text|json] [--projection] [--cache-paystubs]")
         log("  year: 4-digit year (e.g., 2025)")
         log("  --format: Output format (default: text)")
         log("  --projection: Include year-end projection based on observed patterns")
+        log("  --cache-paystubs: Cache downloaded PDFs to avoid re-downloading")
         sys.exit(1)
 
     year = sys.argv[1]
     output_format = "text"
     include_projection = "--projection" in sys.argv
+    cache_paystubs = "--cache-paystubs" in sys.argv
 
     if "--format" in sys.argv:
         idx = sys.argv.index("--format")
@@ -1003,19 +1005,37 @@ def main():
 
     all_stubs = []
 
-    with tempfile.TemporaryDirectory() as tmpdir:
+    # Determine working directory (cache or temp)
+    if cache_paystubs:
+        cache_dir = Path("cache") / year / "paystubs"
+        cache_dir.mkdir(parents=True, exist_ok=True)
+        workdir = str(cache_dir)
+        log(f"Using cache directory: {workdir}")
+    else:
+        # Use a temporary directory that will be cleaned up
+        import contextlib
+        temp_ctx = tempfile.TemporaryDirectory()
+        workdir = temp_ctx.name
+
+    try:
         for pdf_info in pdf_files:
             pdf_name = pdf_info["name"]
             pdf_id = pdf_info["id"]
 
             log(f"\nProcessing: {pdf_name}")
 
-            # Download PDF
-            local_path = os.path.join(tmpdir, pdf_name)
-            download_file(pdf_id, local_path)
+            # Check if already cached
+            local_path = os.path.join(workdir, pdf_name)
+            if cache_paystubs and os.path.exists(local_path):
+                log(f"  Using cached: {pdf_name}")
+            else:
+                # Download PDF
+                download_file(pdf_id, local_path)
+                if cache_paystubs:
+                    log(f"  Downloaded and cached: {pdf_name}")
 
             # Split into pages
-            page_files = split_pdf_pages(local_path, tmpdir)
+            page_files = split_pdf_pages(local_path, workdir)
             log(f"  Split into {len(page_files)} pages")
 
             # Process each page
@@ -1026,8 +1046,18 @@ def main():
                     stub_data["_source_file"] = pdf_name
                     all_stubs.append(stub_data)
 
-            # Clean up downloaded PDF
-            os.remove(local_path)
+            # Clean up split page files (but keep original PDFs in cache)
+            for page_file in page_files:
+                if os.path.exists(page_file):
+                    os.remove(page_file)
+
+            # Only clean up original PDF if not caching
+            if not cache_paystubs:
+                os.remove(local_path)
+    finally:
+        # Clean up temp directory if not using cache
+        if not cache_paystubs:
+            temp_ctx.cleanup()
 
     log(f"\nSuccessfully processed {len(all_stubs)} pay stubs")
 
