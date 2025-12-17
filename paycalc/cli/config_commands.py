@@ -220,8 +220,7 @@ def profile():
 
 
 @profile.command("show")
-@click.option("--no-contents", is_flag=True, help="Show only location and health, not profile contents")
-def profile_show(no_contents):
+def profile_show():
     """Show the active profile, its location, and feature readiness."""
     try:
         validation = validate_profile()
@@ -256,10 +255,9 @@ def profile_show(no_contents):
                 click.echo(f"  - {item}")
 
         # Profile contents
-        if not no_contents:
-            click.echo()
-            click.echo("---")
-            click.echo(yaml.dump(validation.profile, default_flow_style=False, sort_keys=False))
+        click.echo()
+        click.echo("---")
+        click.echo(yaml.dump(validation.profile, default_flow_style=False, sort_keys=False))
 
     except ProfileNotFoundError as e:
         raise click.ClickException(str(e))
@@ -408,16 +406,6 @@ def profile_edit():
         raise click.ClickException(f"Editor '{editor}' not found. Set EDITOR env var.")
     except subprocess.CalledProcessError as e:
         raise click.ClickException(f"Editor exited with code {e.returncode}")
-
-
-@profile.command("path")
-def profile_path_cmd():
-    """Show the path to the active profile."""
-    try:
-        prof_path = get_profile_path(require_exists=True)
-        click.echo(prof_path)
-    except ProfileNotFoundError as e:
-        raise click.ClickException(str(e))
 
 
 @profile.command("import")
