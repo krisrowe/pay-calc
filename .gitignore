@@ -27,3 +27,6 @@ Thumbs.db
 data/
 
 cache/
+
+# Source documents (W-2s, pay stubs) - sensitive PII
+source-data/

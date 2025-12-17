@@ -36,6 +36,33 @@ def load_config() -> dict:
         return yaml.safe_load(f)
 
 
+def load_tax_rules(year: str) -> tuple[dict, str, bool]:
+    """Load tax rules for a specific year, falling back to closest year if needed.
+
+    Returns: (rules_dict, year_used, exact_match)
+    """
+    rules_dir = Path(__file__).parent / "tax-rules"
+    rules_path = rules_dir / f"{year}.yaml"
+
+    if rules_path.exists():
+        with open(rules_path) as f:
+            return yaml.safe_load(f), year, True
+
+    # Find closest configured year
+    available_years = sorted([
+        int(p.stem) for p in rules_dir.glob("*.yaml") if p.stem.isdigit()
+    ])
+
+    if not available_years:
+        return {}, year, False
+
+    target_year = int(year)
+    closest_year = min(available_years, key=lambda y: abs(y - target_year))
+
+    with open(rules_dir / f"{closest_year}.yaml") as f:
+        return yaml.safe_load(f), str(closest_year), False
+
+
 def get_pay_stubs_folder_id() -> str:
     """Get the Pay Stubs folder ID from config."""
     config = load_config()
@@ -865,6 +892,9 @@ def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Use normalized keys to combine variants like "Tax Gross- Up" and "Tax Gross-Up"
     earnings_breakdown = {}  # normalized_key -> {"display": original_name, "amount": total}
     taxes_breakdown = {}
+    employee_pretax_401k = 0.0
+    employee_aftertax_401k = 0.0
+    employer_401k_total = 0.0
 
     for segment in segments:
         if not segment:
@@ -882,6 +912,15 @@ def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
                 else:
                     earnings_breakdown[key] = {"display": normalize_earnings_type(etype), "amount": ytd}
 
+        # Add all 401k contributions
+        for ded in last_stub.get("deductions", []):
+            dtype = ded.get("type", "").lower()
+            if dtype == "k pretax":
+                employee_pretax_401k += ded.get("ytd_amount", 0)
+                employer_401k_total += ded.get("employer_match_ytd", 0)
+            elif dtype == "k at":
+                employee_aftertax_401k += ded.get("ytd_amount", 0)
+
         # Add taxes from this segment's final YTD
         taxes = last_stub.get("taxes", {})
         for tax_name, tax_data in taxes.items():
@@ -893,10 +932,20 @@ def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
     # Convert earnings to simple dict for output
     earnings_output = {v["display"]: v["amount"] for v in earnings_breakdown.values()}
 
+    # Add all 401k contributions
+    if employee_pretax_401k > 0:
+        earnings_output["401k Pre-Tax"] = employee_pretax_401k
+    if employee_aftertax_401k > 0:
+        earnings_output["401k After-Tax"] = employee_aftertax_401k
+    if employer_401k_total > 0:
+        earnings_output["401k Employer Match"] = employer_401k_total
+
+    total_compensation = sum(earnings_output.values())
+
     return {
         "earnings": earnings_output,
         "taxes": taxes_breakdown,
-        "total_gross": sum(earnings_output.values()),
+        "total_gross": total_compensation,
         "total_taxes": sum(taxes_breakdown.values()),
     }
 
@@ -994,7 +1043,11 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
 
     print("\nFinal YTD Totals:")
     ytd = summary['final_ytd']
+    contrib_401k = report.get("contributions_401k", {}).get("yearly_totals", {})
+    total_401k = contrib_401k.get("total", 0)
+    total_comp = ytd['gross'] + total_401k
     print(f"  Gross:              ${ytd['gross']:>12,.2f}")
+    print(f"  Total Compensation: ${total_comp:>12,.2f}  (Gross + All 401k)")
     print(f"  FIT Taxable Wages:  ${ytd['fit_taxable_wages']:>12,.2f}")
     print(f"  Taxes Withheld:     ${ytd['taxes']:>12,.2f}")
     print(f"  Net Pay:            ${ytd['net_pay']:>12,.2f}")
@@ -1007,7 +1060,7 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
         for etype, amount in sorted(earnings.items(), key=lambda x: -x[1]):
             print(f"  {etype:<25} ${amount:>12,.2f}")
         print(f"  {'─' * 25} {'─' * 13}")
-        print(f"  {'Total Gross':<25} ${ytd_breakdown.get('total_gross', 0):>12,.2f}")
+        print(f"  {'Total Compensation':<25} ${ytd_breakdown.get('total_gross', 0):>12,.2f}")
 
         print("\nYTD TAXES WITHHELD:")
         taxes = ytd_breakdown.get("taxes", {})
@@ -1047,23 +1100,25 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
         print("401(k) CONTRIBUTIONS BY MONTH:")
         print()
         month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        print(f"  {'Month':<6} {'Pre-Tax':>12} {'After-Tax':>12} {'Employer':>12} {'Total':>12}")
-        print(f"  {'─' * 6} {'─' * 12} {'─' * 12} {'─' * 12} {'─' * 12}")
+        print(f"  {'Month':<6} {'Emp Pre-Tax':>12} {'Employer':>12} │ {'Tot Pre-Tax':>12} {'After-Tax':>12} │ {'Total':>12}")
+        print(f"  {'─' * 6} {'─' * 12} {'─' * 12} ┼ {'─' * 12} {'─' * 12} ┼ {'─' * 12}")
 
         by_month = contrib_401k.get("by_month", {})
         for m in range(1, 13):
             month_data = by_month.get(m, by_month.get(str(m), {}))
-            pretax = month_data.get("pretax", 0)
+            emp_pretax = month_data.get("pretax", 0)
             aftertax = month_data.get("aftertax", 0)
             employer = month_data.get("employer", 0)
+            tot_pretax = emp_pretax + employer
             total = month_data.get("total", 0)
             # Only show months with contributions
             if total > 0:
-                print(f"  {month_names[m-1]:<6} ${pretax:>11,.2f} ${aftertax:>11,.2f} ${employer:>11,.2f} ${total:>11,.2f}")
+                print(f"  {month_names[m-1]:<6} ${emp_pretax:>11,.2f} ${employer:>11,.2f} │ ${tot_pretax:>11,.2f} ${aftertax:>11,.2f} │ ${total:>11,.2f}")
 
-        print(f"  {'─' * 6} {'─' * 12} {'─' * 12} {'─' * 12} {'─' * 12}")
+        print(f"  {'─' * 6} {'─' * 12} {'─' * 12} ┼ {'─' * 12} {'─' * 12} ┼ {'─' * 12}")
         yearly = contrib_401k.get("yearly_totals", {})
-        print(f"  {'TOTAL':<6} ${yearly.get('pretax', 0):>11,.2f} ${yearly.get('aftertax', 0):>11,.2f} ${yearly.get('employer', 0):>11,.2f} ${yearly.get('total', 0):>11,.2f}")
+        yearly_tot_pretax = yearly.get('pretax', 0) + yearly.get('employer', 0)
+        print(f"  {'TOTAL':<6} ${yearly.get('pretax', 0):>11,.2f} ${yearly.get('employer', 0):>11,.2f} │ ${yearly_tot_pretax:>11,.2f} ${yearly.get('aftertax', 0):>11,.2f} │ ${yearly.get('total', 0):>11,.2f}")
 
     # Imputed income summary
     imputed = report.get("imputed_income", {})
@@ -1089,24 +1144,64 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
         additional = projection.get("projected_additional", {})
         total = projection.get("projected_total", {})
 
+        # Load tax rules for 401k limits
+        report_year = summary.get("year", "2025")
+        tax_rules, rules_year, exact_match = load_tax_rules(report_year)
+        k401_limits = tax_rules.get("401k", {})
+        employee_elective_limit = k401_limits.get("employee_elective_limit", 23500)
+        total_annual_limit = k401_limits.get("total_annual_limit", 70000)
+
+        if not exact_match:
+            print(f"  ⚠ Tax rules for {report_year} not found, using {rules_year} rules")
+            print()
+
+        # Get 401k totals to add to compensation
+        contrib_401k = report.get("contributions_401k", {}).get("yearly_totals", {})
+        total_401k = contrib_401k.get("total", 0)
+        pretax_401k = contrib_401k.get("pretax", 0)
+
+        # Project additional 401k needed to reach total annual limit
+        target_401k = total_annual_limit
+        projected_401k_add = max(0, target_401k - total_401k)
+        projected_401k_total = total_401k + projected_401k_add
+
+        # Calculate total compensation (gross + all 401k)
+        actual_total_comp = actual.get('gross', 0) + total_401k
+        projected_total_comp = total.get('gross', 0) + projected_401k_total
+
         # Main projection table
         print(f"  {'Category':<25} {'Actual':>14} {'Projected Add':>14} {'Est. Total':>14}")
         print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
 
-        # Gross income
-        print(f"  {'Gross Income':<25} ${actual.get('gross', 0):>13,.2f} ${additional.get('total_gross', 0):>13,.2f} ${total.get('gross', 0):>13,.2f}")
+        # Gross
+        print(f"  {'Gross':<25} ${actual.get('gross', 0):>13,.2f} ${additional.get('total_gross', 0):>13,.2f} ${total.get('gross', 0):>13,.2f}")
 
-        # Break down projected additional
+        # Break down by type - get actuals from ytd_breakdown
+        ytd_earnings = ytd_breakdown.get("earnings", {}) if ytd_breakdown else {}
+        actual_regular = ytd_earnings.get("Regular Pay", 0)
+        actual_stock = ytd_earnings.get("Goog Stock Unit", 0)
+        actual_other = actual.get('gross', 0) - actual_regular - actual_stock
+
         reg_proj = additional.get("regular_pay", 0)
         stock_proj = additional.get("stock_grants", 0)
-        if reg_proj > 0:
-            print(f"    {'└ Regular Pay':<23} {'':<14} ${reg_proj:>13,.2f}")
-        if stock_proj > 0:
-            print(f"    {'└ Stock Grants':<23} {'':<14} ${stock_proj:>13,.2f}")
+
+        # Reduce regular pay projection by 401k projection (401k comes out of regular pay)
+        reg_proj_display = reg_proj - projected_401k_add
+        print(f"    {'└ Regular Pay':<23} ${actual_regular:>13,.2f} ${reg_proj_display:>13,.2f}")
+        print(f"    {'└ Stock Vesting':<23} ${actual_stock:>13,.2f} ${stock_proj:>13,.2f}")
+        print(f"    {'└ Other (bonuses, etc)':<23} ${actual_other:>13,.2f} {'$0.00':>14}")
+
+        # 401k
+        if total_401k > 0 or projected_401k_add > 0:
+            print(f"  {'+ 401k Contributions':<25} ${total_401k:>13,.2f} ${projected_401k_add:>13,.2f} ${projected_401k_total:>13,.2f}")
+
+        # Total Compensation
+        projected_comp_add = additional.get('total_gross', 0) + projected_401k_add
+        print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
+        print(f"  {'Total Compensation':<25} ${actual_total_comp:>13,.2f} ${projected_comp_add:>13,.2f} ${projected_total_comp:>13,.2f}")
 
         # Taxes
         print(f"  {'Taxes Withheld':<25} ${actual.get('taxes_withheld', 0):>13,.2f} ${additional.get('taxes', 0):>13,.2f} ${total.get('taxes_withheld', 0):>13,.2f}")
-
         print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
 
         # Pattern info
@@ -1121,7 +1216,7 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
             print(f"    Remaining periods: {reg_info.get('remaining_periods', 0)}")
 
         if stock_info:
-            print(f"\n  Stock Grant Pattern:")
+            print(f"\n  Stock Vesting Pattern:")
             month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
             print(f"    Frequency: {stock_info.get('frequency', 'unknown')}")
             remaining = stock_info.get('remaining_months', [])

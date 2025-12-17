@@ -7,6 +7,9 @@
 #       *.pdf
 drive:
   pay_stubs_folder_id: "DRIVE_FILE_ID_6"
+  w2_pay_records:
+    "2024": "REDACTED_DRIVE_ID_2"
+    "2025": "REDACTED_DRIVE_ID_1"
 
 # Party and Company Configuration
 # Defines parties, their companies, and how to process their documents.
