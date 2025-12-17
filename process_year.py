@@ -551,15 +551,16 @@ def validate_year_totals(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[s
     return errors, warnings, validation_results
 
 
-def generate_noncash_bonus_summary(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
+def generate_imputed_income_summary(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Generate non-cash bonus summary from final YTD values.
+    Generate imputed income summary from final YTD values.
 
-    Non-cash bonuses (like GPS Club awards) appear as:
-    - Prize/Gift in Earnings (the expense amount, taxable)
-    - Tax Gross-Up in Earnings (covers taxes so employee gets full value)
+    Imputed income includes:
+    - Prize/Gift: Non-cash bonus expenses (GPS Club awards, etc.)
+    - Ben in Kind Grs: Benefits in kind (meals, gym, transit, etc.)
+    - Tax Gross-Up: Covers taxes so employee receives full value
 
-    Both amounts are added to gross income for W-2 purposes.
+    All amounts are added to gross income for W-2 purposes.
     Combines across all employer segments.
     """
     if not stubs:
@@ -568,6 +569,7 @@ def generate_noncash_bonus_summary(stubs: List[Dict[str, Any]]) -> Dict[str, Any
     # Combine across all employer segments
     segments = detect_employer_segments(stubs)
     prize_gift = 0.0
+    ben_in_kind = 0.0
     tax_gross_up = 0.0
 
     for segment in segments:
@@ -580,16 +582,19 @@ def generate_noncash_bonus_summary(stubs: List[Dict[str, Any]]) -> Dict[str, Any
             ytd = earning.get("ytd_amount", 0)
             if "prize" in etype and "gift" in etype:
                 prize_gift += ytd
+            elif "ben in kind" in etype or "benefit" in etype:
+                ben_in_kind += ytd
             elif "tax gross" in etype or "gross-up" in etype or "grossup" in etype:
                 tax_gross_up += ytd
 
-    if prize_gift == 0 and tax_gross_up == 0:
+    if prize_gift == 0 and ben_in_kind == 0 and tax_gross_up == 0:
         return {}
 
     return {
         "prize_expenses": prize_gift,
+        "benefits_in_kind": ben_in_kind,
         "tax_gross_up": tax_gross_up,
-        "total_taxable": prize_gift + tax_gross_up
+        "total_imputed": prize_gift + ben_in_kind + tax_gross_up
     }
 
 
@@ -965,15 +970,19 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
                 diff_str = f"{diff:+,.2f}" if abs(diff) > 0.01 else "OK"
                 print(f"  {field:<20} ${vals['sum']:>11,.2f} ${vals['ytd']:>11,.2f} {diff_str:>10}")
 
-    # Non-cash bonus summary
-    noncash = report.get("noncash_bonus", {})
-    if noncash:
+    # Imputed income summary
+    imputed = report.get("imputed_income", {})
+    if imputed:
         print("\n" + "-" * 60)
-        print("NON-CASH BONUS SUMMARY (YTD-based):")
-        print(f"  Non-cash bonus / prize expenses:  ${noncash.get('prize_expenses', 0):>10,.2f}")
-        print(f"  Tax gross-up on prizes:           ${noncash.get('tax_gross_up', 0):>10,.2f}")
-        print(f"  {'─' * 40}")
-        print(f"  Total taxable from non-cash bonuses: ${noncash.get('total_taxable', 0):>8,.2f}")
+        print("IMPUTED INCOME SUMMARY (YTD-based):")
+        if imputed.get('prize_expenses', 0) > 0:
+            print(f"  Prize/Gift expenses:     ${imputed.get('prize_expenses', 0):>10,.2f}")
+        if imputed.get('benefits_in_kind', 0) > 0:
+            print(f"  Benefits in Kind:        ${imputed.get('benefits_in_kind', 0):>10,.2f}")
+        if imputed.get('tax_gross_up', 0) > 0:
+            print(f"  Tax Gross-Up:            ${imputed.get('tax_gross_up', 0):>10,.2f}")
+        print(f"  {'─' * 35}")
+        print(f"  Total imputed income:    ${imputed.get('total_imputed', 0):>10,.2f}")
 
     # Year-end projection (only if --projection flag was passed)
     if include_projection and projection:
@@ -1169,7 +1178,7 @@ def main():
         "errors": errors,
         "warnings": warnings,
         "totals_validation": totals_comparison,
-        "noncash_bonus": generate_noncash_bonus_summary(all_stubs),
+        "imputed_income": generate_imputed_income_summary(all_stubs),
         "ytd_breakdown": generate_ytd_breakdown(all_stubs) if not errors else None,
         "projection": generate_projection(all_stubs, year) if include_projection else None,
         "stubs": all_stubs
