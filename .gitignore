@@ -31,4 +31,6 @@ cache/
 
 # Personal configuration (contains Drive folder IDs, employer info)
 config.yaml
+profile.yaml
+settings.json
 pay-calc/

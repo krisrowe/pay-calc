@@ -15,12 +15,12 @@ from paycalc.sdk import load_config as sdk_load_config, get_cache_path, get_year
 
 
 def load_config() -> dict:
-    """Load configuration from SDK config path.
+    """Load configuration from SDK profile path.
 
-    Config is loaded from (in order):
+    Profile is loaded from (in order):
     1. PAY_CALC_CONFIG_PATH environment variable
-    2. ./pay-calc/config.yaml in current directory
-    3. ~/.config/pay-calc/config.yaml (XDG default)
+    2. settings.json 'profile' key (if set)
+    3. ~/.config/pay-calc/profile.yaml (XDG default)
     """
     return sdk_load_config(require_exists=True)
 

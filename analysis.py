@@ -30,10 +30,9 @@ from processors import get_processor
 
 
 def load_config() -> dict:
-    """Load configuration from config.yaml."""
-    config_path = Path(__file__).parent / "config.yaml"
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+    """Load configuration from profile.yaml via SDK."""
+    from paycalc.sdk import load_config as sdk_load_config
+    return sdk_load_config(require_exists=True)
 
 
 def load_tax_rules(year: str) -> tuple[dict, str, bool]:
@@ -82,7 +81,7 @@ def find_year_folder(year: str) -> Optional[str]:
     """Find the folder ID for a specific year's pay stubs."""
     folder_id = get_pay_stubs_folder_id()
     if not folder_id:
-        raise RuntimeError("pay_stubs_folder_id not configured in config.yaml")
+        raise RuntimeError("pay_stubs_folder_id not configured in profile.yaml")
     items = run_gwsa_command(["drive", "list", "--folder-id", folder_id])
 
     for item in items.get("items", []):

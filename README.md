@@ -19,8 +19,16 @@ pay-calc tax-projection 2024          # Generate tax projection
 pay-calc pay-analysis 2025 --cache    # Process pay stubs (single party)
 pay-calc pay-projection 2025          # Project year-end (requires pay-analysis first)
 pay-calc household-ytd 2025           # Aggregate YTD across all parties
-pay-calc config path                  # Show config location
-pay-calc config show                  # Show current config
+
+# Configuration management
+pay-calc config path                  # Show config paths and active profile
+pay-calc config set-profile <path>    # Point to profile in your config repo
+pay-calc config show                  # Show machine settings (settings.json)
+
+# Profile management (your personal data)
+pay-calc profile show                 # Show active profile (profile.yaml)
+pay-calc profile init                 # Create new profile
+pay-calc profile set <key> <value>    # Set profile value (e.g., Drive folder IDs)
 ```
 
 ## Command Inventory
@@ -112,23 +120,53 @@ MID-YEAR (no W-2 yet):
 
 ## Configuration
 
-Configuration is loaded from (in order):
+Configuration is split into two files:
+
+### settings.json (Machine-specific)
+
+Located in `~/.config/pay-calc/settings.json`. Contains:
+- `profile`: Path to your profile.yaml (if not in default location)
+- Tool preferences (output format, etc.)
+
+These are ephemeral settings that can be recreated easily.
+
+### profile.yaml (Your personal data)
+
+Contains your private configuration:
+- `drive`: Google Drive folder IDs for W-2s and pay stubs
+- `parties`: him/her definitions with employer keywords
+
+This data is consequential - store it in a config repo you control.
+
+### Profile Resolution Order
 
 1. `PAY_CALC_CONFIG_PATH` environment variable (if set)
-2. `./pay-calc/config.yaml` in current working directory (if exists)
-3. `~/.config/pay-calc/config.yaml` (XDG default)
+2. `settings.json` → `profile` key (if set via CLI)
+3. `~/.config/pay-calc/profile.yaml` (XDG default)
 
-Initialize a new config:
+### Setup for Config Repo Pattern
+
+If you keep your profile in a separate config repo:
+
 ```bash
-pay-calc config init          # Creates ~/.config/pay-calc/config.yaml
-pay-calc config init --local  # Creates ./pay-calc/config.yaml
+# Create profile in your config repo
+pay-calc profile init --path ~/repos/my-config/pay-calc/profile.yaml
+
+# Point pay-calc to use it
+pay-calc config set-profile ~/repos/my-config/pay-calc/profile.yaml
+
+# Verify
+pay-calc config path
 ```
+
+This writes the path to `~/.config/pay-calc/settings.json`, so it works
+from any directory without environment variables.
 
 ### Data Paths (XDG Base Directory Spec)
 
 | Type | Path | Purpose |
 |------|------|---------|
-| Config | `~/.config/pay-calc/` | Settings, Drive folder IDs, party config |
+| Config | `~/.config/pay-calc/` | settings.json, default profile.yaml location |
 | Cache | `~/.cache/pay-calc/` | Downloaded PDFs (regeneratable) |
 | Data | `~/.local/share/pay-calc/` | Output files (W-2 JSON, projections) |
 
@@ -155,18 +193,13 @@ Handles multiple W-2s per individual (party) in a household.
 
 ### Full Year Pay Stub Processing
 
-The `process_year.py` script downloads and processes all pay stubs for a given year from Google Drive, validates them, and generates a comprehensive report.
+The `analysis.py` script (called via `pay-calc pay-analysis`) downloads and processes all pay stubs for a given year from Google Drive, validates them, and generates a comprehensive report.
 
 **Usage:**
 ```bash
-python3 process_year.py <year> [--format text|json] [--projection]
-```
-
-Example:
-```bash
-python3 process_year.py 2025
-python3 process_year.py 2025 --format json
-python3 process_year.py 2025 --projection
+pay-calc pay-analysis <year> [--cache] [--through-date YYYY-MM-DD]
+# Or directly:
+python3 analysis.py <year> [--format text|json] [--cache-paystubs]
 ```
 
 **What it does:**
@@ -188,19 +221,23 @@ python3 process_year.py 2025 --projection
 - JSON report with `--format json`
 - Full data saved to `data/YYYY_pay_stubs_full.json`
 
-**Projection (--projection flag):**
-When the `--projection` flag is passed, the script analyzes pay patterns and projects year-end totals:
+### Year-End Projection
 
+Use `pay-calc pay-projection` to project year-end totals from partial year data:
+
+```bash
+# First run analysis
+pay-calc pay-analysis 2025 --cache
+
+# Then run projection
+pay-calc pay-projection 2025
+```
+
+The projection analyzes pay patterns:
 - **Regular Pay**: Detects pay frequency (biweekly) and projects remaining pay periods
 - **Stock Grants**: Detects vesting pattern by month and projects remaining vests
-- **Taxes**: Estimates additional withholding using effective tax rate from actuals
-
-The projection table shows:
-| Column | Description |
-|--------|-------------|
-| Actual | Current YTD totals from last pay stub |
-| Projected Add | Estimated additional income before year-end |
-| Est. Total | Projected year-end totals (Actual + Projected) |
+- **401k**: Projects contributions to annual limit
+- **Taxes**: Estimates additional withholding using effective tax rate
 
 This is useful for mid-year tax planning and estimating quarterly payments.
 
@@ -224,7 +261,7 @@ python3 extract_w2.py 2024 her
 
 The script looks for two types of data sources in the `source-data/` directory:
 
-1.  **W-2 PDFs**: Text-based PDF files of W-2s. The script identifies the correct PDFs based on keywords in the filename (e.g., 'W-2', the year, and employer names defined in `config.yaml`).
+1.  **W-2 PDFs**: Text-based PDF files of W-2s. The script identifies the correct PDFs based on keywords in the filename (e.g., 'W-2', the year, and employer names defined in `profile.yaml`).
 2.  **Manual W-2 JSONs**: For W-2s that are image-based or cannot be parsed, you can create a manual JSON file. These files **must** follow a specific naming convention:
     `YYYY_manual-w2_{party}_{employer-slug}.json`
 
@@ -333,7 +370,8 @@ pip install PyPDF2 PyYAML
 Several standalone Python scripts exist alongside CLI commands:
 - `extract_pay_stub.py` - Single PDF processor (outputs `_party_pay_stubs.json`)
 - `calc_ytd.py` - YTD aggregation (now wrapped by `household-ytd` command)
-- `process_year.py` - Full year processor (called by `pay-analysis`)
+- `analysis.py` - Full year pay stub processor (called by `pay-analysis`)
+- `projection.py` - Year-end projection (called by `pay-projection`)
 - `generate_tax_projection.py` - Tax calculation (called by `tax-projection`)
 
 These may eventually be fully integrated into the CLI/SDK structure.

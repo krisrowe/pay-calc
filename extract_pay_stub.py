@@ -31,13 +31,9 @@ def extract_text_from_pdf(pdf_path):
 
 
 def load_config():
-    """Load configuration from config.yaml."""
-    config_file = Path("config.yaml")
-    if not config_file.exists():
-        raise FileNotFoundError("config.yaml not found. Please create it with employer definitions.")
-    
-    with open(config_file, 'r') as f:
-        return yaml.safe_load(f)
+    """Load configuration from profile.yaml via SDK."""
+    from paycalc.sdk import load_config as sdk_load_config
+    return sdk_load_config(require_exists=True)
 
 
 def normalize_text(text):

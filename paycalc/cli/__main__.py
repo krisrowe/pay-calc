@@ -11,7 +11,7 @@ from paycalc.sdk import ConfigNotFoundError
 # Add parent directory to path for importing existing modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from .config_commands import config as config_group
+from .config_commands import config as config_group, profile as profile_group
 
 
 @click.group()
@@ -26,16 +26,17 @@ def cli():
 
     \b
     1. PAY_CALC_CONFIG_PATH environment variable
-    2. ./pay-calc/config.yaml in current directory
-    3. ~/.config/pay-calc/config.yaml (XDG default)
+    2. settings.json 'profile' key (if set via CLI)
+    3. ~/.config/pay-calc/profile.yaml (XDG default)
 
-    Run 'pay-calc config init' to create a new configuration.
+    Run 'pay-calc profile init' to create a new profile.
     """
     pass
 
 
-# Add config subcommand group
+# Add config and profile subcommand groups
 cli.add_command(config_group)
+cli.add_command(profile_group)
 
 
 @cli.command("w2-extract")
@@ -116,7 +117,7 @@ def w2_extract(year, cache, output_dir):
         click.echo("\nError: Could not identify an employer for the following PDF(s):")
         for pdf_name in unidentified_pdfs:
             click.echo(f"  - {pdf_name}")
-        raise click.ClickException("Unidentified PDFs found. Add keywords to config.yaml.")
+        raise click.ClickException("Unidentified PDFs found. Add keywords to profile.yaml.")
 
     # Process manual W-2 JSON files
     manual_files = list(source_dir.glob(f"{year}_manual-w2_*.json"))

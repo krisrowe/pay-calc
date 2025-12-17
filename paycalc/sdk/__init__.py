@@ -1,17 +1,32 @@
 """Pay Calc SDK - Core functionality for pay and tax projections."""
 
 from .config import (
+    # New config architecture
+    get_config_dir,
+    get_settings_path,
+    load_settings,
+    save_settings,
+    get_setting,
+    set_setting,
+    get_profile_path,
+    load_profile,
+    save_profile,
+    get_profile_value,
+    set_profile_value,
+    ProfileNotFoundError,
+    # Legacy (deprecated, but kept for compatibility)
     get_config_path,
-    get_cache_path,
-    get_data_path,
-    get_year_cache_path,
-    get_year_data_path,
     load_config,
     save_config,
     get_config_value,
     set_config_value,
-    ensure_config_exists,
     ConfigNotFoundError,
+    # XDG paths
+    get_cache_path,
+    get_data_path,
+    get_year_cache_path,
+    get_year_data_path,
+    ensure_config_exists,
 )
 
 from .tax import (
@@ -23,18 +38,32 @@ from .tax import (
 )
 
 __all__ = [
-    # Config
+    # New config architecture
+    "get_config_dir",
+    "get_settings_path",
+    "load_settings",
+    "save_settings",
+    "get_setting",
+    "set_setting",
+    "get_profile_path",
+    "load_profile",
+    "save_profile",
+    "get_profile_value",
+    "set_profile_value",
+    "ProfileNotFoundError",
+    # Legacy (deprecated)
     "get_config_path",
-    "get_cache_path",
-    "get_data_path",
-    "get_year_cache_path",
-    "get_year_data_path",
     "load_config",
     "save_config",
     "get_config_value",
     "set_config_value",
-    "ensure_config_exists",
     "ConfigNotFoundError",
+    # XDG paths
+    "get_cache_path",
+    "get_data_path",
+    "get_year_cache_path",
+    "get_year_data_path",
+    "ensure_config_exists",
     # Tax
     "generate_tax_projection",
     "generate_projection",
