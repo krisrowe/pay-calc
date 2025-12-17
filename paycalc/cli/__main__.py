@@ -207,7 +207,8 @@ def tax_projection(year, output, w2_dir):
 @cli.command("pay-projection")
 @click.argument("year")
 @click.option("--cache", is_flag=True, help="Cache downloaded pay stub PDFs locally.")
-def pay_projection(year, cache):
+@click.option("--through-date", type=str, help="Only process pay stubs through this date (YYYY-MM-DD). Useful for comparing against historical baselines.")
+def pay_projection(year, cache, through_date):
     """Process pay stubs and project year-end compensation.
 
     Downloads pay stub PDFs from Google Drive, extracts earnings
@@ -219,12 +220,22 @@ def pay_projection(year, cache):
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
+    if through_date:
+        # Validate date format
+        from datetime import datetime
+        try:
+            datetime.strptime(through_date, "%Y-%m-%d")
+        except ValueError:
+            raise click.BadParameter(f"Invalid date format '{through_date}'. Use YYYY-MM-DD.")
+
     import subprocess
 
     # Call process_year.py with appropriate arguments
     cmd = ["python3", "process_year.py", year]
     if cache:
         cmd.append("--cache-paystubs")
+    if through_date:
+        cmd.extend(["--through-date", through_date])
 
     try:
         result = subprocess.run(cmd, check=True)

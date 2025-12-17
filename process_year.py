@@ -1253,22 +1253,35 @@ def log(msg: str):
 
 def main():
     if len(sys.argv) < 2:
-        log("Usage: python3 process_year.py <year> [--format text|json] [--projection] [--cache-paystubs]")
+        log("Usage: python3 process_year.py <year> [--format text|json] [--projection] [--cache-paystubs] [--through-date YYYY-MM-DD]")
         log("  year: 4-digit year (e.g., 2025)")
         log("  --format: Output format (default: text)")
         log("  --projection: Include year-end projection based on observed patterns")
         log("  --cache-paystubs: Cache downloaded PDFs to avoid re-downloading")
+        log("  --through-date: Only include pay stubs through this date (YYYY-MM-DD)")
         sys.exit(1)
 
     year = sys.argv[1]
     output_format = "text"
     include_projection = "--projection" in sys.argv
     cache_paystubs = "--cache-paystubs" in sys.argv
+    through_date = None
 
     if "--format" in sys.argv:
         idx = sys.argv.index("--format")
         if idx + 1 < len(sys.argv):
             output_format = sys.argv[idx + 1]
+
+    if "--through-date" in sys.argv:
+        idx = sys.argv.index("--through-date")
+        if idx + 1 < len(sys.argv):
+            through_date = sys.argv[idx + 1]
+            # Validate format
+            try:
+                datetime.strptime(through_date, "%Y-%m-%d")
+            except ValueError:
+                log(f"Error: Invalid date format '{through_date}'. Use YYYY-MM-DD.")
+                sys.exit(1)
 
     if not year.isdigit() or len(year) != 4:
         log(f"Error: Invalid year '{year}'. Must be 4 digits.")
@@ -1348,6 +1361,19 @@ def main():
 
     # Sort by date and YTD
     all_stubs.sort(key=get_sort_key)
+
+    # Filter by through_date if specified
+    if through_date:
+        cutoff = datetime.strptime(through_date, "%Y-%m-%d")
+        original_count = len(all_stubs)
+        all_stubs = [
+            s for s in all_stubs
+            if parse_pay_date(s.get("pay_date", "")) <= cutoff
+        ]
+        filtered_count = original_count - len(all_stubs)
+        if filtered_count > 0:
+            log(f"Filtered out {filtered_count} stubs after {through_date}")
+        log(f"Processing {len(all_stubs)} stubs through {through_date}")
 
     # Validate for gaps
     gap_errors, gap_warnings = validate_gaps(all_stubs, year)
