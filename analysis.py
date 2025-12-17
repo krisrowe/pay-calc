@@ -695,180 +695,6 @@ def generate_imputed_income_summary(stubs: List[Dict[str, Any]]) -> Dict[str, An
     }
 
 
-def generate_projection(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any]:
-    """
-    Generate year-end projection based on observed pay patterns.
-
-    Analyzes regular pay cadence and RSU vesting patterns to project
-    remaining income for the year.
-
-    Returns projection data with actual, projected additional, and total amounts.
-    """
-    if not stubs:
-        return {}
-
-    year_int = int(year)
-    year_end = datetime(year_int, 12, 31)
-
-    # Get the last stub and its date
-    last_stub = stubs[-1]
-    last_date_str = last_stub.get("pay_date", "")
-    last_date = parse_pay_date(last_date_str)
-    if last_date == datetime.min:
-        return {}
-
-    # Calculate days remaining in year
-    days_remaining = (year_end - last_date).days
-    if days_remaining <= 0:
-        return {}  # Year complete, no projection needed
-
-    # Analyze regular pay pattern
-    regular_stubs = [s for s in stubs if s.get("_pay_type") == "regular"]
-    regular_stubs.sort(key=lambda s: parse_pay_date(s.get("pay_date", "")))
-
-    regular_projection = 0.0
-    regular_info = {}
-    if len(regular_stubs) >= 2:
-        # Calculate average interval between regular pay stubs
-        dates = [parse_pay_date(s.get("pay_date", "")) for s in regular_stubs]
-        dates = [d for d in dates if d != datetime.min]
-
-        if len(dates) >= 2:
-            intervals = [(dates[i+1] - dates[i]).days for i in range(len(dates)-1)]
-            avg_interval = sum(intervals) / len(intervals)
-
-            # Round to nearest common pay frequency (biweekly=14, semi-monthly=15, weekly=7)
-            if 12 <= avg_interval <= 16:
-                pay_interval = 14  # Biweekly
-                frequency = "biweekly"
-            elif 6 <= avg_interval <= 8:
-                pay_interval = 7  # Weekly
-                frequency = "weekly"
-            elif 28 <= avg_interval <= 32:
-                pay_interval = 30  # Monthly
-                frequency = "monthly"
-            else:
-                pay_interval = round(avg_interval)
-                frequency = f"~{pay_interval} days"
-
-            # Get last regular pay amount
-            last_regular = regular_stubs[-1]
-            last_regular_current = last_regular.get("pay_summary", {}).get("current", {}).get("gross", 0)
-            last_regular_date = parse_pay_date(last_regular.get("pay_date", ""))
-
-            # Count remaining pay periods by stepping forward from last regular pay
-            remaining_periods = 0
-            if last_regular_date != datetime.min:
-                next_pay = last_regular_date
-                while True:
-                    next_pay = next_pay + timedelta(days=pay_interval)
-                    if next_pay > year_end:
-                        break
-                    remaining_periods += 1
-
-            regular_projection = last_regular_current * remaining_periods
-
-            regular_info = {
-                "interval_days": pay_interval,
-                "frequency": frequency,
-                "last_pay_date": last_regular_date.strftime("%Y-%m-%d") if last_regular_date != datetime.min else None,
-                "last_amount": last_regular_current,
-                "remaining_periods": remaining_periods,
-                "projected": regular_projection
-            }
-
-    # Analyze RSU/stock grant pattern
-    stock_stubs = [s for s in stubs if s.get("_pay_type") == "stock_grant"]
-    stock_stubs.sort(key=lambda s: parse_pay_date(s.get("pay_date", "")))
-
-    stock_projection = 0.0
-    stock_info = {}
-    if stock_stubs:
-        # Group by month to detect vesting pattern
-        from collections import defaultdict
-        monthly_totals = defaultdict(float)
-        for s in stock_stubs:
-            d = parse_pay_date(s.get("pay_date", ""))
-            if d != datetime.min:
-                month_key = d.month
-                current_gross = s.get("pay_summary", {}).get("current", {}).get("gross", 0)
-                monthly_totals[month_key] += current_gross
-
-        months_with_vests = sorted(monthly_totals.keys())
-        avg_vesting = sum(monthly_totals.values()) / len(monthly_totals) if monthly_totals else 0
-
-        # Detect vesting frequency
-        # Monthly: vests in most months (8+ out of months seen so far)
-        # Quarterly: vests in ~4 months per year
-        last_stock_date = parse_pay_date(stock_stubs[-1].get("pay_date", ""))
-        months_so_far = last_stock_date.month if last_stock_date != datetime.min else 12
-
-        if len(months_with_vests) >= 8:
-            # Monthly vesting - check which remaining months don't have vests yet
-            frequency = "monthly"
-            remaining_vest_months = [m for m in range(1, 13) if m not in months_with_vests and m <= 12]
-        else:
-            # Quarterly or irregular - project based on observed pattern
-            frequency = "quarterly" if len(months_with_vests) <= 4 else "irregular"
-            remaining_vest_months = [m for m in months_with_vests if m > last_stock_date.month]
-
-        remaining_vests = len(remaining_vest_months)
-
-        if remaining_vests > 0:
-            stock_projection = avg_vesting * remaining_vests
-            stock_info = {
-                "frequency": frequency,
-                "months_with_vests": months_with_vests,
-                "avg_vesting": avg_vesting,
-                "remaining_months": remaining_vest_months,
-                "remaining_vests": remaining_vests,
-                "projected": stock_projection
-            }
-
-    # Get actual YTD totals combined across all employer segments
-    segments = detect_employer_segments(stubs)
-    actual_gross = 0.0
-    actual_fit_taxable = 0.0
-    actual_taxes = 0.0
-    for segment in segments:
-        if segment:
-            seg_ytd = segment[-1].get("pay_summary", {}).get("ytd", {})
-            actual_gross += seg_ytd.get("gross", 0)
-            actual_fit_taxable += seg_ytd.get("fit_taxable_wages", 0)
-            actual_taxes += seg_ytd.get("taxes", 0)
-
-    # Calculate projected totals
-    total_projection = regular_projection + stock_projection
-    projected_gross = actual_gross + total_projection
-
-    # Estimate projected taxes (use effective rate from actuals)
-    effective_tax_rate = actual_taxes / actual_gross if actual_gross > 0 else 0.25
-    projected_additional_taxes = total_projection * effective_tax_rate
-    projected_total_taxes = actual_taxes + projected_additional_taxes
-
-    return {
-        "as_of_date": last_date_str,
-        "days_remaining": days_remaining,
-        "actual": {
-            "gross": actual_gross,
-            "fit_taxable_wages": actual_fit_taxable,
-            "taxes_withheld": actual_taxes
-        },
-        "projected_additional": {
-            "regular_pay": regular_projection,
-            "stock_grants": stock_projection,
-            "total_gross": total_projection,
-            "taxes": projected_additional_taxes
-        },
-        "projected_total": {
-            "gross": projected_gross,
-            "taxes_withheld": projected_total_taxes
-        },
-        "regular_pay_info": regular_info,
-        "stock_grant_info": stock_info
-    }
-
-
 def normalize_earnings_type(etype: str) -> str:
     """Normalize earnings type names for consistent aggregation."""
     import re
@@ -1008,13 +834,12 @@ def generate_summary(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any]:
     }
 
 
-def print_text_report(report: Dict[str, Any], include_projection: bool = False):
+def print_text_report(report: Dict[str, Any]):
     """Print a text format report from the JSON report object."""
     summary = report["summary"]
     errors = report["errors"]
     warnings = report["warnings"]
     ytd_breakdown = report.get("ytd_breakdown")
-    projection = report.get("projection")
 
     print("\n" + "=" * 60)
     print(f"PAY STUB YEAR SUMMARY: {summary['year']}")
@@ -1134,97 +959,6 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
         print(f"  {'─' * 35}")
         print(f"  Total imputed income:    ${imputed.get('total_imputed', 0):>10,.2f}")
 
-    # Year-end projection (only if --projection flag was passed)
-    if include_projection and projection:
-        print("\n" + "-" * 60)
-        print(f"YEAR-END PROJECTION (as of {projection.get('as_of_date', 'N/A')}, {projection.get('days_remaining', 0)} days remaining)")
-        print()
-
-        actual = projection.get("actual", {})
-        additional = projection.get("projected_additional", {})
-        total = projection.get("projected_total", {})
-
-        # Load tax rules for 401k limits
-        report_year = summary.get("year", "2025")
-        tax_rules, rules_year, exact_match = load_tax_rules(report_year)
-        k401_limits = tax_rules.get("401k", {})
-        employee_elective_limit = k401_limits.get("employee_elective_limit", 23500)
-        total_annual_limit = k401_limits.get("total_annual_limit", 70000)
-
-        if not exact_match:
-            print(f"  ⚠ Tax rules for {report_year} not found, using {rules_year} rules")
-            print()
-
-        # Get 401k totals to add to compensation
-        contrib_401k = report.get("contributions_401k", {}).get("yearly_totals", {})
-        total_401k = contrib_401k.get("total", 0)
-        pretax_401k = contrib_401k.get("pretax", 0)
-
-        # Project additional 401k needed to reach total annual limit
-        target_401k = total_annual_limit
-        projected_401k_add = max(0, target_401k - total_401k)
-        projected_401k_total = total_401k + projected_401k_add
-
-        # Calculate total compensation (gross + all 401k)
-        actual_total_comp = actual.get('gross', 0) + total_401k
-        projected_total_comp = total.get('gross', 0) + projected_401k_total
-
-        # Main projection table
-        print(f"  {'Category':<25} {'Actual':>14} {'Projected Add':>14} {'Est. Total':>14}")
-        print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
-
-        # Gross
-        print(f"  {'Gross':<25} ${actual.get('gross', 0):>13,.2f} ${additional.get('total_gross', 0):>13,.2f} ${total.get('gross', 0):>13,.2f}")
-
-        # Break down by type - get actuals from ytd_breakdown
-        ytd_earnings = ytd_breakdown.get("earnings", {}) if ytd_breakdown else {}
-        actual_regular = ytd_earnings.get("Regular Pay", 0)
-        actual_stock = ytd_earnings.get("Goog Stock Unit", 0)
-        actual_other = actual.get('gross', 0) - actual_regular - actual_stock
-
-        reg_proj = additional.get("regular_pay", 0)
-        stock_proj = additional.get("stock_grants", 0)
-
-        # Reduce regular pay projection by 401k projection (401k comes out of regular pay)
-        reg_proj_display = reg_proj - projected_401k_add
-        print(f"    {'└ Regular Pay':<23} ${actual_regular:>13,.2f} ${reg_proj_display:>13,.2f}")
-        print(f"    {'└ Stock Vesting':<23} ${actual_stock:>13,.2f} ${stock_proj:>13,.2f}")
-        print(f"    {'└ Other (bonuses, etc)':<23} ${actual_other:>13,.2f} {'$0.00':>14}")
-
-        # 401k
-        if total_401k > 0 or projected_401k_add > 0:
-            print(f"  {'+ 401k Contributions':<25} ${total_401k:>13,.2f} ${projected_401k_add:>13,.2f} ${projected_401k_total:>13,.2f}")
-
-        # Total Compensation
-        projected_comp_add = additional.get('total_gross', 0) + projected_401k_add
-        print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
-        print(f"  {'Total Compensation':<25} ${actual_total_comp:>13,.2f} ${projected_comp_add:>13,.2f} ${projected_total_comp:>13,.2f}")
-
-        # Taxes
-        print(f"  {'Taxes Withheld':<25} ${actual.get('taxes_withheld', 0):>13,.2f} ${additional.get('taxes', 0):>13,.2f} ${total.get('taxes_withheld', 0):>13,.2f}")
-        print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
-
-        # Pattern info
-        reg_info = projection.get("regular_pay_info", {})
-        stock_info = projection.get("stock_grant_info", {})
-
-        if reg_info:
-            print(f"\n  Regular Pay Pattern:")
-            print(f"    Frequency: {reg_info.get('frequency', 'unknown')} ({reg_info.get('interval_days', 0)} days)")
-            print(f"    Last pay date: {reg_info.get('last_pay_date', 'unknown')}")
-            print(f"    Last amount: ${reg_info.get('last_amount', 0):,.2f}")
-            print(f"    Remaining periods: {reg_info.get('remaining_periods', 0)}")
-
-        if stock_info:
-            print(f"\n  Stock Vesting Pattern:")
-            month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            print(f"    Frequency: {stock_info.get('frequency', 'unknown')}")
-            remaining = stock_info.get('remaining_months', [])
-            remaining_names = [month_names[m-1] for m in remaining]
-            print(f"    Remaining months: {', '.join(remaining_names) if remaining_names else 'none'}")
-            print(f"    Avg per vest: ${stock_info.get('avg_vesting', 0):,.2f}")
-            print(f"    Remaining vests: {stock_info.get('remaining_vests', 0)}")
-
     if errors:
         print("\n" + "-" * 60)
         print("ERRORS (gaps detected):")
@@ -1246,116 +980,6 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
     print("=" * 60)
 
 
-def print_projection_report(projection: Dict[str, Any], report_data: Dict[str, Any]):
-    """Print standalone projection report.
-
-    Used by pay-projection CLI command to display projection results
-    without re-running full pay stub analysis.
-
-    Args:
-        projection: Projection data from generate_projection()
-        report_data: Full report data containing summary, ytd_breakdown, contributions_401k
-    """
-    if not projection:
-        print("No projection data available.")
-        return
-
-    summary = report_data.get("summary", {})
-    ytd_breakdown = report_data.get("ytd_breakdown", {})
-    contrib_401k = report_data.get("contributions_401k", {}).get("yearly_totals", {})
-
-    print("=" * 60)
-    print(f"YEAR-END PROJECTION (as of {projection.get('as_of_date', 'N/A')}, {projection.get('days_remaining', 0)} days remaining)")
-    print("=" * 60)
-    print()
-
-    actual = projection.get("actual", {})
-    additional = projection.get("projected_additional", {})
-    total = projection.get("projected_total", {})
-
-    # Load tax rules for 401k limits
-    report_year = summary.get("year", "2025")
-    tax_rules, rules_year, exact_match = load_tax_rules(report_year)
-    k401_limits = tax_rules.get("401k", {})
-    employee_elective_limit = k401_limits.get("employee_elective_limit", 23500)
-    total_annual_limit = k401_limits.get("total_annual_limit", 70000)
-
-    if not exact_match:
-        print(f"  ⚠ Tax rules for {report_year} not found, using {rules_year} rules")
-        print()
-
-    # Get 401k totals
-    total_401k = contrib_401k.get("total", 0)
-    pretax_401k = contrib_401k.get("pretax", 0)
-
-    # Project additional 401k needed to reach total annual limit
-    target_401k = total_annual_limit
-    projected_401k_add = max(0, target_401k - total_401k)
-    projected_401k_total = total_401k + projected_401k_add
-
-    # Calculate total compensation (gross + all 401k)
-    actual_total_comp = actual.get('gross', 0) + total_401k
-    projected_total_comp = total.get('gross', 0) + projected_401k_total
-
-    # Main projection table
-    print(f"  {'Category':<25} {'Actual':>14} {'Projected Add':>14} {'Est. Total':>14}")
-    print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
-
-    # Gross
-    print(f"  {'Gross':<25} ${actual.get('gross', 0):>13,.2f} ${additional.get('total_gross', 0):>13,.2f} ${total.get('gross', 0):>13,.2f}")
-
-    # Break down by type - get actuals from ytd_breakdown
-    ytd_earnings = ytd_breakdown.get("earnings", {}) if ytd_breakdown else {}
-    actual_regular = ytd_earnings.get("Regular Pay", 0)
-    actual_stock = ytd_earnings.get("Goog Stock Unit", 0)
-    actual_other = actual.get('gross', 0) - actual_regular - actual_stock
-
-    reg_proj = additional.get("regular_pay", 0)
-    stock_proj = additional.get("stock_grants", 0)
-
-    # Reduce regular pay projection by 401k projection (401k comes out of regular pay)
-    reg_proj_display = reg_proj - projected_401k_add
-    print(f"    {'└ Regular Pay':<23} ${actual_regular:>13,.2f} ${reg_proj_display:>13,.2f}")
-    print(f"    {'└ Stock Vesting':<23} ${actual_stock:>13,.2f} ${stock_proj:>13,.2f}")
-    print(f"    {'└ Other (bonuses, etc)':<23} ${actual_other:>13,.2f} {'$0.00':>14}")
-
-    # 401k
-    if total_401k > 0 or projected_401k_add > 0:
-        print(f"  {'+ 401k Contributions':<25} ${total_401k:>13,.2f} ${projected_401k_add:>13,.2f} ${projected_401k_total:>13,.2f}")
-
-    # Total Compensation
-    projected_comp_add = additional.get('total_gross', 0) + projected_401k_add
-    print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
-    print(f"  {'Total Compensation':<25} ${actual_total_comp:>13,.2f} ${projected_comp_add:>13,.2f} ${projected_total_comp:>13,.2f}")
-
-    # Taxes
-    print(f"  {'Taxes Withheld':<25} ${actual.get('taxes_withheld', 0):>13,.2f} ${additional.get('taxes', 0):>13,.2f} ${total.get('taxes_withheld', 0):>13,.2f}")
-    print(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
-
-    # Pattern info
-    reg_info = projection.get("regular_pay_info", {})
-    stock_info = projection.get("stock_grant_info", {})
-
-    if reg_info:
-        print(f"\n  Regular Pay Pattern:")
-        print(f"    Frequency: {reg_info.get('frequency', 'unknown')} ({reg_info.get('interval_days', 0)} days)")
-        print(f"    Last pay date: {reg_info.get('last_pay_date', 'unknown')}")
-        print(f"    Last amount: ${reg_info.get('last_amount', 0):,.2f}")
-        print(f"    Remaining periods: {reg_info.get('remaining_periods', 0)}")
-
-    if stock_info:
-        print(f"\n  Stock Vesting Pattern:")
-        month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-        print(f"    Frequency: {stock_info.get('frequency', 'unknown')}")
-        remaining = stock_info.get('remaining_months', [])
-        remaining_names = [month_names[m-1] for m in remaining]
-        print(f"    Remaining months: {', '.join(remaining_names) if remaining_names else 'none'}")
-        print(f"    Avg per vest: ${stock_info.get('avg_vesting', 0):,.2f}")
-        print(f"    Remaining vests: {stock_info.get('remaining_vests', 0)}")
-
-    print("\n" + "=" * 60)
-
-
 def log(msg: str):
     """Print progress/debug message to stderr."""
     print(msg, file=sys.stderr)
@@ -1363,17 +987,15 @@ def log(msg: str):
 
 def main():
     if len(sys.argv) < 2:
-        log("Usage: python3 process_year.py <year> [--format text|json] [--projection] [--cache-paystubs] [--through-date YYYY-MM-DD]")
+        log("Usage: python3 analysis.py <year> [--format text|json] [--cache-paystubs] [--through-date YYYY-MM-DD]")
         log("  year: 4-digit year (e.g., 2025)")
         log("  --format: Output format (default: text)")
-        log("  --projection: Include year-end projection based on observed patterns")
         log("  --cache-paystubs: Cache downloaded PDFs to avoid re-downloading")
         log("  --through-date: Only include pay stubs through this date (YYYY-MM-DD)")
         sys.exit(1)
 
     year = sys.argv[1]
     output_format = "text"
-    include_projection = "--projection" in sys.argv
     cache_paystubs = "--cache-paystubs" in sys.argv
     through_date = None
 
@@ -1507,7 +1129,6 @@ def main():
         "contributions_401k": generate_401k_contributions(all_stubs),
         "imputed_income": generate_imputed_income_summary(all_stubs),
         "ytd_breakdown": generate_ytd_breakdown(all_stubs) if not errors else None,
-        "projection": generate_projection(all_stubs, year) if include_projection else None,
         "stubs": all_stubs
     }
 
@@ -1515,7 +1136,7 @@ def main():
     if output_format == "json":
         print(json.dumps(report, indent=2))
     else:
-        print_text_report(report, include_projection)
+        print_text_report(report)
 
     # Save full data to file (always include ytd_breakdown for reference)
     output_file = Path("data") / f"{year}_pay_stubs_full.json"

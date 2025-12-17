@@ -242,8 +242,8 @@ def pay_analysis(year, cache, through_date):
 
     import subprocess
 
-    # Call process_year.py with appropriate arguments
-    cmd = ["python3", "process_year.py", year]
+    # Call analysis.py with appropriate arguments
+    cmd = ["python3", "analysis.py", year]
     if cache:
         cmd.append("--cache-paystubs")
     if through_date:
@@ -252,7 +252,7 @@ def pay_analysis(year, cache, through_date):
     try:
         result = subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Pay projection failed with exit code {e.returncode}")
+        raise click.ClickException(f"Pay analysis failed with exit code {e.returncode}")
 
 
 @cli.command("pay-projection")
@@ -300,26 +300,15 @@ def pay_projection(year, input_file):
         click.echo(f"    pay-calc pay-projection {year}", err=True)
         raise SystemExit(1)
 
-    # Load the pay stub data
-    with open(input_path, "r") as f:
-        data = json.load(f)
+    import subprocess
 
-    stubs = data.get("stubs", [])
-    if not stubs:
-        raise click.ClickException(f"No pay stub data found in {input_path}")
+    # Call projection.py with the input file
+    cmd = ["python3", "projection.py", str(input_path)]
 
-    # Import and run projection
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    from process_year import generate_projection, print_projection_report
-
-    projection = generate_projection(stubs, year)
-
-    if not projection:
-        click.echo(f"No projection generated - year may be complete or insufficient data.")
-        return
-
-    # Print projection report (pass full data for ytd_breakdown, 401k info)
-    print_projection_report(projection, data)
+    try:
+        result = subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        raise click.ClickException(f"Pay projection failed with exit code {e.returncode}")
 
 
 @cli.command("household-ytd")
