@@ -682,7 +682,7 @@ def generate_projection(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any
     stock_projection = 0.0
     stock_info = {}
     if stock_stubs:
-        # Group by month to detect quarterly pattern
+        # Group by month to detect vesting pattern
         from collections import defaultdict
         monthly_totals = defaultdict(float)
         for s in stock_stubs:
@@ -692,19 +692,33 @@ def generate_projection(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any
                 current_gross = s.get("pay_summary", {}).get("current", {}).get("gross", 0)
                 monthly_totals[month_key] += current_gross
 
-        # Check for quarterly pattern (typically Feb, May, Aug, Nov or Mar, Jun, Sep, Dec)
-        vesting_months = sorted(monthly_totals.keys())
+        months_with_vests = sorted(monthly_totals.keys())
         avg_vesting = sum(monthly_totals.values()) / len(monthly_totals) if monthly_totals else 0
 
-        # Estimate remaining vesting months
-        remaining_vest_months = [m for m in vesting_months if m > last_date.month]
+        # Detect vesting frequency
+        # Monthly: vests in most months (8+ out of months seen so far)
+        # Quarterly: vests in ~4 months per year
+        last_stock_date = parse_pay_date(stock_stubs[-1].get("pay_date", ""))
+        months_so_far = last_stock_date.month if last_stock_date != datetime.min else 12
+
+        if len(months_with_vests) >= 8:
+            # Monthly vesting - check which remaining months don't have vests yet
+            frequency = "monthly"
+            remaining_vest_months = [m for m in range(1, 13) if m not in months_with_vests and m <= 12]
+        else:
+            # Quarterly or irregular - project based on observed pattern
+            frequency = "quarterly" if len(months_with_vests) <= 4 else "irregular"
+            remaining_vest_months = [m for m in months_with_vests if m > last_stock_date.month]
+
         remaining_vests = len(remaining_vest_months)
 
         if remaining_vests > 0:
             stock_projection = avg_vesting * remaining_vests
             stock_info = {
-                "vesting_months": vesting_months,
+                "frequency": frequency,
+                "months_with_vests": months_with_vests,
                 "avg_vesting": avg_vesting,
+                "remaining_months": remaining_vest_months,
                 "remaining_vests": remaining_vests,
                 "projected": stock_projection
             }
@@ -1004,10 +1018,11 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
 
         if stock_info:
             print(f"\n  Stock Grant Pattern:")
-            vest_months = stock_info.get('vesting_months', [])
             month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
-            vest_names = [month_names[m-1] for m in vest_months]
-            print(f"    Vesting months: {', '.join(vest_names)}")
+            print(f"    Frequency: {stock_info.get('frequency', 'unknown')}")
+            remaining = stock_info.get('remaining_months', [])
+            remaining_names = [month_names[m-1] for m in remaining]
+            print(f"    Remaining months: {', '.join(remaining_names) if remaining_names else 'none'}")
             print(f"    Avg per vest: ${stock_info.get('avg_vesting', 0):,.2f}")
             print(f"    Remaining vests: {stock_info.get('remaining_vests', 0)}")
 
