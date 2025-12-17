@@ -1,3 +1,13 @@
+# Google Drive Folder Configuration
+# The process_year.py script looks for pay stubs in this folder structure:
+#   pay_stubs_folder/
+#     2024/           <- Year subfolder
+#       *.pdf         <- Multi-period pay stub PDFs
+#     2025/
+#       *.pdf
+drive:
+  pay_stubs_folder_id: "DRIVE_FILE_ID_6"
+
 # Party and Company Configuration
 # Defines parties, their companies, and how to process their documents.
 
@@ -33,3 +43,19 @@ processors:
   generic:
     description: "Generic processor for simple formats"
     class: "GenericProcessor"
+
+# Validation Configuration
+# Controls how pay stub validation handles discrepancies between
+# displayed "current" values and actual YTD increases.
+#
+# Some fields have known UI bugs where the PDF displays incorrect
+# current values, but YTD is correct. These are configured as warnings.
+# All other fields with current != YTD increase result in errors.
+validation:
+  # Fields where current != YTD increase should be a warning, not an error.
+  # Each entry specifies the field name (from earnings) and a description.
+  allow_current_mismatch:
+    - field: "Prize/Gift"
+      message: "Non-cash bonus / prize expense"
+    - field: "Tax Gross-Up"
+      message: "Tax gross-up on prizes"

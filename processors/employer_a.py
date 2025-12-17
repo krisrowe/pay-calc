@@ -151,49 +151,92 @@ class Employer AProcessor:
     def _extract_earnings(text):
         """Extract earnings section."""
         earnings = []
-        
+
         # Handle space variations in "Pay T ype" vs "Pay Type"
         earnings_match = re.search(r'Earnings\s+Pay\s+T\s*ype.*?Total\s+Hours', text, re.DOTALL | re.IGNORECASE)
         if not earnings_match:
             # Try without space issue
             earnings_match = re.search(r'Earnings\s+Pay\s+Type.*?Total\s+Hours', text, re.DOTALL | re.IGNORECASE)
-        
+
         if not earnings_match:
             return earnings
-        
+
         earnings_text = earnings_match.group(0)
-        
-        # Pattern for earnings lines: Type, Hours, Rate, Current, YTD
-        pattern = r'([A-Za-z\s/]+?)\s+(\d+\.?\d*)\s+\$?(\d+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
-        
-        for match in re.finditer(pattern, earnings_text):
+
+        # Normalize text: replace newlines with spaces, collapse multiple spaces
+        # This handles cases where type names span lines (e.g., "Regular\nPay")
+        normalized = re.sub(r'\s+', ' ', earnings_text)
+
+        # Remove header text
+        normalized = re.sub(r'Earnings\s+Pay\s+T\s*ype\s+Hours\s*Pay\s*Rate\s+Current\s+YTD\s*', '', normalized)
+        normalized = re.sub(r'Total\s+Hours\s+W\s*orked.*', '', normalized)
+
+        # Pattern 1: Type with Hours/Rate
+        # e.g., "Regular Pay 80.000000 $75.00 $5,000.00 $10,000.00"
+        pattern_with_hours = re.compile(
+            r'([A-Za-z][A-Za-z\s/\-]*?)\s*'  # Type name (starts with letter)
+            r'(\d+\.\d+)\s+'                  # Hours
+            r'\$?([\d,]+\.?\d*)\s+'           # Rate
+            r'\$?([\d,]+\.?\d*)\s+'           # Current
+            r'\$?([\d,]+\.?\d*)',             # YTD
+            re.IGNORECASE
+        )
+
+        # Pattern 2: Type without Hours/Rate (just Current and YTD)
+        # e.g., "Prize/ Gift $321.67 $2,000.00"
+        pattern_no_hours = re.compile(
+            r'([A-Za-z][A-Za-z\s/\-]*?)\s+'   # Type name
+            r'\$([\d,]+\.?\d*)\s+'             # Current
+            r'\$([\d,]+\.?\d*)',               # YTD
+            re.IGNORECASE
+        )
+
+        # First, extract all with-hours matches (more specific pattern first)
+        for match in pattern_with_hours.finditer(normalized):
             etype = match.group(1).strip()
             current = extract_amount(match.group(4))
             ytd = extract_amount(match.group(5))
-            
-            if current == 0.0 and ytd == 0.0 and etype not in ['Regular Pay', 'Recognition Bonus', 'Sales Bonus']:
+
+            # Skip if both values are zero and not a known type
+            if current == 0.0 and ytd == 0.0 and etype.lower() not in ['regular pay', 'recognition bonus', 'sales bonus']:
                 continue
-            
+
+            # Clean up type name
+            etype = re.sub(r'\s+', ' ', etype).strip()
+
             earnings.append({
                 "type": etype,
                 "current_amount": current,
                 "ytd_amount": ytd
             })
-        
-        # Also look for bonus lines that might not have hours/rate
-        bonus_pattern = r'(Peer\s+Bonus|Sales\s+Bonus\s+Q\d+|Annual\s+Bonus)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
-        for match in re.finditer(bonus_pattern, earnings_text, re.IGNORECASE):
+
+        # Now look for no-hours patterns that weren't captured
+        # Create a version with matched parts removed to avoid duplicates
+        remaining = normalized
+        for e in earnings:
+            # Remove matched earnings from remaining text to find additional ones
+            remaining = remaining.replace(e["type"], '')
+
+        for match in pattern_no_hours.finditer(remaining):
             etype = match.group(1).strip()
             current = extract_amount(match.group(2))
             ytd = extract_amount(match.group(3))
-            
-            if not any(e["type"] == etype for e in earnings):
-                earnings.append({
-                    "type": etype,
-                    "current_amount": current,
-                    "ytd_amount": ytd
-                })
-        
+
+            # Skip if already found (by name similarity)
+            etype_clean = re.sub(r'\s+', ' ', etype).strip()
+            if any(e["type"].lower() == etype_clean.lower() for e in earnings):
+                continue
+
+            # Skip obvious non-earnings
+            if etype_clean.lower() in ['current', 'ytd', 'total']:
+                continue
+
+            earnings.append({
+                "type": etype_clean,
+                "current_amount": current,
+                "ytd_amount": ytd
+            })
+
         return earnings
     
     @staticmethod

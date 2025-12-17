@@ -22,14 +22,24 @@ from pathlib import Path
 from datetime import datetime
 from typing import List, Dict, Any, Optional, Tuple
 import PyPDF2
+import yaml
 
 # Add parent directory to path for processor imports
 sys.path.insert(0, str(Path(__file__).parent))
 from processors import get_processor
 
 
-# Pay Stubs folder ID (shared from corporate account)
-PAY_STUBS_FOLDER_ID = "DRIVE_FILE_ID_6"
+def load_config() -> dict:
+    """Load configuration from config.yaml."""
+    config_path = Path(__file__).parent / "config.yaml"
+    with open(config_path) as f:
+        return yaml.safe_load(f)
+
+
+def get_pay_stubs_folder_id() -> str:
+    """Get the Pay Stubs folder ID from config."""
+    config = load_config()
+    return config.get("drive", {}).get("pay_stubs_folder_id", "")
 
 
 def run_gwsa_command(args: List[str]) -> dict:
@@ -43,7 +53,10 @@ def run_gwsa_command(args: List[str]) -> dict:
 
 def find_year_folder(year: str) -> Optional[str]:
     """Find the folder ID for a specific year's pay stubs."""
-    items = run_gwsa_command(["drive", "list", "--folder-id", PAY_STUBS_FOLDER_ID])
+    folder_id = get_pay_stubs_folder_id()
+    if not folder_id:
+        raise RuntimeError("pay_stubs_folder_id not configured in config.yaml")
+    items = run_gwsa_command(["drive", "list", "--folder-id", folder_id])
 
     for item in items.get("items", []):
         if item["type"] == "folder" and item["name"].startswith(year):
@@ -253,6 +266,295 @@ def validate_gaps(stubs: List[Dict[str, Any]], year: str) -> Tuple[List[str], Li
     return errors, warnings
 
 
+def detect_employer_segments(stubs: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
+    """
+    Split stubs into segments by employer based on YTD resets.
+
+    Returns list of stub lists, one per employer segment.
+    """
+    if not stubs:
+        return []
+
+    segments = []
+    current_segment = []
+    prev_ytd = 0
+
+    for stub in stubs:
+        ytd_gross = stub.get("pay_summary", {}).get("ytd", {}).get("gross", 0)
+
+        # Detect YTD reset (employer change)
+        if prev_ytd > 10000 and ytd_gross < prev_ytd * 0.5:
+            if current_segment:
+                segments.append(current_segment)
+            current_segment = [stub]
+        else:
+            current_segment.append(stub)
+
+        prev_ytd = ytd_gross
+
+    if current_segment:
+        segments.append(current_segment)
+
+    return segments
+
+
+def validate_segment_totals(segment: List[Dict[str, Any]], segment_name: str) -> Tuple[List[str], List[str], Dict[str, Any]]:
+    """Validate totals for a single employer segment."""
+    errors = []
+    warnings = []
+
+    if not segment:
+        return errors, warnings, {}
+
+    # Get date range for this segment
+    first_date = segment[0].get("pay_date", "unknown")
+    last_date = segment[-1].get("pay_date", "unknown")
+
+    # Initialize accumulators
+    sum_gross = 0.0
+    sum_fit_taxable = 0.0
+    sum_taxes = 0.0
+    sum_net = 0.0
+    sum_deductions = 0.0
+    sum_fed_withheld = 0.0
+    sum_ss_withheld = 0.0
+    sum_medicare_withheld = 0.0
+    sum_401k_employee = 0.0
+
+    for stub in segment:
+        pay_summary = stub.get("pay_summary", {}).get("current", {})
+        sum_gross += pay_summary.get("gross", 0)
+        sum_fit_taxable += pay_summary.get("fit_taxable_wages", 0)
+        sum_taxes += pay_summary.get("taxes", 0)
+        sum_net += pay_summary.get("net_pay", 0)
+        sum_deductions += pay_summary.get("deductions", 0)
+
+        taxes = stub.get("taxes", {})
+        sum_fed_withheld += taxes.get("federal_income_tax", {}).get("current_withheld", 0)
+        sum_ss_withheld += taxes.get("social_security", {}).get("current_withheld", 0)
+        sum_medicare_withheld += taxes.get("medicare", {}).get("current_withheld", 0)
+
+        for ded in stub.get("deductions", []):
+            ded_type = ded.get("type", "").lower()
+            if "k pretax" in ded_type or "401k" in ded_type or "k at" in ded_type:
+                sum_401k_employee += ded.get("current_amount", 0)
+
+    # Get final YTD values from last stub in segment
+    last_stub = segment[-1]
+    final_ytd = last_stub.get("pay_summary", {}).get("ytd", {})
+    final_taxes = last_stub.get("taxes", {})
+
+    ytd_gross = final_ytd.get("gross", 0)
+    ytd_fit_taxable = final_ytd.get("fit_taxable_wages", 0)
+    ytd_taxes = final_ytd.get("taxes", 0)
+    ytd_net = final_ytd.get("net_pay", 0)
+    ytd_deductions = final_ytd.get("deductions", 0)
+    ytd_fed_withheld = final_taxes.get("federal_income_tax", {}).get("ytd_withheld", 0)
+    ytd_ss_withheld = final_taxes.get("social_security", {}).get("ytd_withheld", 0)
+    ytd_medicare_withheld = final_taxes.get("medicare", {}).get("ytd_withheld", 0)
+
+    ytd_401k_employee = 0.0
+    ytd_401k_employer = 0.0
+    for ded in last_stub.get("deductions", []):
+        ded_type = ded.get("type", "").lower()
+        if "k pretax" in ded_type or "401k" in ded_type or "k at" in ded_type:
+            ytd_401k_employee += ded.get("ytd_amount", 0)
+            ytd_401k_employer += ded.get("employer_match_ytd", 0)
+
+    # Build comparison dict with metadata
+    totals = {
+        "segment": segment_name,
+        "stub_count": len(segment),
+        "date_range": {"start": first_date, "end": last_date},
+        "fields": {
+            "gross": {"sum": sum_gross, "ytd": ytd_gross, "diff": sum_gross - ytd_gross},
+            "fit_taxable_wages": {"sum": sum_fit_taxable, "ytd": ytd_fit_taxable, "diff": sum_fit_taxable - ytd_fit_taxable},
+            "taxes": {"sum": sum_taxes, "ytd": ytd_taxes, "diff": sum_taxes - ytd_taxes},
+            "net_pay": {"sum": sum_net, "ytd": ytd_net, "diff": sum_net - ytd_net},
+            "deductions": {"sum": sum_deductions, "ytd": ytd_deductions, "diff": sum_deductions - ytd_deductions},
+            "federal_withheld": {"sum": sum_fed_withheld, "ytd": ytd_fed_withheld, "diff": sum_fed_withheld - ytd_fed_withheld},
+            "social_security": {"sum": sum_ss_withheld, "ytd": ytd_ss_withheld, "diff": sum_ss_withheld - ytd_ss_withheld},
+            "medicare": {"sum": sum_medicare_withheld, "ytd": ytd_medicare_withheld, "diff": sum_medicare_withheld - ytd_medicare_withheld},
+            "401k_employee": {"sum": sum_401k_employee, "ytd": ytd_401k_employee, "diff": sum_401k_employee - ytd_401k_employee},
+        },
+        "401k_summary": {
+            "employee": ytd_401k_employee,
+            "employer_match": ytd_401k_employer,
+            "total": ytd_401k_employee + ytd_401k_employer,
+        }
+    }
+
+    # Check for discrepancies (any diff > $1 is an error)
+    TOLERANCE = 1.00
+    for field, values in totals["fields"].items():
+        diff = abs(values["diff"])
+        if diff > TOLERANCE:
+            errors.append(
+                f"[{segment_name}] {field}: sum=${values['sum']:,.2f}, "
+                f"YTD=${values['ytd']:,.2f}, diff=${values['diff']:+,.2f}"
+            )
+
+    return errors, warnings, totals
+
+
+def get_warning_fields() -> Dict[str, str]:
+    """
+    Get fields configured to warn (not error) on current vs YTD mismatch.
+
+    Returns dict mapping field name (lowercase) to description message.
+    """
+    config = load_config()
+    warning_fields = {}
+    for entry in config.get("validation", {}).get("allow_current_mismatch", []):
+        field = entry.get("field", "").lower()
+        message = entry.get("message", "")
+        if field:
+            warning_fields[field] = message
+    return warning_fields
+
+
+def validate_stub_deltas(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[str]]:
+    """
+    Validate that displayed current values match actual YTD increases.
+
+    For each stub (after the first), compares the displayed "current" amount
+    to the actual YTD increase (this_ytd - previous_ytd) for each earnings field.
+
+    Fields in the config's allow_current_mismatch list generate warnings.
+    All other fields with mismatches generate errors.
+
+    Returns:
+        Tuple of (errors, warnings)
+    """
+    errors = []
+    warnings = []
+
+    if len(stubs) < 2:
+        return errors, warnings
+
+    warning_fields = get_warning_fields()
+    TOLERANCE = 0.01
+
+    prev_earnings = {}  # field -> ytd_amount
+
+    for i, stub in enumerate(stubs):
+        pay_date = stub.get("pay_date", "unknown")
+
+        # Build current earnings lookup
+        curr_earnings = {}
+        for earning in stub.get("earnings", []):
+            field = earning.get("type", "")
+            curr_earnings[field] = {
+                "current": earning.get("current_amount", 0),
+                "ytd": earning.get("ytd_amount", 0)
+            }
+
+        # Skip first stub - no previous to compare
+        if i == 0:
+            prev_earnings = {k: v["ytd"] for k, v in curr_earnings.items()}
+            continue
+
+        # Compare each field
+        for field, values in curr_earnings.items():
+            displayed_current = values["current"]
+            current_ytd = values["ytd"]
+            prev_ytd = prev_earnings.get(field, 0)
+            actual_increase = current_ytd - prev_ytd
+
+            diff = abs(displayed_current - actual_increase)
+
+            if diff > TOLERANCE:
+                field_lower = field.lower()
+                if field_lower in warning_fields:
+                    # This field is configured as warning
+                    warnings.append(
+                        f"{pay_date} {field} - displayed (current) ${displayed_current:,.2f} "
+                        f"vs actual (YTD increase) ${actual_increase:,.2f}"
+                    )
+                else:
+                    # Unconfigured field - this is an error
+                    errors.append(
+                        f"{pay_date} {field} - displayed (current) ${displayed_current:,.2f} "
+                        f"vs actual (YTD increase) ${actual_increase:,.2f}"
+                    )
+
+        # Update previous for next iteration
+        prev_earnings = {k: v["ytd"] for k, v in curr_earnings.items()}
+
+    return errors, warnings
+
+
+def validate_year_totals(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[str], Dict[str, Any]]:
+    """
+    Validate that sum of current amounts equals final YTD totals.
+
+    Handles multiple employer segments (mid-year employer changes) by
+    validating each segment separately.
+
+    Returns:
+        Tuple of (errors, warnings, validation_results) where validation_results
+        contains segment-by-segment comparisons.
+    """
+    errors = []
+    warnings = []
+
+    if not stubs:
+        return errors, warnings, {}
+
+    # Detect employer segments
+    segments = detect_employer_segments(stubs)
+
+    validation_results = {
+        "total_stubs": len(stubs),
+        "employer_segments": len(segments),
+        "segments": []
+    }
+
+    for i, segment in enumerate(segments):
+        segment_name = f"Employer {i + 1}" if len(segments) > 1 else "Full Year"
+        seg_errors, seg_warnings, seg_totals = validate_segment_totals(segment, segment_name)
+        errors.extend(seg_errors)
+        warnings.extend(seg_warnings)
+        validation_results["segments"].append(seg_totals)
+
+    return errors, warnings, validation_results
+
+
+def generate_noncash_bonus_summary(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Generate non-cash bonus summary from final YTD values.
+
+    Non-cash bonuses (like GPS Club awards) appear as:
+    - Prize/Gift in Earnings (the expense amount, taxable)
+    - Tax Gross-Up in Earnings (covers taxes so employee gets full value)
+
+    Both amounts are added to gross income for W-2 purposes.
+    """
+    if not stubs:
+        return {}
+
+    last_stub = stubs[-1]
+    prize_gift = 0.0
+    tax_gross_up = 0.0
+
+    for earning in last_stub.get("earnings", []):
+        etype = earning.get("type", "").lower()
+        ytd = earning.get("ytd_amount", 0)
+        if "prize" in etype and "gift" in etype:
+            prize_gift = ytd
+        elif "tax gross" in etype or "gross-up" in etype or "grossup" in etype:
+            tax_gross_up = ytd
+
+    if prize_gift == 0 and tax_gross_up == 0:
+        return {}
+
+    return {
+        "prize_expenses": prize_gift,
+        "tax_gross_up": tax_gross_up,
+        "total_taxable": prize_gift + tax_gross_up
+    }
+
+
 def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Generate detailed YTD breakdown from the last stub."""
     if not stubs:
@@ -390,6 +692,40 @@ def print_text_report(report: Dict[str, Any]):
         print(f"  {'─' * 25} {'─' * 13}")
         print(f"  {'Total Taxes':<25} ${ytd_breakdown.get('total_taxes', 0):>12,.2f}")
 
+    # Totals validation (sum of current vs YTD)
+    totals_validation = report.get("totals_validation", {})
+    if totals_validation and totals_validation.get("segments"):
+        print("\n" + "-" * 60)
+        num_segments = totals_validation.get("employer_segments", 1)
+        print(f"TOTALS VALIDATION ({totals_validation.get('total_stubs', 0)} stubs, {num_segments} employer segment(s)):")
+
+        for seg in totals_validation["segments"]:
+            seg_name = seg.get("segment", "Unknown")
+            stub_count = seg.get("stub_count", 0)
+            date_range = seg.get("date_range", {})
+            start = date_range.get("start", "?")
+            end = date_range.get("end", "?")
+
+            print(f"\n  [{seg_name}] {stub_count} stubs from {start} to {end}")
+            print(f"  {'Field':<20} {'Sum':>12} {'YTD':>12} {'Diff':>10}")
+            print(f"  {'─' * 20} {'─' * 12} {'─' * 12} {'─' * 10}")
+
+            fields = seg.get("fields", {})
+            for field, vals in fields.items():
+                diff = vals.get("diff", 0)
+                diff_str = f"{diff:+,.2f}" if abs(diff) > 0.01 else "OK"
+                print(f"  {field:<20} ${vals['sum']:>11,.2f} ${vals['ytd']:>11,.2f} {diff_str:>10}")
+
+    # Non-cash bonus summary
+    noncash = report.get("noncash_bonus", {})
+    if noncash:
+        print("\n" + "-" * 60)
+        print("NON-CASH BONUS SUMMARY (YTD-based):")
+        print(f"  Non-cash bonus / prize expenses:  ${noncash.get('prize_expenses', 0):>10,.2f}")
+        print(f"  Tax gross-up on prizes:           ${noncash.get('tax_gross_up', 0):>10,.2f}")
+        print(f"  {'─' * 40}")
+        print(f"  Total taxable from non-cash bonuses: ${noncash.get('total_taxable', 0):>8,.2f}")
+
     if errors:
         print("\n" + "-" * 60)
         print("ERRORS (gaps detected):")
@@ -483,13 +819,25 @@ def main():
     all_stubs.sort(key=get_sort_key)
 
     # Validate for gaps
-    errors, warnings = validate_gaps(all_stubs, year)
+    gap_errors, gap_warnings = validate_gaps(all_stubs, year)
+
+    # Validate totals (sum of current vs YTD)
+    totals_errors, totals_warnings, totals_comparison = validate_year_totals(all_stubs)
+
+    # Validate per-stub deltas (displayed current vs actual YTD increase)
+    delta_errors, delta_warnings = validate_stub_deltas(all_stubs)
+
+    # Combine errors and warnings
+    errors = gap_errors + totals_errors + delta_errors
+    warnings = gap_warnings + totals_warnings + delta_warnings
 
     # Build the report object (single source of truth)
     report = {
         "summary": generate_summary(all_stubs, year),
         "errors": errors,
         "warnings": warnings,
+        "totals_validation": totals_comparison,
+        "noncash_bonus": generate_noncash_bonus_summary(all_stubs),
         "ytd_breakdown": generate_ytd_breakdown(all_stubs) if not errors else None,
         "stubs": all_stubs
     }
