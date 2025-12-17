@@ -175,12 +175,21 @@ def w2_extract(year, cache, output_dir):
 @cli.command("tax-projection")
 @click.argument("year")
 @click.option("--output", "-o", type=click.Path(), help="Output CSV path (default: XDG data dir)")
-@click.option("--w2-dir", type=click.Path(exists=True), help="Directory containing W-2 JSON files (default: XDG data dir)")
+@click.option("--w2-dir", type=click.Path(exists=True), help="Directory containing W-2 or YTD JSON files (default: XDG data dir)")
 def tax_projection(year, output, w2_dir):
-    """Generate tax projection from W-2 data.
+    """Calculate federal tax liability and refund/owed amount.
 
-    Reads W-2 data from XDG data directory and calculates federal
-    income tax, medicare taxes, and projected refund or amount owed.
+    Loads income data for both parties (him + her), applies tax brackets,
+    and calculates federal income tax, medicare taxes, and projected
+    refund or amount owed.
+
+    \b
+    Data sources (in order of preference):
+    1. W-2 JSON files (YYYY_party_w2_forms.json) - for year-end projections
+    2. YTD JSON files (YYYY_party_ytd.json) - fallback for mid-year projections
+
+    For mid-year projections, run household-ytd first to generate YTD files
+    from pay stub data.
 
     Output is written to XDG data directory by default, or to --output path.
     """
@@ -209,11 +218,16 @@ def tax_projection(year, output, w2_dir):
 @click.option("--cache", is_flag=True, help="Cache downloaded pay stub PDFs locally.")
 @click.option("--through-date", type=str, help="Only process pay stubs through this date (YYYY-MM-DD). Useful for comparing against historical baselines.")
 def pay_projection(year, cache, through_date):
-    """Process pay stubs and project year-end compensation.
+    """Analyze pay stubs and validate YTD totals.
 
-    Downloads pay stub PDFs from Google Drive, extracts earnings
-    and deduction data, and projects full-year totals including
-    401k contributions.
+    Downloads pay stub PDFs from Google Drive for a single party,
+    validates continuity (gaps, employer changes), and reports
+    YTD totals including 401k contributions.
+
+    Note: Processes single party only. Use household-ytd to aggregate
+    across all parties for tax projection input.
+
+    Optional --projection flag (not yet exposed) estimates year-end totals.
 
     YEAR should be a 4-digit year (e.g., 2025).
     """
@@ -241,6 +255,43 @@ def pay_projection(year, cache, through_date):
         result = subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
         raise click.ClickException(f"Pay projection failed with exit code {e.returncode}")
+
+
+@cli.command("household-ytd")
+@click.argument("year")
+@click.option("--party", type=click.Choice(["him", "her"]), help="Process only one party (default: both)")
+def household_ytd(year, party):
+    """Aggregate YTD totals across all parties and employers.
+
+    Reads local pay stub JSON files (YYYY_party_pay_stubs.json) for each
+    party, extracts YTD values from the latest stub per employer, and
+    outputs YYYY_party_ytd.json files.
+
+    These YTD files can be used by tax-projection as a fallback when
+    W-2 data is not yet available (mid-year projections).
+
+    \b
+    Input:  data/YYYY_him_pay_stubs.json, data/YYYY_her_pay_stubs.json
+    Output: data/YYYY_him_ytd.json, data/YYYY_her_ytd.json
+
+    When both parties are processed, also displays combined household totals.
+
+    YEAR should be a 4-digit year (e.g., 2025).
+    """
+    if not year.isdigit() or len(year) != 4:
+        raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
+
+    import subprocess
+
+    # Call calc_ytd.py with appropriate arguments
+    cmd = ["python3", "calc_ytd.py", year]
+    if party:
+        cmd.append(party)
+
+    try:
+        result = subprocess.run(cmd, check=True)
+    except subprocess.CalledProcessError as e:
+        raise click.ClickException(f"Household YTD calculation failed with exit code {e.returncode}")
 
 
 def main():
