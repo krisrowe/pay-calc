@@ -18,6 +18,7 @@ from .config import (
     validate_profile,
     ProfileValidationResult,
     validate_profile_key,
+    validate_folder_id,
     # Legacy (deprecated, but kept for compatibility)
     get_config_path,
     load_config,
@@ -59,6 +60,7 @@ __all__ = [
     "validate_profile",
     "ProfileValidationResult",
     "validate_profile_key",
+    "validate_folder_id",
     # Legacy (deprecated)
     "get_config_path",
     "load_config",

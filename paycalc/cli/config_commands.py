@@ -27,6 +27,7 @@ from paycalc.sdk import (
     # Profile validation
     validate_profile,
     validate_profile_key,
+    validate_folder_id,
     # XDG paths
     get_cache_path,
     get_data_path,
@@ -307,14 +308,24 @@ def profile_set(key, value):
     if not is_valid:
         raise click.ClickException(error_msg)
 
-    # Try to parse as number
-    try:
-        if "." in value:
-            parsed_value = float(value)
-        else:
-            parsed_value = int(value)
-    except ValueError:
-        parsed_value = value
+    # Validate folder IDs for drive.* keys
+    if key.startswith("drive."):
+        is_valid, msg = validate_folder_id(value)
+        if not is_valid:
+            raise click.ClickException(msg)
+        if msg:  # Warning
+            click.echo(msg, err=True)
+
+    # Try to parse as number (but not for folder IDs which are strings)
+    parsed_value = value
+    if not key.startswith("drive."):
+        try:
+            if "." in value:
+                parsed_value = float(value)
+            else:
+                parsed_value = int(value)
+        except ValueError:
+            pass
 
     profile_file = set_profile_value(key, parsed_value)
     click.echo(f"Set {key} = {parsed_value}")

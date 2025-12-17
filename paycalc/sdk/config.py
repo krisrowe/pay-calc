@@ -749,3 +749,42 @@ def validate_profile_key(key: str) -> tuple[bool, str]:
             return False, f"Cannot set entire '{key}' section. Specify a sub-key or use 'profile edit'."
 
     return False, f"Invalid key path: {key}"
+
+
+def validate_folder_id(value: str) -> tuple[bool, str]:
+    """Validate that a value looks like a Google Drive folder ID.
+
+    Google Drive IDs are typically:
+    - 25-45 characters long
+    - Alphanumeric with hyphens and underscores
+    - No spaces or special characters
+
+    Args:
+        value: The value to validate
+
+    Returns:
+        Tuple of (is_valid, warning_message)
+        Returns (True, "") if valid, (True, "warning...") if suspicious but allowed
+    """
+    import re
+
+    # Must be string
+    if not isinstance(value, str):
+        return False, "Folder ID must be a string"
+
+    # Check for obviously wrong values
+    if not value or value.isspace():
+        return False, "Folder ID cannot be empty"
+
+    # Check character set (alphanumeric, hyphen, underscore only)
+    if not re.match(r'^[a-zA-Z0-9_-]+$', value):
+        return False, f"Folder ID contains invalid characters. Expected only letters, numbers, hyphens, underscores."
+
+    # Warn on suspicious length but allow it
+    if len(value) < 15:
+        return True, f"Warning: Folder ID seems short ({len(value)} chars). Employer A IDs are typically 25-45 chars."
+
+    if len(value) > 60:
+        return True, f"Warning: Folder ID seems long ({len(value)} chars). Employer A IDs are typically 25-45 chars."
+
+    return True, ""
