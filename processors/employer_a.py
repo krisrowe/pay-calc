@@ -173,12 +173,13 @@ class Employer AProcessor:
 
         # Pattern 1: Type with Hours/Rate and YTD
         # e.g., "Regular Pay 80.000000 $75.00 $5,000.00 $10,000.00"
+        # e.g., "Sales Bonus Q1 0.000000 $0.0000 $0.00 $15,000.00"
         pattern_with_ytd = re.compile(
-            r'([A-Za-z][A-Za-z\s/\-]*?)\s*'  # Type name (starts with letter)
-            r'(\d+\.\d+)\s+'                  # Hours
-            r'\$?([\d,]+\.?\d*)\s+'           # Rate
-            r'\$?([\d,]+\.?\d*)\s+'           # Current
-            r'\$?([\d,]+\.?\d*)',             # YTD
+            r'([A-Za-z][A-Za-z0-9\s/\-]*?)\s*'  # Type name (starts with letter, can include digits like Q1)
+            r'(\d+\.\d+)\s+'                    # Hours
+            r'\$?([\d,]+\.?\d*)\s+'             # Rate
+            r'\$?([\d,]+\.?\d*)\s+'             # Current
+            r'\$?([\d,]+\.?\d*)',               # YTD
             re.IGNORECASE
         )
 
@@ -186,19 +187,19 @@ class Employer AProcessor:
         # e.g., "Regular Pay 40.000000 $85.5769 $3,400.00"
         # These are additional lines for same type where YTD appears only on last line
         pattern_no_ytd = re.compile(
-            r'([A-Za-z][A-Za-z\s/\-]*?)\s+'   # Type name
-            r'(\d+\.\d+)\s+'                   # Hours
-            r'\$?([\d,]+\.?\d*)\s+'            # Rate
-            r'\$?([\d,]+\.?\d*)(?:\s|$)',      # Current (followed by space or end, not another $)
+            r'([A-Za-z][A-Za-z0-9\s/\-]*?)\s+'  # Type name (can include digits)
+            r'(\d+\.\d+)\s+'                    # Hours
+            r'\$?([\d,]+\.?\d*)\s+'             # Rate
+            r'\$?([\d,]+\.?\d*)(?:\s|$)',       # Current (followed by space or end, not another $)
             re.IGNORECASE
         )
 
         # Pattern 3: Type without Hours/Rate (just Current and YTD)
         # e.g., "Prize/ Gift $321.67 $2,000.00"
         pattern_simple = re.compile(
-            r'([A-Za-z][A-Za-z\s/\-]*?)\s+'   # Type name
-            r'\$([\d,]+\.?\d*)\s+'             # Current
-            r'\$([\d,]+\.?\d*)',               # YTD
+            r'([A-Za-z][A-Za-z0-9\s/\-]*?)\s+'  # Type name (can include digits)
+            r'\$([\d,]+\.?\d*)\s+'              # Current
+            r'\$([\d,]+\.?\d*)',                # YTD
             re.IGNORECASE
         )
 

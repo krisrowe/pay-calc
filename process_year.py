@@ -19,7 +19,7 @@ import json
 import subprocess
 import tempfile
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional, Tuple
 import PyPDF2
 import yaml
@@ -635,20 +635,41 @@ def generate_projection(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any
             intervals = [(dates[i+1] - dates[i]).days for i in range(len(dates)-1)]
             avg_interval = sum(intervals) / len(intervals)
 
+            # Round to nearest common pay frequency (biweekly=14, semi-monthly=15, weekly=7)
+            if 12 <= avg_interval <= 16:
+                pay_interval = 14  # Biweekly
+                frequency = "biweekly"
+            elif 6 <= avg_interval <= 8:
+                pay_interval = 7  # Weekly
+                frequency = "weekly"
+            elif 28 <= avg_interval <= 32:
+                pay_interval = 30  # Monthly
+                frequency = "monthly"
+            else:
+                pay_interval = round(avg_interval)
+                frequency = f"~{pay_interval} days"
+
             # Get last regular pay amount
             last_regular = regular_stubs[-1]
             last_regular_current = last_regular.get("pay_summary", {}).get("current", {}).get("gross", 0)
-
-            # Estimate remaining regular pay periods
             last_regular_date = parse_pay_date(last_regular.get("pay_date", ""))
-            days_since_last_regular = (last_date - last_regular_date).days if last_regular_date != datetime.min else 0
-            remaining_days = days_remaining + days_since_last_regular
 
-            remaining_periods = max(0, int(remaining_days / avg_interval))
+            # Count remaining pay periods by stepping forward from last regular pay
+            remaining_periods = 0
+            if last_regular_date != datetime.min:
+                next_pay = last_regular_date
+                while True:
+                    next_pay = next_pay + timedelta(days=pay_interval)
+                    if next_pay > year_end:
+                        break
+                    remaining_periods += 1
+
             regular_projection = last_regular_current * remaining_periods
 
             regular_info = {
-                "interval_days": round(avg_interval, 1),
+                "interval_days": pay_interval,
+                "frequency": frequency,
+                "last_pay_date": last_regular_date.strftime("%Y-%m-%d") if last_regular_date != datetime.min else None,
                 "last_amount": last_regular_current,
                 "remaining_periods": remaining_periods,
                 "projected": regular_projection
@@ -732,6 +753,17 @@ def generate_projection(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any
     }
 
 
+def normalize_earnings_type(etype: str) -> str:
+    """Normalize earnings type names for consistent aggregation."""
+    import re
+    # Remove extra spaces around slashes and hyphens
+    normalized = re.sub(r'\s*/\s*', '/', etype)
+    normalized = re.sub(r'\s*-\s*', '-', normalized)
+    # Collapse multiple spaces
+    normalized = re.sub(r'\s+', ' ', normalized)
+    return normalized.strip()
+
+
 def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """Generate detailed YTD breakdown combining all employer segments."""
     if not stubs:
@@ -741,7 +773,8 @@ def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
     segments = detect_employer_segments(stubs)
 
     # Aggregate earnings and taxes across all segments
-    earnings_breakdown = {}
+    # Use normalized keys to combine variants like "Tax Gross- Up" and "Tax Gross-Up"
+    earnings_breakdown = {}  # normalized_key -> {"display": original_name, "amount": total}
     taxes_breakdown = {}
 
     for segment in segments:
@@ -754,7 +787,11 @@ def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
             etype = earning.get("type", "Unknown")
             ytd = earning.get("ytd_amount", 0)
             if ytd > 0:
-                earnings_breakdown[etype] = earnings_breakdown.get(etype, 0) + ytd
+                key = normalize_earnings_type(etype).lower()
+                if key in earnings_breakdown:
+                    earnings_breakdown[key]["amount"] += ytd
+                else:
+                    earnings_breakdown[key] = {"display": normalize_earnings_type(etype), "amount": ytd}
 
         # Add taxes from this segment's final YTD
         taxes = last_stub.get("taxes", {})
@@ -764,10 +801,13 @@ def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
                 display_name = tax_name.replace("_", " ").title()
                 taxes_breakdown[display_name] = taxes_breakdown.get(display_name, 0) + ytd_withheld
 
+    # Convert earnings to simple dict for output
+    earnings_output = {v["display"]: v["amount"] for v in earnings_breakdown.values()}
+
     return {
-        "earnings": earnings_breakdown,
+        "earnings": earnings_output,
         "taxes": taxes_breakdown,
-        "total_gross": sum(earnings_breakdown.values()),
+        "total_gross": sum(earnings_output.values()),
         "total_taxes": sum(taxes_breakdown.values()),
     }
 
@@ -957,7 +997,8 @@ def print_text_report(report: Dict[str, Any], include_projection: bool = False):
 
         if reg_info:
             print(f"\n  Regular Pay Pattern:")
-            print(f"    Interval: ~{reg_info.get('interval_days', 0):.0f} days (biweekly)")
+            print(f"    Frequency: {reg_info.get('frequency', 'unknown')} ({reg_info.get('interval_days', 0)} days)")
+            print(f"    Last pay date: {reg_info.get('last_pay_date', 'unknown')}")
             print(f"    Last amount: ${reg_info.get('last_amount', 0):,.2f}")
             print(f"    Remaining periods: {reg_info.get('remaining_periods', 0)}")
 
