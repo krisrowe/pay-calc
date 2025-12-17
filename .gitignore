@@ -24,8 +24,8 @@ ENV/
 Thumbs.db
 
 
-# Data directory contains personal pay information - do not commit
-data/
+# Data directory - committed for regression testing baselines
+# (This is a personal-* repo, PII allowed per CLAUDE.md)
 
 cache/
 
