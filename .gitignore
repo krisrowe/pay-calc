@@ -4,6 +4,7 @@ __pycache__/
 *$py.class
 *.so
 .Python
+*.egg-info/
 
 # Virtual environments (if any)
 venv/
@@ -28,3 +29,6 @@ data/
 
 cache/
 
+# Personal configuration (contains Drive folder IDs, employer info)
+config.yaml
+pay-calc/

@@ -10,14 +10,19 @@ import subprocess
 import tempfile
 from pathlib import Path
 from typing import List, Dict, Optional
-import yaml
+
+from paycalc.sdk import load_config as sdk_load_config, get_cache_path, get_year_cache_path
 
 
 def load_config() -> dict:
-    """Load configuration from config.yaml."""
-    config_path = Path(__file__).parent / "config.yaml"
-    with open(config_path) as f:
-        return yaml.safe_load(f)
+    """Load configuration from SDK config path.
+
+    Config is loaded from (in order):
+    1. PAY_CALC_CONFIG_PATH environment variable
+    2. ./pay-calc/config.yaml in current directory
+    3. ~/.config/pay-calc/config.yaml (XDG default)
+    """
+    return sdk_load_config(require_exists=True)
 
 
 def run_gwsa_command(args: List[str]) -> dict:
@@ -53,7 +58,7 @@ def sync_w2_pay_records(year: str, use_cache: bool = False, verbose: bool = True
 
     Args:
         year: The year to sync (e.g., "2024")
-        use_cache: If True, use cache directory; if False, use temp directory
+        use_cache: If True, use XDG cache directory; if False, use temp directory
         verbose: Print progress messages
 
     Returns:
@@ -63,10 +68,9 @@ def sync_w2_pay_records(year: str, use_cache: bool = False, verbose: bool = True
     if not folder_id:
         raise ValueError(f"No w2_pay_records folder configured for year {year}")
 
-    # Determine working directory
+    # Determine working directory (XDG cache or temp)
     if use_cache:
-        work_dir = Path("cache") / year / "w2_pay_records"
-        work_dir.mkdir(parents=True, exist_ok=True)
+        work_dir = get_year_cache_path(year, "w2_pay_records")
     else:
         work_dir = Path(tempfile.mkdtemp(prefix=f"w2_pay_records_{year}_"))
 

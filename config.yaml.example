@@ -6,10 +6,10 @@
 #     2025/
 #       *.pdf
 drive:
-  pay_stubs_folder_id: "DRIVE_FILE_ID_6"
+  pay_stubs_folder_id: "YOUR_DRIVE_FOLDER_ID"
   w2_pay_records:
-    "2024": "REDACTED_DRIVE_ID_2"
-    "2025": "REDACTED_DRIVE_ID_1"
+    "2024": "YOUR_2024_FOLDER_ID"
+    "2025": "YOUR_2025_FOLDER_ID"
 
 # Party and Company Configuration
 # Defines parties, their companies, and how to process their documents.
@@ -17,21 +17,15 @@ drive:
 parties:
   him:
     companies:
-      - name: "Employer A LLC"
-        paystub_processor: "employer_a"
-        keywords: ["Employer A LLC"]
-      - name: "Employer A LLC"
-        paystub_processor: "employer_a"
-        keywords: ["Employer A"]
-          
+      - name: "Employer Name"
+        paystub_processor: "generic"
+        keywords: ["Employer"]
+
   her:
     companies:
-      - name: "Employer B Wine & Spirits"
-        paystub_processor: "employer_b"
-        keywords: ["Employer B", "EB"]
-      - name: "Employer C"
+      - name: "Employer Name"
         paystub_processor: "generic"
-        keywords: ["Employer C"]
+        keywords: ["Employer"]
 
 # Paystub Processor Definitions
 # Maps a processor name to its implementation details.

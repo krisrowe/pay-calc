@@ -1,3 +1,4 @@
 # Core dependencies for personal-tax-projection
 PyPDF2>=3.0.0
 PyYAML>=6.0
+click>=8.0
