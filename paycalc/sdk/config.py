@@ -756,8 +756,10 @@ def validate_folder_id(value: str) -> tuple[bool, str]:
 
     Google Drive IDs are typically:
     - 25-45 characters long
-    - Alphanumeric with hyphens and underscores
+    - Alphanumeric with hyphens and underscores (URL-safe Base64)
     - No spaces or special characters
+
+    Reference: https://developers.google.com/drive/api/guides/folder
 
     Args:
         value: The value to validate
