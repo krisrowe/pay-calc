@@ -16,7 +16,7 @@ This installs the `pay-calc` CLI command.
 pay-calc --help
 pay-calc w2-extract 2024 --cache      # Extract W-2 data from Google Drive
 pay-calc tax-projection 2024          # Generate tax projection
-pay-calc pay-projection 2025 --cache  # Process pay stubs (single party)
+pay-calc pay-analysis 2025 --cache    # Process pay stubs (single party)
 pay-calc household-ytd 2025           # Aggregate YTD across all parties
 pay-calc config path                  # Show config location
 pay-calc config show                  # Show current config
@@ -28,7 +28,7 @@ pay-calc config show                  # Show current config
 |---------|------------------|-------|--------|---------|
 | `w2-extract` | Parse W-2 PDFs from Drive | W-2 PDFs, manual JSON | `YYYY_party_w2_forms.json` | Single |
 | `tax-projection` | Calculate tax liability | W-2 JSON (or YTD JSON fallback) | `YYYY_tax_projection.csv` | Both (combined) |
-| `pay-projection` | Validate pay stubs, report YTD | Pay stub PDFs from Drive | `YYYY_pay_stubs_full.json` | Single |
+| `pay-analysis` | Validate pay stubs, report YTD | Pay stub PDFs from Drive | `YYYY_pay_stubs_full.json` | Single |
 | `household-ytd` | Aggregate YTD across parties | `YYYY_party_pay_stubs.json` | `YYYY_party_ytd.json` | Both (per-party + combined) |
 
 ### Command Details
@@ -43,10 +43,9 @@ pay-calc config show                  # Show current config
 - Falls back to YTD JSON if W-2s not available (mid-year projections)
 - Applies tax brackets, calculates liability, determines refund/owed
 
-**`pay-projection`** - Pay stub analysis (single party)
+**`pay-analysis`** - Pay stub analysis (single party)
 - Downloads pay stub PDFs from Drive, validates continuity
 - Detects gaps, employer changes, validates current vs YTD
-- Optional `--projection` flag estimates year-end totals
 - Note: Currently outputs format not consumed by other commands (see Future Considerations)
 
 **`household-ytd`** - Multi-party YTD aggregation
@@ -277,23 +276,15 @@ pip install PyPDF2 PyYAML
 
 ## Future Considerations
 
-### Command Naming
-
-**`pay-projection`** may be misnamed:
-- Projection is optional (only with `--projection` flag)
-- Primary function is validating pay stub continuity and reporting YTD
-- Consider renaming to `pay-analysis`
-- Consider separating projection into its own command that consumes `pay-analysis` output
-
 ### Workflow Integration
 
-**`pay-projection` output is disconnected:**
+**`pay-analysis` output is disconnected:**
 - Currently outputs `_pay_stubs_full.json` (single consolidated file)
 - This format is not consumed by `household-ytd` or `tax-projection`
 - `household-ytd` expects `_party_pay_stubs.json` (per-party files)
 
 **Options to consider:**
-1. Have `pay-projection` output per-party `_pay_stubs.json` files
+1. Have `pay-analysis` output per-party `_pay_stubs.json` files
 2. Enhance `household-ytd` to also accept `_pay_stubs_full.json` (would require party breakdown in that format)
 3. Keep workflows separate (Drive-based vs local-file-based)
 
@@ -302,7 +293,7 @@ pip install PyPDF2 PyYAML
 Several standalone Python scripts exist alongside CLI commands:
 - `extract_pay_stub.py` - Single PDF processor (outputs `_party_pay_stubs.json`)
 - `calc_ytd.py` - YTD aggregation (now wrapped by `household-ytd` command)
-- `process_year.py` - Full year processor (called by `pay-projection`)
+- `process_year.py` - Full year processor (called by `pay-analysis`)
 - `generate_tax_projection.py` - Tax calculation (called by `tax-projection`)
 
 These may eventually be fully integrated into the CLI/SDK structure.

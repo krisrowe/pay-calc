@@ -213,11 +213,11 @@ def tax_projection(year, output, w2_dir):
         raise click.ClickException(f"Error generating tax projection: {e}")
 
 
-@cli.command("pay-projection")
+@cli.command("pay-analysis")
 @click.argument("year")
 @click.option("--cache", is_flag=True, help="Cache downloaded pay stub PDFs locally.")
 @click.option("--through-date", type=str, help="Only process pay stubs through this date (YYYY-MM-DD). Useful for comparing against historical baselines.")
-def pay_projection(year, cache, through_date):
+def pay_analysis(year, cache, through_date):
     """Analyze pay stubs and validate YTD totals.
 
     Downloads pay stub PDFs from Google Drive for a single party,
@@ -226,8 +226,6 @@ def pay_projection(year, cache, through_date):
 
     Note: Processes single party only. Use household-ytd to aggregate
     across all parties for tax projection input.
-
-    Optional --projection flag (not yet exposed) estimates year-end totals.
 
     YEAR should be a 4-digit year (e.g., 2025).
     """
