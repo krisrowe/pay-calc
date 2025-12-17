@@ -23,6 +23,6 @@ ENV/
 Thumbs.db
 
 
-# Keep data directory but ignore large files if needed
-# data/*.json is tracked, but backups are ignored above
+# Data directory contains personal pay information - do not commit
+data/
 
