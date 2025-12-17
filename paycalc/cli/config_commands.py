@@ -26,6 +26,7 @@ from paycalc.sdk import (
     ProfileNotFoundError,
     # Profile validation
     validate_profile,
+    validate_profile_key,
     # XDG paths
     get_cache_path,
     get_data_path,
@@ -299,8 +300,13 @@ def profile_set(key, value):
 
     Examples:
         pay-calc profile set drive.pay_stubs_folder_id YOUR_FOLDER_ID
-        pay-calc profile set drive.w2_pay_records.2024 FOLDER_ID
+        pay-calc profile set drive.w2_pay_records.2026 FOLDER_ID
     """
+    # Validate key against schema
+    is_valid, error_msg = validate_profile_key(key)
+    if not is_valid:
+        raise click.ClickException(error_msg)
+
     # Try to parse as number
     try:
         if "." in value:

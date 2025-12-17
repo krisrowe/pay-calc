@@ -679,3 +679,73 @@ def _validate_employers(profile: dict) -> dict:
         "missing": [],
         "message": f"Ready ({len(employers)} employer(s))",
     }
+
+
+# =============================================================================
+# Profile schema validation
+# =============================================================================
+
+# Valid top-level keys and their allowed nested patterns
+PROFILE_SCHEMA = {
+    "drive": {
+        "pay_stubs_folder_id": str,
+        "w2_pay_records": dict,  # keys are years like "2024"
+        "output_folder_id": str,
+    },
+    "parties": {
+        "him": dict,  # has "companies" list
+        "her": dict,  # has "companies" list
+    },
+    "employers": list,  # alternative to parties.<party>.companies
+}
+
+
+def validate_profile_key(key: str) -> tuple[bool, str]:
+    """Validate that a dot-notation key is allowed by the schema.
+
+    Args:
+        key: Dot-notation key like "drive.w2_pay_records.2024"
+
+    Returns:
+        Tuple of (is_valid, error_message)
+    """
+    parts = key.split(".")
+
+    if not parts:
+        return False, "Empty key"
+
+    top_level = parts[0]
+
+    if top_level not in PROFILE_SCHEMA:
+        valid_keys = ", ".join(PROFILE_SCHEMA.keys())
+        return False, f"Unknown top-level key '{top_level}'. Valid keys: {valid_keys}"
+
+    if len(parts) == 1:
+        # Setting entire top-level section - not allowed via set
+        return False, f"Cannot set entire '{top_level}' section. Use 'profile edit' for complex changes."
+
+    schema_section = PROFILE_SCHEMA[top_level]
+
+    if isinstance(schema_section, dict):
+        second_level = parts[1]
+
+        # Check if second level is valid
+        if second_level not in schema_section:
+            valid_keys = ", ".join(schema_section.keys())
+            return False, f"Unknown key '{second_level}' under '{top_level}'. Valid keys: {valid_keys}"
+
+        expected_type = schema_section[second_level]
+
+        # If it's a dict type (like w2_pay_records), allow setting nested keys
+        if expected_type == dict and len(parts) >= 3:
+            # e.g., drive.w2_pay_records.2024 - valid
+            return True, ""
+
+        # If it's a simple type, should be exactly 2 parts
+        if expected_type == str and len(parts) == 2:
+            return True, ""
+
+        if expected_type == dict and len(parts) == 2:
+            return False, f"Cannot set entire '{key}' section. Specify a sub-key or use 'profile edit'."
+
+    return False, f"Invalid key path: {key}"
