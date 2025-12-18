@@ -45,6 +45,10 @@ def format_record_row(record: dict, record_type: str) -> str:
     data = record.get("data") or {}
     meta = record.get("meta") or {}
 
+    # Warning indicator
+    warnings = meta.get("warnings", [])
+    warn_str = f" ⚠{len(warnings)}" if warnings else ""
+
     if record_type == "stub":
         pay_date = data.get("pay_date", "unknown")
         employer = data.get("employer", "unknown")[:21]
@@ -56,7 +60,7 @@ def format_record_row(record: dict, record_type: str) -> str:
         elif "gross_pay" in data:
             gross = data["gross_pay"]
 
-        return f"{rec_id:<10} {pay_date:<12} {'stub':<8} {employer:<21} ${gross:>11,.2f}"
+        return f"{rec_id:<10} {pay_date:<12} {'stub':<8} {employer:<21} ${gross:>11,.2f}{warn_str}"
 
     elif record_type == "w2":
         tax_year = str(data.get("tax_year", "unknown"))
@@ -64,7 +68,7 @@ def format_record_row(record: dict, record_type: str) -> str:
         wages = data.get("wages", 0.0)
         fed_tax = data.get("federal_tax_withheld", 0.0)
 
-        return f"{rec_id:<10} {tax_year:<12} {'w2':<8} {employer:<21} ${wages:>11,.2f}"
+        return f"{rec_id:<10} {tax_year:<12} {'w2':<8} {employer:<21} ${wages:>11,.2f}{warn_str}"
 
     elif record_type == "discarded":
         filename = meta.get("source_filename", "unknown")[:30]

@@ -408,6 +408,10 @@ def validate_and_add_record(
         if errors:
             raise ValidationError(errors)
 
+    # Store warnings in meta for traceability
+    if warnings:
+        meta["warnings"] = warnings
+
     path = add_record(meta, data)
     return path, warnings
 
@@ -554,7 +558,8 @@ def list_records(
     # Sort by date (pay_date for stubs, tax_year for W-2s)
     def sort_key(r):
         data = r.get("data") or {}
-        return data.get("pay_date") or data.get("tax_year") or ""
+        # Convert to string for consistent sorting (tax_year is int, pay_date is str)
+        return str(data.get("pay_date") or data.get("tax_year") or "")
 
     results.sort(key=sort_key)
     return results
@@ -1237,12 +1242,18 @@ def import_file_auto(
     }
     if drive_file_id:
         meta["drive_file_id"] = drive_file_id
+    if data.get("_extraction_method"):
+        meta["extraction_method"] = data.pop("_extraction_method")
 
     # Validate and save
     try:
         path, warnings = validate_and_add_record(meta=meta, data=data)
         result["status"] = "imported"
         result["path"] = str(path)
+        if warnings:
+            result["warnings"] = warnings
+            for w in warnings:
+                logger.warning(f"{file_path.name}: {w}")
         return result
 
     except ValidationError as e:
@@ -1288,6 +1299,7 @@ def _extract_pdf_auto(pdf_path: Path) -> Optional[Dict[str, Any]]:
             logger.debug("calling _parse_text_pdf_auto")
             result = _parse_text_pdf_auto(pdf_text, pdf_path)
             if result:
+                result["_extraction_method"] = "text"
                 return result
             # Text parsing failed - fall back to OCR
             logger.debug("text parsing returned None, falling back to OCR")
@@ -1459,6 +1471,7 @@ Return ONLY the JSON object, no explanation."""
         data = process_file(prompt, str(pdf_path))
         if data.get("_unrecognized"):
             return None
+        data["_extraction_method"] = "ocr"
         return data
 
     except ImportError:
