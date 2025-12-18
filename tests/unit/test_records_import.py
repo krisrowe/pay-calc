@@ -311,19 +311,91 @@ class TestImportEfficiency:
             # Skipped = 5 (file_a: 1 + file_b: 3 + file_c: 1 tracking record)
             assert stats2["skipped"] == 5
 
-    def test_folder_import_skips_all_tracked_files(self, isolated_config):
-        """Scenario 2: Folder re-import skips ALL tracked files (no downloads).
+    def test_folder_import_skips_imported_files(self, isolated_config):
+        """Scenario 2a: Folder re-import skips files with imported records.
 
-        Setup: 3 PDFs imported (1 single + 3 multi + 1 dupe)
-        Action: Run folder import again (same files, file_b "updated" on server)
-        Expected: All files skipped at file-level, NO downloads
+        Setup: 2 PDFs imported (file_a: 1 stub, file_b: 3 stubs)
+        Action: Run folder import again
+        Expected: Both files skipped (have imported records), NO downloads
+        """
+        from paycalc.sdk import records
 
-        Key behaviors:
-        - file_a, file_b: have imported records → skipped
-        - file_c: has tracking record (all-duplicate stubs) → skipped
-        - file_b update: NOT detected (file-level tracking skips it)
+        drive = DriveMock()
+        # Only file_a and file_b (no file_c which has duplicate stubs)
+        drive.set_folder(FOLDER_ID, [
+            {"id": FILE_A_ID, "name": "2025-01-15_stub.pdf"},
+            {"id": FILE_B_ID, "name": "2025_Q1_stubs.pdf"},
+        ])
+        ocr = MockOCR()
 
-        To detect server-side updates, use targeted import: `records import file <id>`
+        with patch("subprocess.run", drive.subprocess_run), \
+             patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
+             patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
+             patch("gemini_client.process_file", ocr.process_file):
+
+            # Initial import
+            stats1 = records.import_from_folder_auto(FOLDER_ID)
+            assert stats1["imported"] == 4  # 1 + 3 stubs
+            assert len(drive.download_calls) == 2
+
+            # Reset and re-import
+            drive.reset()
+            ocr.reset()
+
+            # Second import - both files skipped (have imported records)
+            stats2 = records.import_from_folder_auto(FOLDER_ID)
+            assert len(drive.download_calls) == 0, \
+                f"Expected 0 downloads (all imported), got {drive.download_calls}"
+            assert stats2["imported"] == 0
+            assert stats2["skipped"] == 4  # file_a: 1 + file_b: 3
+
+    def test_folder_import_skips_tracking_files(self, isolated_config):
+        """Scenario 2b: Folder re-import skips files with tracking records (all-dupe stubs).
+
+        Setup: file_a imported, file_c downloaded but all stubs duplicate (tracking record)
+        Action: Run folder import again
+        Expected: file_c skipped via tracking record, NOT re-downloaded
+        """
+        from paycalc.sdk import records
+
+        drive = DriveMock()
+        # file_a imports, file_c's stub is duplicate of file_a
+        drive.set_folder(FOLDER_ID, [
+            {"id": FILE_A_ID, "name": "2025-01-15_stub.pdf"},
+            {"id": FILE_C_ID, "name": "2025-01-15_duplicate.pdf"},
+        ])
+        ocr = MockOCR()
+
+        with patch("subprocess.run", drive.subprocess_run), \
+             patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
+             patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
+             patch("gemini_client.process_file", ocr.process_file):
+
+            # Initial import: file_a imports, file_c's stub skipped as duplicate
+            stats1 = records.import_from_folder_auto(FOLDER_ID)
+            assert stats1["imported"] == 1  # Only file_a's stub
+            assert stats1["skipped"] == 1   # file_c's stub is duplicate
+            assert len(drive.download_calls) == 2  # Both downloaded
+
+            # Reset and re-import
+            drive.reset()
+            ocr.reset()
+
+            # Second import - file_c skipped via tracking (not re-downloaded)
+            stats2 = records.import_from_folder_auto(FOLDER_ID)
+            assert len(drive.download_calls) == 0, \
+                f"Expected 0 downloads, got {drive.download_calls}"
+            assert stats2["imported"] == 0
+            assert stats2["skipped"] == 2  # file_a: 1 imported + file_c: 1 tracking
+
+    def test_folder_import_skips_mixed_imported_and_tracking(self, isolated_config):
+        """Scenario 2c: Folder re-import skips both imported and tracking files.
+
+        Setup: 3 PDFs - file_a/b imported, file_c has tracking record (all-dupe stubs)
+        Action: Run folder import again
+        Expected: All files skipped, NO downloads
+
+        This verifies both skip paths work together.
         """
         from paycalc.sdk import records
 
@@ -338,19 +410,19 @@ class TestImportEfficiency:
 
             # Initial import
             stats1 = records.import_from_folder_auto(FOLDER_ID)
-            assert stats1["imported"] == 4
+            assert stats1["imported"] == 4  # file_a: 1 + file_b: 3
+            assert stats1["skipped"] == 1   # file_c's stub is duplicate
 
-            # Reset and "update" multi-page PDF (simulating server-side update)
+            # Reset and re-import
             drive.reset()
             ocr.reset()
-            drive.set_file_data(FILE_B_ID, "file_b_multi4")  # Now has 4 stubs
 
-            # Folder import - ALL files skipped (all tracked)
+            # Second import - ALL files skipped
             stats2 = records.import_from_folder_auto(FOLDER_ID)
             assert len(drive.download_calls) == 0, \
-                f"Expected 0 downloads (all tracked), got {drive.download_calls}"
+                f"Expected 0 downloads, got {drive.download_calls}"
             assert stats2["imported"] == 0
-            # Skipped = 5 (file_a: 1 + file_b: 3 + file_c: 1 tracking)
+            # Skipped = 5 (file_a: 1 + file_b: 3 imported + file_c: 1 tracking)
             assert stats2["skipped"] == 5
 
     def test_targeted_file_import_reprocesses(self, isolated_config):
