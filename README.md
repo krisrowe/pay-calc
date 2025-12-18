@@ -146,6 +146,21 @@ Downloads PDFs from Google Drive or local folders, extracts structured data, val
 - Validates extracted data (schema, math checks)
 - Stores in local records directory for use by analysis commands
 
+**Duplicate Detection (Two-Tier Design):**
+
+The import system uses two levels of duplicate detection to balance efficiency with correctness:
+
+1. **File-level tracking** (for folder imports): Skips files already processed based on Drive file ID. This makes incremental imports fast—re-running `records import` only processes new files.
+
+2. **Stub-level detection** (content-based): Prevents importing the same pay stub twice even from different source files. A stub's identity is:
+   - `pay_date` - when you were paid
+   - `employer` - who paid you
+   - `Medicare taxable wages` - total compensation for that pay period
+
+   Medicare taxable wages is the key distinguisher—it's universal across all employers and pay types, and uniquely identifies same-day stubs (e.g., regular pay vs stock grant have different Medicare taxable amounts).
+
+**Recovery workflow:** To re-import a specific file (bypassing file-level tracking), use `records import <file-id>`. This uses stub-level detection to avoid duplicates while allowing re-extraction.
+
 **`analysis`** - Pay stub analysis (single party)
 
 **Goal:** Extract accurate year totals from the most recent stub's YTD values, while validating data completeness.
