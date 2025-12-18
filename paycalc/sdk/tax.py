@@ -51,21 +51,50 @@ def calculate_additional_medicare_tax(total_medicare_wages: float, threshold: fl
 
 
 def load_party_w2_data(data_dir: Path, year: str, party: str) -> dict:
-    """Load and aggregate W-2 data for a party from the data directory."""
+    """Load and aggregate W-2 data for a party from the data directory.
+
+    Data sources (in order of preference):
+    1. W-2 JSON files (YYYY_party_w2_forms.json) - year-end
+    2. Analysis JSON files (YYYY_party_full.json) - mid-year fallback
+    """
     w2_file = data_dir / f"{year}_{party}_w2_forms.json"
+    analysis_file = data_dir / f"{year}_{party}_full.json"
 
-    if not w2_file.exists():
-        raise FileNotFoundError(f"W-2 data not found: {w2_file}")
+    # Try W-2 file first (year-end)
+    if w2_file.exists():
+        with open(w2_file, "r") as f:
+            w2_data = json.load(f)
 
-    with open(w2_file, "r") as f:
-        w2_data = json.load(f)
+        aggregated_data = defaultdict(float)
+        for form in w2_data.get("forms", []):
+            for key, value in form.get("data", {}).items():
+                aggregated_data[key] += value
 
-    aggregated_data = defaultdict(float)
-    for form in w2_data.get("forms", []):
-        for key, value in form.get("data", {}).items():
-            aggregated_data[key] += value
+        return dict(aggregated_data)
 
-    return dict(aggregated_data)
+    # Fall back to analysis file (mid-year)
+    if analysis_file.exists():
+        with open(analysis_file, "r") as f:
+            analysis_data = json.load(f)
+
+        # Extract YTD totals from analysis summary
+        summary = analysis_data.get("summary", {})
+        final_ytd = summary.get("final_ytd", {})
+
+        # Map analysis fields to W-2 equivalent fields
+        return {
+            "wages_tips_other_comp": final_ytd.get("gross", 0),
+            "federal_income_tax_withheld": final_ytd.get("taxes", 0),
+            "medicare_wages_and_tips": final_ytd.get("fit_taxable_wages", final_ytd.get("gross", 0)),
+            "medicare_tax_withheld": 0,  # Not tracked separately in analysis
+        }
+
+    raise FileNotFoundError(
+        f"No income data found for {party} ({year}).\n"
+        f"  Tried: {w2_file}\n"
+        f"  Tried: {analysis_file}\n"
+        f"Run 'pay-calc w2-extract {year}' or 'pay-calc analysis {year} {party}' first."
+    )
 
 
 def generate_projection(year: str, data_dir: Path = None, tax_rules: dict = None) -> dict:

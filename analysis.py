@@ -29,6 +29,105 @@ sys.path.insert(0, str(Path(__file__).parent))
 from processors import get_processor
 
 
+def extract_with_gemini_ocr(pdf_path: str) -> Optional[Dict[str, Any]]:
+    """Extract pay stub data from image-based PDF using Gemini CLI.
+
+    Falls back to Gemini CLI when PyPDF2 cannot extract text (image-based PDFs).
+    Requires gemini CLI to be installed and configured.
+
+    Returns stub data dict or None if extraction fails.
+    """
+    import shutil
+
+    # Check if gemini CLI is available
+    if not shutil.which("gemini"):
+        print("  Warning: gemini CLI not found, cannot OCR image-based PDF")
+        return None
+
+    # Copy to /tmp to avoid gitignore issues
+    tmp_path = f"/tmp/paycalc_ocr_{Path(pdf_path).name}"
+    shutil.copy(pdf_path, tmp_path)
+
+    prompt = '''Read this PDF and extract pay stub data. Return ONLY valid JSON (no markdown) with these fields:
+{
+  "pay_date": "YYYY-MM-DD",
+  "period": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"},
+  "employer": "string",
+  "gross_pay": number,
+  "net_pay": number,
+  "federal_income_tax_withheld": number,
+  "social_security_withheld": number,
+  "medicare_withheld": number,
+  "ytd_gross": number,
+  "ytd_federal_withheld": number,
+  "ytd_social_security": number,
+  "ytd_medicare": number
+}'''
+
+    try:
+        result = subprocess.run(
+            ["gemini", "--allowed-mcp-server-names", "none", "--include-directories", "/tmp", "-o", "text",
+             f"Read {tmp_path} and extract pay stub data. {prompt}"],
+            capture_output=True,
+            text=True,
+            timeout=120
+        )
+
+        output = result.stdout.strip()
+
+        # Extract JSON from response (may have markdown backticks)
+        if "```json" in output:
+            output = output.split("```json")[1].split("```")[0].strip()
+        elif "```" in output:
+            output = output.split("```")[1].split("```")[0].strip()
+
+        data = json.loads(output)
+
+        # Convert to internal format expected by analysis
+        stub = {
+            "file_name": Path(pdf_path).name,
+            "employer": data.get("employer", "Unknown"),
+            "pay_date": data.get("pay_date"),
+            "period": data.get("period", {}),
+            "document_id": "ocr",
+            "net_pay": data.get("net_pay", 0),
+            "earnings": [
+                {"type": "Gross Pay", "current_amount": data.get("gross_pay", 0), "ytd_amount": data.get("ytd_gross", 0)}
+            ],
+            "taxes": {
+                "federal_income": {"current": data.get("federal_income_tax_withheld", 0), "ytd": data.get("ytd_federal_withheld", 0)},
+                "social_security": {"current": data.get("social_security_withheld", 0), "ytd": data.get("ytd_social_security", 0)},
+                "medicare": {"current": data.get("medicare_withheld", 0), "ytd": data.get("ytd_medicare", 0)}
+            },
+            "deductions": [],
+            "pay_summary": {
+                "current": {"gross": data.get("gross_pay", 0), "taxes": data.get("federal_income_tax_withheld", 0), "net_pay": data.get("net_pay", 0)},
+                "ytd": {"gross": data.get("ytd_gross", 0), "taxes": data.get("ytd_federal_withheld", 0)}
+            },
+            "_pay_type": "other",
+            "_source_file": Path(pdf_path).name,
+            "_ocr": True
+        }
+
+        # Clean up temp file
+        Path(tmp_path).unlink(missing_ok=True)
+
+        return stub
+
+    except subprocess.TimeoutExpired:
+        print(f"  Warning: Gemini OCR timed out for {Path(pdf_path).name}")
+        return None
+    except json.JSONDecodeError as e:
+        print(f"  Warning: Could not parse Gemini OCR output as JSON: {e}")
+        return None
+    except Exception as e:
+        print(f"  Warning: Gemini OCR failed: {e}")
+        return None
+    finally:
+        # Clean up temp file
+        Path(tmp_path).unlink(missing_ok=True)
+
+
 def load_config() -> dict:
     """Load configuration from profile.yaml via SDK."""
     from paycalc.sdk import load_config as sdk_load_config
@@ -126,9 +225,57 @@ def split_pdf_pages(pdf_path: str, output_dir: str) -> List[str]:
     return page_files
 
 
-def process_single_page(pdf_path: str, employer: str = "Employer A LLC") -> Optional[Dict[str, Any]]:
+def get_party_processor_and_employer(party: str, pdf_text: str = "") -> Tuple[str, str]:
+    """Get processor name and employer for a party based on config.
+
+    If pdf_text is provided, tries to match keywords to identify specific employer.
+    Falls back to first company for the party if no match.
+    """
+    config = load_config()
+    parties = config.get("parties", {})
+    party_config = parties.get(party, {})
+    companies = party_config.get("companies", [])
+
+    if not companies:
+        # Fallback defaults
+        return "employer_a", "Employer A LLC"
+
+    # Try to match keywords in PDF text
+    if pdf_text:
+        normalized_text = pdf_text.lower().replace(" ", "")
+        for company in companies:
+            keywords = company.get("keywords", [])
+            for keyword in keywords:
+                if keyword.lower().replace(" ", "") in normalized_text:
+                    return company.get("paystub_processor", "generic"), company.get("name", "Unknown")
+
+    # Default to first company for party
+    first_company = companies[0]
+    return first_company.get("paystub_processor", "generic"), first_company.get("name", "Unknown")
+
+
+def process_single_page(pdf_path: str, party: str, employer: str = None) -> Optional[Dict[str, Any]]:
     """Process a single page PDF and extract pay stub data."""
-    processor_class = get_processor("employer_a")
+    # Read PDF text to identify employer
+    pdf_text = ""
+    try:
+        with open(pdf_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            for page in reader.pages:
+                pdf_text += page.extract_text() or ""
+    except:
+        pass
+
+    # Check for image-based PDF (no extractable text)
+    if not pdf_text.strip():
+        print(f"  Image-based PDF detected, attempting OCR: {Path(pdf_path).name}")
+        return extract_with_gemini_ocr(pdf_path)
+
+    processor_name, detected_employer = get_party_processor_and_employer(party, pdf_text)
+    if employer is None:
+        employer = detected_employer
+
+    processor_class = get_processor(processor_name)
 
     try:
         stub_data = processor_class.process(pdf_path, employer)
@@ -985,18 +1132,24 @@ def log(msg: str):
 
 
 def main():
-    if len(sys.argv) < 2:
-        log("Usage: python3 analysis.py <year> [--format text|json] [--cache-paystubs] [--through-date YYYY-MM-DD]")
+    if len(sys.argv) < 3:
+        log("Usage: python3 analysis.py <year> <party> [--format text|json] [--cache-paystubs] [--through-date YYYY-MM-DD]")
         log("  year: 4-digit year (e.g., 2025)")
+        log("  party: 'him' or 'her'")
         log("  --format: Output format (default: text)")
         log("  --cache-paystubs: Cache downloaded PDFs to avoid re-downloading")
         log("  --through-date: Only include pay stubs through this date (YYYY-MM-DD)")
         sys.exit(1)
 
     year = sys.argv[1]
+    party = sys.argv[2]
     output_format = "text"
     cache_paystubs = "--cache-paystubs" in sys.argv
     through_date = None
+
+    if party not in ("him", "her"):
+        log(f"Error: Invalid party '{party}'. Must be 'him' or 'her'.")
+        sys.exit(1)
 
     if "--format" in sys.argv:
         idx = sys.argv.index("--format")
@@ -1018,7 +1171,7 @@ def main():
         log(f"Error: Invalid year '{year}'. Must be 4 digits.")
         sys.exit(1)
 
-    log(f"Processing pay stubs for {year}...")
+    log(f"Processing pay stubs for {year}, party: {party}...")
 
     # Find year folder
     year_folder_id = find_year_folder(year)
@@ -1069,7 +1222,7 @@ def main():
 
             # Process each page
             for page_file in page_files:
-                stub_data = process_single_page(page_file)
+                stub_data = process_single_page(page_file, party)
                 if stub_data and stub_data.get("pay_date"):
                     stub_data["_pay_type"] = identify_pay_type(stub_data)
                     stub_data["_source_file"] = pdf_name
@@ -1138,8 +1291,11 @@ def main():
         print_text_report(report)
 
     # Save full data to file (always include ytd_breakdown for reference)
-    output_file = Path("data") / f"{year}_pay_stubs_full.json"
-    output_file.parent.mkdir(exist_ok=True)
+    from paycalc.sdk import get_data_path
+    data_dir = get_data_path()
+    data_dir.mkdir(parents=True, exist_ok=True)
+
+    output_file = data_dir / f"{year}_{party}_full.json"
     report_with_breakdown = report.copy()
     if report["ytd_breakdown"] is None:
         report_with_breakdown["ytd_breakdown"] = generate_ytd_breakdown(all_stubs)
@@ -1150,7 +1306,7 @@ def main():
     # Save 401k contributions to separate file for easy reference
     contrib_401k = report.get("contributions_401k", {})
     if contrib_401k:
-        contrib_file = Path("data") / f"{year}_401k_contributions.json"
+        contrib_file = data_dir / f"{year}_401k_contributions.json"
         with open(contrib_file, "w") as f:
             json.dump(contrib_401k, f, indent=2)
         log(f"401k contributions saved to: {contrib_file}")

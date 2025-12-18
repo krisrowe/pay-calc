@@ -428,6 +428,8 @@ class ProfileValidationResult:
         location_path: Path,
         features: dict,
         profile: dict,
+        errors: list = None,
+        warnings: list = None,
     ):
         """
         Args:
@@ -436,11 +438,15 @@ class ProfileValidationResult:
             features: Dict of feature_name -> dict with keys:
                       ready (bool), missing (list), message (str)
             profile: The loaded profile dict
+            errors: List of validation errors (invalid values)
+            warnings: List of validation warnings (suspicious but allowed)
         """
         self.location_type = location_type
         self.location_path = location_path
         self.features = features
         self.profile = profile
+        self.errors = errors or []
+        self.warnings = warnings or []
 
     @property
     def all_ready(self) -> bool:
@@ -452,14 +458,28 @@ class ProfileValidationResult:
         return self.features.get(feature, {}).get("ready", False)
 
     def require_feature(self, feature: str) -> None:
-        """Raise exception if feature is not ready (for fail-fast).
+        """Raise exception if profile has errors or feature is not ready.
+
+        Checks in order:
+        1. Schema validation errors (corrupt profile)
+        2. Feature-specific missing config
 
         Args:
             feature: Feature name to check
 
         Raises:
-            ConfigNotFoundError: If feature is not ready
+            ConfigNotFoundError: If profile has errors or feature is not ready
         """
+        # Check for schema errors first (corrupt profile)
+        if self.errors:
+            error_str = "\n  ! ".join(self.errors)
+            raise ConfigNotFoundError(
+                f"Profile has validation errors (corrupt configuration):\n\n"
+                f"  ! {error_str}\n\n"
+                f"Profile: {self.location_path}\n"
+                f"Fix errors and retry, or use: pay-calc profile show"
+            )
+
         if feature not in self.features:
             raise ConfigNotFoundError(f"Unknown feature: {feature}")
 
@@ -513,6 +533,9 @@ def validate_profile(profile: Optional[dict] = None) -> ProfileValidationResult:
     if profile is None:
         profile = load_profile(require_exists=True)
 
+    # Validate folder IDs in drive.* settings
+    errors, warnings = _validate_drive_folder_ids(profile)
+
     # Validate each feature
     features = {}
 
@@ -533,28 +556,63 @@ def validate_profile(profile: Optional[dict] = None) -> ProfileValidationResult:
         location_path=location_path,
         features=features,
         profile=profile,
+        errors=errors,
+        warnings=warnings,
     )
 
 
-def _get_all_employers(profile: dict) -> list:
-    """Extract all employers from profile (handles both schema variants).
+def _validate_drive_folder_ids(profile: dict) -> tuple[list, list]:
+    """Validate all folder IDs in drive.* settings.
 
-    Supports:
-    - employers[] (flat list)
-    - parties.<party>.companies[] (nested in parties)
+    Returns:
+        Tuple of (errors, warnings) lists
+    """
+    errors = []
+    warnings = []
+
+    drive = profile.get("drive", {})
+    if not drive:
+        return errors, warnings
+
+    def check_folder_id(key: str, value):
+        """Check a single folder ID value."""
+        if not isinstance(value, str):
+            return
+        is_valid, msg = validate_folder_id(value)
+        if not is_valid:
+            errors.append(f"{key}: {msg}")
+        elif msg:  # Warning
+            warnings.append(f"{key}: {msg}")
+
+    # Check pay_stubs_folder_id
+    if "pay_stubs_folder_id" in drive:
+        check_folder_id("drive.pay_stubs_folder_id", drive["pay_stubs_folder_id"])
+
+    # Check output_folder_id
+    if "output_folder_id" in drive:
+        check_folder_id("drive.output_folder_id", drive["output_folder_id"])
+
+    # Check w2_pay_records.<year>
+    w2_records = drive.get("w2_pay_records", {})
+    if isinstance(w2_records, dict):
+        for year, folder_id in w2_records.items():
+            check_folder_id(f"drive.w2_pay_records.{year}", folder_id)
+
+    return errors, warnings
+
+
+def _get_all_employers(profile: dict) -> list:
+    """Extract all employers from profile.
+
+    Schema: parties.<party>.companies[]
     """
     employers = []
 
-    # Check top-level employers[]
-    employers.extend(profile.get("employers", []))
-
-    # Check parties.<party>.companies[]
     parties = profile.get("parties", {})
     for party_name, party_data in parties.items():
         if isinstance(party_data, dict):
             companies = party_data.get("companies", [])
             for company in companies:
-                # Add party info if not present
                 emp = dict(company)
                 emp.setdefault("party", party_name)
                 employers.append(emp)
@@ -572,10 +630,10 @@ def _validate_pay_stubs(profile: dict) -> dict:
     if not folder_id:
         missing.append("drive.pay_stubs_folder_id (Google Drive folder for pay stubs)")
 
-    # Check employers are configured (either schema)
+    # Check employers are configured
     employers = _get_all_employers(profile)
     if not employers:
-        missing.append("employers[] or parties.<party>.companies[] (employer configurations)")
+        missing.append("parties.<party>.companies[] (employer configurations)")
 
     if missing:
         return {
@@ -652,7 +710,7 @@ def _validate_employers(profile: dict) -> dict:
     if not employers:
         return {
             "ready": False,
-            "missing": ["employers[] or parties.<party>.companies[] (employer configurations)"],
+            "missing": ["parties.<party>.companies[] (employer configurations)"],
             "message": "No employers configured",
         }
 

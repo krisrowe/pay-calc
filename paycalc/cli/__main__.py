@@ -11,7 +11,7 @@ from paycalc.sdk import ConfigNotFoundError
 # Add parent directory to path for importing existing modules
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
-from .config_commands import config as config_group, profile as profile_group
+from .profile_commands import profile as profile_group
 
 
 @click.group()
@@ -29,13 +29,12 @@ def cli():
     2. settings.json 'profile' key (if set via CLI)
     3. ~/.config/pay-calc/profile.yaml (XDG default)
 
-    Run 'pay-calc profile init' to create a new profile.
+    Run 'pay-calc profile show' to see profile status and readiness.
     """
     pass
 
 
-# Add config and profile subcommand groups
-cli.add_command(config_group)
+# Add profile subcommand group
 cli.add_command(profile_group)
 
 
@@ -182,11 +181,11 @@ def w2_extract(year, cache, output_dir):
     click.echo("\nExtraction complete.")
 
 
-@cli.command("tax-projection")
+@cli.command("taxes")
 @click.argument("year")
 @click.option("--output", "-o", type=click.Path(), help="Output CSV path (default: XDG data dir)")
-@click.option("--w2-dir", type=click.Path(exists=True), help="Directory containing W-2 or YTD JSON files (default: XDG data dir)")
-def tax_projection(year, output, w2_dir):
+@click.option("--data-dir", type=click.Path(exists=True), help="Directory containing W-2 or analysis JSON files (default: XDG data dir)")
+def taxes(year, output, data_dir):
     """Calculate federal tax liability and refund/owed amount.
 
     Loads income data for both parties (him + her), applies tax brackets,
@@ -195,11 +194,10 @@ def tax_projection(year, output, w2_dir):
 
     \b
     Data sources (in order of preference):
-    1. W-2 JSON files (YYYY_party_w2_forms.json) - for year-end projections
-    2. YTD JSON files (YYYY_party_ytd.json) - fallback for mid-year projections
+    1. W-2 JSON files (YYYY_party_w2_forms.json) - for year-end
+    2. Analysis JSON files (YYYY_party_full.json) - mid-year fallback
 
-    For mid-year projections, run household-ytd first to generate YTD files
-    from pay stub data.
+    For mid-year projections, run 'analysis' for each party first.
 
     Output is written to XDG data directory by default, or to --output path.
     """
@@ -208,36 +206,37 @@ def tax_projection(year, output, w2_dir):
 
     from paycalc.sdk import generate_tax_projection, get_data_path
 
-    data_path = Path(w2_dir) if w2_dir else get_data_path()
+    data_path = Path(data_dir) if data_dir else get_data_path()
     output_path = Path(output) if output else None
 
     try:
-        click.echo(f"Loading W-2 data for him from {data_path / f'{year}_him_w2_forms.json'}...")
-        click.echo(f"Loading W-2 data for her from {data_path / f'{year}_her_w2_forms.json'}...")
+        click.echo(f"Loading income data for {year}...")
         result_path = generate_tax_projection(year, data_dir=data_path, output_path=output_path)
-        click.echo(f"\nSuccessfully generated tax projection CSV: {result_path}")
+        click.echo(f"\nSuccessfully generated tax calculation: {result_path}")
 
     except FileNotFoundError as e:
         raise click.ClickException(str(e))
     except Exception as e:
-        raise click.ClickException(f"Error generating tax projection: {e}")
+        raise click.ClickException(f"Error generating tax calculation: {e}")
 
 
-@cli.command("pay-analysis")
+@cli.command("analysis")
 @click.argument("year")
+@click.argument("party", type=click.Choice(["him", "her"]))
 @click.option("--cache", is_flag=True, help="Cache downloaded pay stub PDFs locally.")
 @click.option("--through-date", type=str, help="Only process pay stubs through this date (YYYY-MM-DD). Useful for comparing against historical baselines.")
-def pay_analysis(year, cache, through_date):
+def analysis(year, party, cache, through_date):
     """Analyze pay stubs and validate YTD totals.
 
-    Downloads pay stub PDFs from Google Drive for a single party,
+    Downloads pay stub PDFs from Google Drive for the specified party,
     validates continuity (gaps, employer changes), and reports
     YTD totals including 401k contributions.
 
-    Note: Processes single party only. Use household-ytd to aggregate
-    across all parties for tax projection input.
+    \b
+    Output: YYYY_party_full.json (e.g., 2025_him_full.json)
 
     YEAR should be a 4-digit year (e.g., 2025).
+    PARTY is 'him' or 'her'.
     """
     from paycalc.sdk import validate_profile, ProfileNotFoundError
 
@@ -262,7 +261,7 @@ def pay_analysis(year, cache, through_date):
     import subprocess
 
     # Call analysis.py with appropriate arguments
-    cmd = ["python3", "analysis.py", year]
+    cmd = ["python3", "analysis.py", year, party]
     if cache:
         cmd.append("--cache-paystubs")
     if through_date:
@@ -271,52 +270,53 @@ def pay_analysis(year, cache, through_date):
     try:
         result = subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Pay analysis failed with exit code {e.returncode}")
+        raise click.ClickException(f"Analysis failed with exit code {e.returncode}")
 
 
-@cli.command("pay-projection")
+@cli.command("projection")
 @click.argument("year")
-@click.option("--input", "-i", "input_file", type=click.Path(exists=True), help="Input JSON from pay-analysis (default: XDG data dir)")
-def pay_projection(year, input_file):
+@click.argument("party", type=click.Choice(["him", "her"]))
+@click.option("--input", "-i", "input_file", type=click.Path(exists=True), help="Input JSON from analysis (default: XDG data dir)")
+def projection(year, party, input_file):
     """Project year-end totals from partial year pay data.
 
-    Reads pay stub data from pay-analysis output and projects year-end
+    Reads pay stub data from analysis output and projects year-end
     totals based on observed pay patterns (regular pay cadence, stock
     vesting schedule).
 
     \b
-    Prerequisite: Run pay-analysis first to generate the input file.
-        pay-calc pay-analysis <year> --cache
+    Prerequisite: Run analysis first to generate the input file.
+        pay-calc analysis <year> <party> --cache
 
     \b
-    Input:  YYYY_pay_stubs_full.json (from pay-analysis)
+    Input:  YYYY_party_full.json (from analysis)
     Output: Year-end projection report
 
     Use this for mid-year tax planning when full W-2 data is not yet available.
 
     YEAR should be a 4-digit year (e.g., 2025).
+    PARTY is 'him' or 'her'.
     """
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
-    import json
     from paycalc.sdk import get_data_path
 
     # Determine input file path
     if input_file:
         input_path = Path(input_file)
     else:
-        input_path = get_data_path() / f"{year}_pay_stubs_full.json"
+        input_path = get_data_path() / f"{year}_{party}_full.json"
 
     # Check if input file exists with clear guidance
     if not input_path.exists():
         click.echo(f"Error: Input file not found: {input_path}", err=True)
         click.echo("", err=True)
-        click.echo("Run pay-analysis first to generate the required input:", err=True)
-        click.echo(f"    pay-calc pay-analysis {year} --cache", err=True)
+        click.echo("Run analysis first to generate the required input:", err=True)
+        click.echo(f"    pay-calc analysis {year} {party} --cache", err=True)
         click.echo("", err=True)
-        click.echo("Then run pay-projection again:", err=True)
-        click.echo(f"    pay-calc pay-projection {year}", err=True)
+        click.echo("Then run projection again:", err=True)
+        click.echo(f"    pay-calc projection {year} {party}", err=True)
         raise SystemExit(1)
 
     import subprocess
@@ -327,44 +327,7 @@ def pay_projection(year, input_file):
     try:
         result = subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Pay projection failed with exit code {e.returncode}")
-
-
-@cli.command("household-ytd")
-@click.argument("year")
-@click.option("--party", type=click.Choice(["him", "her"]), help="Process only one party (default: both)")
-def household_ytd(year, party):
-    """Aggregate YTD totals across all parties and employers.
-
-    Reads local pay stub JSON files (YYYY_party_pay_stubs.json) for each
-    party, extracts YTD values from the latest stub per employer, and
-    outputs YYYY_party_ytd.json files.
-
-    These YTD files can be used by tax-projection as a fallback when
-    W-2 data is not yet available (mid-year projections).
-
-    \b
-    Input:  data/YYYY_him_pay_stubs.json, data/YYYY_her_pay_stubs.json
-    Output: data/YYYY_him_ytd.json, data/YYYY_her_ytd.json
-
-    When both parties are processed, also displays combined household totals.
-
-    YEAR should be a 4-digit year (e.g., 2025).
-    """
-    if not year.isdigit() or len(year) != 4:
-        raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
-
-    import subprocess
-
-    # Call calc_ytd.py with appropriate arguments
-    cmd = ["python3", "calc_ytd.py", year]
-    if party:
-        cmd.append(party)
-
-    try:
-        result = subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Household YTD calculation failed with exit code {e.returncode}")
+        raise click.ClickException(f"Projection failed with exit code {e.returncode}")
 
 
 def main():

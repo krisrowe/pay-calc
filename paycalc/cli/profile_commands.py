@@ -1,26 +1,20 @@
-"""Config and Profile CLI commands for Pay Calc.
+"""Profile CLI commands for Pay Calc.
 
-Two command groups:
-- config: Machine-specific settings (settings.json) - profile path, preferences
-- profile: User profile data (profile.yaml) - Drive IDs, parties, employers
+Manages user profile data (profile.yaml) - Drive IDs, parties, employers.
 """
 
 import click
-import json
 import yaml
 
 from paycalc.sdk import (
-    # Settings (machine-specific)
+    # Settings (for profile use command)
     get_config_dir,
-    get_settings_path,
     load_settings,
     save_settings,
-    get_setting,
     set_setting,
     # Profile (user data)
     get_profile_path,
     load_profile,
-    save_profile,
     get_profile_value,
     set_profile_value,
     ProfileNotFoundError,
@@ -28,177 +22,117 @@ from paycalc.sdk import (
     validate_profile,
     validate_profile_key,
     validate_folder_id,
-    # XDG paths
-    get_cache_path,
-    get_data_path,
 )
 
 
-# =============================================================================
-# CONFIG commands - machine-specific settings (settings.json)
-# =============================================================================
+def _validate_profile_file(path):
+    """Validate a profile file at the given path.
 
-@click.group()
-def config():
-    """Manage machine-specific settings (settings.json).
+    Args:
+        path: Path to profile.yaml file
 
-    Settings include:
-    - profile: path to your profile.yaml
-    - default_output_format: preferred output format
-    - Other tool preferences
+    Returns:
+        Tuple of (profile_dict, validation_result) if valid
 
-    These are ephemeral, machine-specific settings that can be
-    recreated easily if lost.
-    """
-    pass
-
-
-@config.command("path")
-def config_path():
-    """Show configuration paths and active profile location."""
-    import os
-
-    click.echo("Configuration paths:")
-    click.echo()
-
-    # Config directory
-    env_path = os.environ.get("PAY_CALC_CONFIG_PATH")
-    config_dir = get_config_dir()
-
-    if env_path:
-        click.echo(f"  Config directory: {config_dir}")
-        click.echo(f"    (from PAY_CALC_CONFIG_PATH)")
-    else:
-        click.echo(f"  Config directory: {config_dir}")
-        click.echo(f"    (XDG default)")
-
-    # Settings file
-    settings_path = get_settings_path()
-    if settings_path.exists():
-        click.echo(f"  Settings file:    {settings_path} [exists]")
-    else:
-        click.echo(f"  Settings file:    {settings_path} [not found]")
-
-    # Profile resolution
-    click.echo()
-    click.echo("Profile resolution:")
-
-    settings = load_settings()
-    custom_profile = settings.get("profile")
-
-    if custom_profile:
-        from pathlib import Path
-        profile_path = Path(custom_profile)
-        exists = "[exists]" if profile_path.exists() else "[NOT FOUND]"
-        click.echo(f"  1. settings.json 'profile': {profile_path} {exists}")
-    else:
-        click.echo(f"  1. settings.json 'profile': (not set)")
-
-    default_profile = config_dir / "profile.yaml"
-    legacy_profile = config_dir / "config.yaml"
-
-    if not custom_profile:
-        if default_profile.exists():
-            click.echo(f"  2. Default profile: {default_profile} [ACTIVE]")
-        elif legacy_profile.exists():
-            click.echo(f"  2. Default profile: {default_profile} (not found)")
-            click.echo(f"  3. Legacy config:   {legacy_profile} [ACTIVE - migrate recommended]")
-        else:
-            click.echo(f"  2. Default profile: {default_profile} (not found)")
-
-    # Other XDG paths
-    click.echo()
-    click.echo("Data paths (XDG spec):")
-    click.echo(f"  Cache: {get_cache_path()}")
-    click.echo(f"  Data:  {get_data_path()}")
-
-
-@config.command("set-profile")
-@click.argument("profile_path", type=click.Path())
-def config_set_profile(profile_path):
-    """Set the path to your profile.yaml.
-
-    PROFILE_PATH is the path to your profile.yaml file,
-    typically in a config repo you manage separately.
-
-    Example:
-        pay-calc config set-profile ~/repos/my-config/pay-calc/profile.yaml
+    Raises:
+        click.ClickException: If file is invalid YAML or fails schema validation
     """
     from pathlib import Path
 
-    path = Path(profile_path).expanduser().resolve()
+    path = Path(path)
 
+    # Check file exists
     if not path.exists():
-        click.echo(f"Warning: Profile does not exist yet: {path}", err=True)
-        click.echo("The path will be saved, but you'll need to create the file.", err=True)
-        click.echo()
+        raise click.ClickException(f"Profile file not found: {path}")
 
-    settings_file = set_setting("profile", str(path))
-    click.echo(f"Profile path set to: {path}")
-    click.echo(f"Saved to: {settings_file}")
+    # Check file extension
+    if path.suffix not in (".yaml", ".yml"):
+        raise click.ClickException(f"Profile must be a YAML file: {path}")
+
+    # Load and validate YAML syntax
+    try:
+        with open(path, "r") as f:
+            profile_data = yaml.safe_load(f)
+    except yaml.YAMLError as e:
+        raise click.ClickException(f"Invalid YAML in {path}: {e}")
+
+    if not isinstance(profile_data, dict):
+        raise click.ClickException(f"Profile must be a YAML dictionary, got {type(profile_data).__name__}")
+
+    if not profile_data:
+        raise click.ClickException(f"Profile is empty: {path}")
+
+    # Validate schema using SDK validation
+    try:
+        validation = validate_profile(profile=profile_data)
+    except Exception as e:
+        raise click.ClickException(f"Profile validation failed: {e}")
+
+    # Check for validation errors (uses shared display, raises if errors)
+    if validation.errors:
+        # Override location_path to show the file being validated, not active profile
+        validation.location_path = path
+        _display_validation(validation, show_contents=False, raise_on_errors=True)
+
+    return profile_data, validation
 
 
-@config.command("show")
-def config_show():
-    """Show current machine settings (settings.json)."""
-    settings_path = get_settings_path()
-    settings = load_settings()
+def _display_validation(validation, show_contents=True, raise_on_errors=False):
+    """Display validation results consistently across commands.
 
-    if not settings:
-        click.echo(f"# No settings configured yet")
-        click.echo(f"# Settings file: {settings_path}")
-        return
+    Args:
+        validation: ProfileValidationResult from validate_profile()
+        show_contents: Whether to show full profile YAML
+        raise_on_errors: If True, raise ClickException for validation errors
 
-    click.echo(f"# Settings: {settings_path}")
-    click.echo()
-    click.echo(json.dumps(settings, indent=2))
-
-
-@config.command("set")
-@click.argument("key")
-@click.argument("value")
-def config_set(key, value):
-    """Set a machine setting value.
-
-    KEY is a setting name (e.g., 'default_output_format')
-    VALUE is the value to set
-
-    For setting the profile path, use 'config set-profile' instead.
+    Returns:
+        True if valid (no errors), False if has errors
     """
-    if key == "profile":
-        raise click.ClickException("Use 'pay-calc config set-profile <path>' to set profile path")
+    has_errors = bool(validation.errors)
 
-    # Try to parse as number or boolean
-    if value.lower() == "true":
-        parsed_value = True
-    elif value.lower() == "false":
-        parsed_value = False
-    else:
-        try:
-            if "." in value:
-                parsed_value = float(value)
-            else:
-                parsed_value = int(value)
-        except ValueError:
-            parsed_value = value
+    # Show errors first if any
+    if validation.errors:
+        click.echo()
+        click.echo("Validation Errors (profile is invalid):")
+        for error in validation.errors:
+            click.echo(f"  ! {error}")
+        click.echo()
+        click.echo(f"Profile path: {validation.location_path}")
 
-    settings_file = set_setting(key, parsed_value)
-    click.echo(f"Set {key} = {parsed_value}")
-    click.echo(f"Saved to: {settings_file}")
+        if raise_on_errors:
+            raise click.ClickException("Profile has validation errors. Fix them before continuing.")
 
+    click.echo()
+    click.echo("Feature Readiness:")
+    for feature, status in validation.features.items():
+        icon = "+" if status["ready"] else "-"
+        click.echo(f"  {icon} {feature}: {status['message']}")
 
-@config.command("get")
-@click.argument("key")
-def config_get(key):
-    """Get a machine setting value."""
-    value = get_setting(key)
-    if value is None:
-        raise click.ClickException(f"Setting '{key}' not found")
+    # Show missing items if any
+    all_missing = []
+    for feature, status in validation.features.items():
+        if status["missing"]:
+            all_missing.extend(status["missing"])
 
-    if isinstance(value, (dict, list)):
-        click.echo(json.dumps(value, indent=2))
-    else:
-        click.echo(value)
+    if all_missing:
+        click.echo()
+        click.echo("Missing configuration:")
+        for item in sorted(set(all_missing)):
+            click.echo(f"  - {item}")
+
+    # Show warnings if any
+    if validation.warnings:
+        click.echo()
+        click.echo("Warnings:")
+        for warning in validation.warnings:
+            click.echo(f"  - {warning}")
+
+    if show_contents:
+        click.echo()
+        click.echo("---")
+        click.echo(yaml.dump(validation.profile, default_flow_style=False, sort_keys=False))
+
+    return not has_errors
 
 
 # =============================================================================
@@ -222,8 +156,6 @@ def profile():
 @profile.command("show")
 def profile_show():
     """Show the active profile, its location, and feature readiness."""
-    from paycalc.sdk import load_profile
-
     # Get profile path (doesn't require it to exist)
     profile_path = get_profile_path(require_exists=False)
 
@@ -255,29 +187,7 @@ def profile_show():
     # Profile exists - show validation
     try:
         validation = validate_profile()
-
-        click.echo()
-        click.echo("Feature Readiness:")
-        for feature, status in validation.features.items():
-            icon = "+" if status["ready"] else "-"
-            click.echo(f"  {icon} {feature}: {status['message']}")
-
-        # Show missing items if any
-        all_missing = []
-        for feature, status in validation.features.items():
-            if status["missing"]:
-                all_missing.extend(status["missing"])
-
-        if all_missing:
-            click.echo()
-            click.echo("Missing configuration:")
-            for item in sorted(set(all_missing)):
-                click.echo(f"  - {item}")
-
-        # Profile contents
-        click.echo()
-        click.echo("---")
-        click.echo(yaml.dump(validation.profile, default_flow_style=False, sort_keys=False))
+        _display_validation(validation, show_contents=True)
 
     except ProfileNotFoundError as e:
         raise click.ClickException(str(e))
@@ -299,8 +209,7 @@ def profile_get(key):
 
     if isinstance(value, (dict, list)):
         raise click.ClickException(
-            f"Key '{key}' is a complex value. Use 'pay-calc profile show' to view, "
-            f"or 'pay-calc profile edit' to modify."
+            f"Key '{key}' is a complex value. Use 'pay-calc profile show' to view."
         )
 
     click.echo(value)
@@ -315,8 +224,6 @@ def profile_set(key, value):
     KEY is a dot-notation path like 'drive.w2_pay_records.2024'
     VALUE is the value to set (string or number)
 
-    For complex values (objects/arrays), use 'profile edit' instead.
-
     Examples:
         pay-calc profile set drive.pay_stubs_folder_id YOUR_FOLDER_ID
         pay-calc profile set drive.w2_pay_records.2026 FOLDER_ID
@@ -326,13 +233,11 @@ def profile_set(key, value):
     if not is_valid:
         raise click.ClickException(error_msg)
 
-    # Validate folder IDs for drive.* keys
+    # Pre-validate folder IDs for drive.* keys (fail fast before writing)
     if key.startswith("drive."):
         is_valid, msg = validate_folder_id(value)
         if not is_valid:
             raise click.ClickException(msg)
-        if msg:  # Warning
-            click.echo(msg, err=True)
 
     # Try to parse as number (but not for folder IDs which are strings)
     parsed_value = value
@@ -349,6 +254,13 @@ def profile_set(key, value):
     click.echo(f"Set {key} = {parsed_value}")
     click.echo(f"Saved to: {profile_file}")
 
+    # Show full validation after setting
+    try:
+        validation = validate_profile()
+        _display_validation(validation, show_contents=False)
+    except ProfileNotFoundError:
+        pass  # Profile was just created, validation will work next time
+
 
 @profile.command("import")
 @click.argument("source_path", type=click.Path(exists=True))
@@ -358,6 +270,8 @@ def profile_import(source_path, force):
 
     Copies SOURCE_PATH to ~/.config/pay-calc/profile.yaml and clears
     any custom profile path in settings.json so the central location is used.
+
+    The profile is validated before being imported.
 
     Use this when you want to consolidate a profile from a config repo
     into the standard XDG location.
@@ -372,9 +286,8 @@ def profile_import(source_path, force):
     source = Path(source_path).expanduser().resolve()
     target = get_config_dir() / "profile.yaml"
 
-    # Validate source is YAML
-    if source.suffix not in (".yaml", ".yml"):
-        raise click.ClickException(f"Source must be a YAML file: {source}")
+    # Validate source profile before any changes (raises on errors)
+    profile_data, validation = _validate_profile_file(source)
 
     # Check target
     if target.exists() and not force:
@@ -382,13 +295,6 @@ def profile_import(source_path, force):
             f"Central profile already exists: {target}\n"
             f"Use --force to overwrite, or 'profile export' to back it up first."
         )
-
-    # Validate source is valid YAML
-    try:
-        with open(source, "r") as f:
-            yaml.safe_load(f)
-    except yaml.YAMLError as e:
-        raise click.ClickException(f"Invalid YAML in source file: {e}")
 
     # Copy file
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -408,6 +314,42 @@ def profile_import(source_path, force):
 
     click.echo()
     click.echo(f"Active profile is now: {target}")
+
+    # Show full validation
+    _display_validation(validation, show_contents=False)
+
+
+@profile.command("use")
+@click.argument("profile_path", type=click.Path(exists=True))
+def profile_use(profile_path):
+    """Set the active profile to an external file.
+
+    PROFILE_PATH is the path to a profile.yaml file, typically in a
+    config repo you manage separately.
+
+    This updates settings.json to point to the external profile, so
+    pay-calc will use that file for all configuration.
+
+    The profile is validated before being set as active.
+
+    Examples:
+        pay-calc profile use ~/repos/my-config/pay-calc/profile.yaml
+        pay-calc profile use ../personal-agent/pay-calc/profile.yaml
+    """
+    from pathlib import Path
+
+    path = Path(profile_path).expanduser().resolve()
+
+    # Validate profile before switching (raises on errors)
+    profile_data, validation = _validate_profile_file(path)
+
+    # Set the profile path
+    settings_file = set_setting("profile", str(path))
+    click.echo(f"Active profile set to: {path}")
+    click.echo(f"Saved to: {settings_file}")
+
+    # Show full validation
+    _display_validation(validation, show_contents=False)
 
 
 @profile.command("export")
