@@ -166,11 +166,22 @@ def normalize_stub_data(data: Dict[str, Any]) -> Dict[str, Any]:
     normalized["ytd_social_security"] = ss_tax.get("ytd_withheld") or ss_tax.get("ytd") or 0
     normalized["ytd_medicare"] = med_tax.get("ytd_withheld") or med_tax.get("ytd") or 0
 
-    # Sum other deductions
+    # Sum other deductions - handle both list and dict formats
     other_deductions = 0
-    for deduction in data.get("deductions", []):
-        amount = deduction.get("current_amount") or deduction.get("amount") or 0
-        other_deductions += abs(amount)
+    deductions_data = data.get("deductions", [])
+    if isinstance(deductions_data, dict):
+        # Dict format from OCR: {"retirement_401k": {"current": 100}, ...}
+        for ded_name, ded_vals in deductions_data.items():
+            if isinstance(ded_vals, dict):
+                amount = ded_vals.get("current") or ded_vals.get("current_amount") or 0
+            else:
+                amount = ded_vals or 0
+            other_deductions += abs(amount)
+    elif isinstance(deductions_data, list):
+        # List format: [{"name": "401k", "current_amount": 100}, ...]
+        for deduction in deductions_data:
+            amount = deduction.get("current_amount") or deduction.get("amount") or 0
+            other_deductions += abs(amount)
     normalized["other_deductions"] = other_deductions
 
     # Pay period dates
@@ -1445,8 +1456,17 @@ For PAY STUB:
     "social_security": {"current": 0.00, "ytd": 0.00},
     "medicare": {"current": 0.00, "ytd": 0.00},
     "state": {"current": 0.00, "ytd": 0.00}
+  },
+  "deductions": {
+    "retirement_401k": {"current": 0.00, "ytd": 0.00},
+    "health_insurance": {"current": 0.00, "ytd": 0.00},
+    "dental_vision": {"current": 0.00, "ytd": 0.00},
+    "other_pretax": {"current": 0.00, "ytd": 0.00}
   }
 }
+
+IMPORTANT: Extract ALL deductions shown on the pay stub (401k, health, dental, FSA, HSA, etc).
+The math should work: gross - taxes - deductions ≈ net_pay
 
 For W-2:
 {
