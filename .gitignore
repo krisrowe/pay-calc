@@ -24,9 +24,6 @@ ENV/
 Thumbs.db
 
 
-# Data directory - committed for regression testing baselines
-# (This is a personal-* repo, PII allowed per CLAUDE.md)
-
 cache/
 
 # Personal configuration (contains Drive folder IDs, employer info)
