@@ -15,13 +15,15 @@ This installs the `pay-calc` CLI command.
 ```bash
 pay-calc --help
 
-# Records management (new unified workflow)
-pay-calc records import 2025 him stub <folder-id>  # Import stubs from Drive folder
-pay-calc records import 2025 her w2 <folder-id>    # Import W-2s from Drive folder
-pay-calc records list                              # List all imported records
-pay-calc records list 2025 him                     # List records for year/party
-pay-calc records show <id>                         # Show record details
-pay-calc records remove <id>                       # Remove a record
+# Records management (unified workflow)
+pay-calc records import                   # Import from all configured Drive folders
+pay-calc records import <folder-id>       # Import from specific Drive folder
+pay-calc records import ./local/folder    # Import from local folder
+pay-calc records import ./file.pdf        # Import single file
+pay-calc records list                     # List all imported records
+pay-calc records list 2025 him            # Filter by year/party
+pay-calc records show <id>                # Show record details
+pay-calc records remove <id>              # Remove a record
 
 # Analysis and projection
 pay-calc pay-analysis 2025 --cache    # Process pay stubs (reads from local records)
@@ -52,14 +54,23 @@ The core workflow has three stages:
 
 ### Stage 1: Import Records
 
-The `records import` command downloads PDFs from a Google Drive folder, extracts data (using text parsing or Gemini OCR for image-based PDFs), validates the extracted data, and stores the results as JSON files locally.
+The `records import` command downloads PDFs, extracts data (using text parsing or Gemini OCR for image-based PDFs), validates the extracted data, and stores the results as JSON files locally.
+
+**Key design:** No year/party/type arguments. These values are auto-detected from file content:
+- **Type** (stub vs W-2): detected from document structure and keywords
+- **Year**: extracted from pay_date (stubs) or tax year (W-2s)
+- **Party**: matched by employer name to `parties.*.companies[].keywords` in config
 
 ```bash
-# Import pay stubs for "him" from a Drive folder
-pay-calc records import 2025 him stub <drive-folder-id>
+# Import from all configured Drive folders (drive.pay_records[] in profile.yaml)
+pay-calc records import
 
-# Import W-2 forms for "her"
-pay-calc records import 2024 her w2 /path/to/local/folder
+# Import from a specific Drive folder
+pay-calc records import <drive-folder-id>
+
+# Import from local folder or file
+pay-calc records import /path/to/folder
+pay-calc records import /path/to/file.pdf
 ```
 
 Records are stored in: `~/.local/share/pay-calc/records/<year>/<party>/<hash>.json`
