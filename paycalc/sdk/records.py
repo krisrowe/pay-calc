@@ -1,6 +1,9 @@
 """
 Records management for pay stubs and W-2s.
 
+This module contains all business logic for records storage and validation.
+CLI and MCP tools should be thin wrappers that call these functions.
+
 Design Rationale
 ----------------
 
@@ -32,12 +35,18 @@ Discard reasons (meta.discard_reason):
 
 import json
 import hashlib
+import logging
+import os
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
 from .config import get_data_path
 
+# Configure logging based on LOG_LEVEL environment variable
+_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
+logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
+logger = logging.getLogger(__name__)
 
 RecordType = Literal["stub", "w2", "discarded"]
 
@@ -131,20 +140,31 @@ def normalize_stub_data(data: Dict[str, Any]) -> Dict[str, Any]:
     normalized["gross_pay"] = current.get("gross") or current.get("gross_pay") or 0
     normalized["net_pay"] = data.get("net_pay") or current.get("net_pay") or 0
 
-    # Extract taxes
+    # Extract taxes - handle multiple naming conventions
     taxes = data.get("taxes", {})
-    normalized["federal_tax"] = (taxes.get("federal_income", {}).get("current")
-                                  or taxes.get("federal", {}).get("current") or 0)
-    normalized["state_tax"] = taxes.get("state", {}).get("current") or 0
-    normalized["social_security"] = taxes.get("social_security", {}).get("current") or 0
-    normalized["medicare"] = taxes.get("medicare", {}).get("current") or 0
+
+    # Federal: federal_income_tax.current_withheld or federal_income.current
+    fed_tax = taxes.get("federal_income_tax", {}) or taxes.get("federal_income", {}) or taxes.get("federal", {})
+    normalized["federal_tax"] = fed_tax.get("current_withheld") or fed_tax.get("current") or 0
+
+    # State
+    state_tax = taxes.get("state_income_tax", {}) or taxes.get("state", {})
+    normalized["state_tax"] = state_tax.get("current_withheld") or state_tax.get("current") or 0
+
+    # Social Security
+    ss_tax = taxes.get("social_security", {})
+    normalized["social_security"] = ss_tax.get("current_withheld") or ss_tax.get("current") or 0
+
+    # Medicare
+    med_tax = taxes.get("medicare", {})
+    normalized["medicare"] = med_tax.get("current_withheld") or med_tax.get("current") or 0
 
     # YTD values
     normalized["ytd_gross"] = ytd.get("gross") or 0
-    normalized["ytd_federal_tax"] = taxes.get("federal_income", {}).get("ytd") or 0
-    normalized["ytd_state_tax"] = taxes.get("state", {}).get("ytd") or 0
-    normalized["ytd_social_security"] = taxes.get("social_security", {}).get("ytd") or 0
-    normalized["ytd_medicare"] = taxes.get("medicare", {}).get("ytd") or 0
+    normalized["ytd_federal_tax"] = fed_tax.get("ytd_withheld") or fed_tax.get("ytd") or 0
+    normalized["ytd_state_tax"] = state_tax.get("ytd_withheld") or state_tax.get("ytd") or 0
+    normalized["ytd_social_security"] = ss_tax.get("ytd_withheld") or ss_tax.get("ytd") or 0
+    normalized["ytd_medicare"] = med_tax.get("ytd_withheld") or med_tax.get("ytd") or 0
 
     # Sum other deductions
     other_deductions = 0
@@ -190,11 +210,15 @@ def _validate_schema(data: Dict[str, Any], schema: Dict, record_type: str) -> Li
 def _validate_stub_math(data: Dict[str, Any]) -> List[str]:
     """Validate pay stub math: do the numbers add up?
 
+    Returns warnings (not errors) for math mismatches since there are many
+    legitimate edge cases: imputed income (Group Term Life), 401k maxing,
+    complex deduction structures, etc.
+
     Checks:
-    - gross - deductions ≈ net (within $1 tolerance for rounding)
+    - gross - deductions ≈ net (within tolerance)
     - YTD values >= current period values
     """
-    errors = []
+    warnings = []
 
     gross = data.get("gross_pay", 0) or 0
     net = data.get("net_pay", 0) or 0
@@ -207,31 +231,30 @@ def _validate_stub_math(data: Dict[str, Any]) -> List[str]:
         other = sum(d.get("amount", 0) for d in other if isinstance(d, dict))
     other = other or 0
 
-    # gross - all deductions should equal net (allow $1 tolerance)
+    # gross - all deductions should approximately equal net
+    # Use larger tolerance (5% of gross or $100) due to imputed income, etc.
     calculated_net = gross - federal - state - ss - medicare - other
-    if abs(calculated_net - net) > 1.0:
-        errors.append(
-            f"math mismatch: gross({gross}) - deductions({federal}+{state}+{ss}+{medicare}+{other}) "
-            f"= {calculated_net:.2f}, but net_pay = {net}"
+    tolerance = max(gross * 0.05, 100.0) if gross > 0 else 100.0
+    if abs(calculated_net - net) > tolerance:
+        warnings.append(
+            f"math warning: gross({gross:.2f}) - deductions = {calculated_net:.2f}, "
+            f"but net_pay = {net:.2f} (diff: ${abs(calculated_net - net):.2f})"
         )
 
-    # YTD validations: ytd should be >= current period
+    # YTD validations: ytd should be >= current period (warning only)
     ytd_checks = [
         ("ytd_gross", "gross_pay"),
         ("ytd_federal_tax", "federal_tax"),
-        ("ytd_state_tax", "state_tax"),
-        ("ytd_social_security", "social_security"),
-        ("ytd_medicare", "medicare"),
     ]
 
     for ytd_field, period_field in ytd_checks:
         ytd_val = data.get(ytd_field)
         period_val = data.get(period_field)
         if ytd_val is not None and period_val is not None:
-            if ytd_val < period_val:
-                errors.append(f"YTD value {ytd_field}({ytd_val}) < period value {period_field}({period_val})")
+            if ytd_val < period_val * 0.99:  # 1% tolerance
+                warnings.append(f"YTD warning: {ytd_field}({ytd_val}) < {period_field}({period_val})")
 
-    return errors
+    return warnings
 
 
 def _validate_w2_math(data: Dict[str, Any]) -> List[str]:
@@ -294,7 +317,7 @@ def validate_record(
     data: Dict[str, Any],
     meta: Dict[str, Any],
     check_duplicate: bool = True
-) -> List[str]:
+) -> tuple:
     """Run full validation pipeline on a record.
 
     Args:
@@ -304,25 +327,27 @@ def validate_record(
         check_duplicate: Whether to check for existing records
 
     Returns:
-        List of error messages (empty if valid)
+        Tuple of (errors, warnings) - both are lists of strings.
+        Errors block import; warnings are logged but don't block.
     """
     errors = []
+    warnings = []
 
     if record_type == "discarded":
-        return errors  # No validation for discarded records
+        return errors, warnings  # No validation for discarded records
 
     if data is None:
         errors.append("data cannot be None for non-discarded records")
-        return errors
+        return errors, warnings
 
-    # Schema validation
+    # Schema validation (errors)
     if record_type == "stub":
         # Normalize nested format to flat for validation
         flat_data = normalize_stub_data(data)
         errors.extend(_validate_schema(flat_data, STUB_SCHEMA, "stub"))
         if not errors:  # Only check math if schema is valid
-            errors.extend(_validate_stub_math(flat_data))
-        # Date format check
+            warnings.extend(_validate_stub_math(flat_data))
+        # Date format check (errors)
         if "pay_date" in data:
             errors.extend(_validate_date_format(data["pay_date"], "pay_date"))
         if "pay_period_start" in data:
@@ -333,8 +358,8 @@ def validate_record(
     elif record_type == "w2":
         errors.extend(_validate_schema(data, W2_SCHEMA, "w2"))
         if not errors:  # Only check math if schema is valid
-            errors.extend(_validate_w2_math(data))
-        # Year should be reasonable
+            warnings.extend(_validate_w2_math(data))
+        # Year should be reasonable (error)
         tax_year = data.get("tax_year")
         if tax_year:
             try:
@@ -344,20 +369,20 @@ def validate_record(
             except (ValueError, TypeError):
                 errors.append(f"tax_year not a valid year: {tax_year}")
 
-    # Duplicate check (by drive_file_id)
+    # Duplicate check (error)
     if check_duplicate and meta.get("drive_file_id"):
         existing = find_by_drive_id(meta["drive_file_id"])
         if existing:
             errors.append(f"duplicate: record with drive_file_id already exists (id={existing['id']})")
 
-    return errors
+    return errors, warnings
 
 
 def validate_and_add_record(
     meta: Dict[str, Any],
     data: Optional[Dict[str, Any]],
     skip_validation: bool = False
-) -> Path:
+) -> tuple:
     """Validate a record and add it if valid.
 
     This is the primary entry point for importing records.
@@ -368,20 +393,23 @@ def validate_and_add_record(
         skip_validation: Skip validation (use with caution)
 
     Returns:
-        Path to the saved record
+        Tuple of (path, warnings) where path is the saved file path
+        and warnings is a list of warning messages (may be empty)
 
     Raises:
-        ValidationError: If validation fails
+        ValidationError: If validation fails (errors, not warnings)
         ValueError: If required metadata is missing
     """
     record_type = meta.get("type")
+    warnings = []
 
     if not skip_validation and record_type != "discarded":
-        errors = validate_record(record_type, data, meta, check_duplicate=True)
+        errors, warnings = validate_record(record_type, data, meta, check_duplicate=True)
         if errors:
             raise ValidationError(errors)
 
-    return add_record(meta, data)
+    path = add_record(meta, data)
+    return path, warnings
 
 
 # =============================================================================
@@ -705,3 +733,967 @@ def clear_all_records() -> int:
         shutil.rmtree(records_dir)
 
     return count
+
+
+# =============================================================================
+# FOLDER IMPORT FUNCTIONS
+# =============================================================================
+
+def is_drive_folder_id(source: str) -> bool:
+    """Check if source looks like a Google Drive folder ID.
+
+    Drive folder IDs are typically 33 chars, alphanumeric with - and _.
+    """
+    if len(source) > 20 and "/" not in source and "\\" not in source:
+        return all(c.isalnum() or c in "-_" for c in source)
+    return False
+
+
+# Pay stub extraction prompt for Gemini OCR
+# (JSON boilerplate handled by gemini_client)
+PAYSTUB_OCR_PROMPT = """Extract pay stub data into this JSON structure:
+
+{
+  "pay_date": "YYYY-MM-DD",
+  "employer": "company name",
+  "net_pay": 0.00,
+  "pay_summary": {
+    "current": {"gross": 0.00, "taxes": 0.00, "net_pay": 0.00},
+    "ytd": {"gross": 0.00, "taxes": 0.00}
+  },
+  "taxes": {
+    "federal_income": {"current": 0.00, "ytd": 0.00},
+    "social_security": {"current": 0.00, "ytd": 0.00},
+    "medicare": {"current": 0.00, "ytd": 0.00},
+    "state": {"current": 0.00, "ytd": 0.00}
+  },
+  "deductions": [
+    {"type": "description", "current_amount": 0.00, "ytd_amount": 0.00}
+  ],
+  "earnings": [
+    {"type": "Gross Pay", "current_amount": 0.00, "ytd_amount": 0.00}
+  ]
+}
+
+Include all deductions (401k, health insurance, etc.) and all earnings types found.
+Use 0.00 for any tax fields not present on the stub.
+pay_summary.current.taxes should be the sum of all tax withholdings.
+"""
+
+
+def process_pdf_to_json(pdf_path: Path, record_type: RecordType, party: str) -> Optional[Dict[str, Any]]:
+    """Extract data from a PDF and return as JSON dict.
+
+    Uses text extraction for text-based PDFs, falls back to OCR for image PDFs.
+
+    Args:
+        pdf_path: Path to the PDF file
+        record_type: Expected type (stub/w2)
+        party: Party for employer matching
+
+    Returns:
+        Extracted data dict, or None if extraction failed
+    """
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+
+    try:
+        import PyPDF2
+
+        # Try to extract text from PDF
+        pdf_text = ""
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    pdf_text += page.extract_text() or ""
+        except Exception:
+            pdf_text = ""
+
+        # If no text, need OCR
+        if not pdf_text.strip():
+            try:
+                from gemini_client import process_file
+                data = process_file(PAYSTUB_OCR_PROMPT, str(pdf_path))
+                data["_source_file"] = pdf_path.name
+                data["_ocr"] = True
+                return data
+            except ImportError:
+                return None
+            except Exception:
+                return None
+
+        # Text-based PDF - use processor
+        try:
+            from analysis import process_single_page
+            return process_single_page(str(pdf_path), party)
+        except ImportError:
+            return None
+        except Exception:
+            return None
+
+    except Exception:
+        return None
+
+
+def import_from_folder(
+    source: str,
+    year: str,
+    party: str,
+    record_type: RecordType,
+    callback: Optional[callable] = None
+) -> Dict[str, Any]:
+    """Import records from a folder (Drive or local).
+
+    Handles both JSON and PDF files. PDFs are processed to extract data.
+
+    Args:
+        source: Drive folder ID or local folder path
+        year: Year for imported records
+        party: Party (him/her) for imported records
+        record_type: Type of records to import (stub/w2)
+        callback: Optional function called for progress updates.
+                  Signature: callback(event: str, data: dict)
+                  Events: "start", "file", "imported", "skipped", "error", "done"
+
+    Returns:
+        Dict with import statistics:
+        - imported: count of successfully imported records
+        - skipped: count of skipped (duplicate) records
+        - errors: count of errors
+        - warnings: list of all warnings
+        - files: list of processed file names
+    """
+    import tempfile
+
+    stats = {
+        "imported": 0,
+        "skipped": 0,
+        "errors": 0,
+        "warnings": [],
+        "files": []
+    }
+
+    def emit(event: str, data: dict = None):
+        if callback:
+            callback(event, data or {})
+
+    # Determine source type and get file list
+    if is_drive_folder_id(source):
+        # Import from Google Drive - requires gwsa
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["gwsa", "drive", "list", "--folder-id", source],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"gwsa failed: {result.stderr}")
+
+            import json as json_module
+            files_info = json_module.loads(result.stdout).get("items", [])
+        except FileNotFoundError:
+            raise RuntimeError("gwsa not installed - required for Drive imports")
+        except Exception as e:
+            raise RuntimeError(f"Failed to list Drive folder: {e}")
+
+        # Filter to JSON and PDF files
+        processable = [f for f in files_info
+                       if f.get("name", "").lower().endswith((".json", ".pdf"))]
+
+        # Download to temp dir and process
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            emit("start", {"source": source, "file_count": len(processable)})
+
+            for file_info in processable:
+                name = file_info.get("name", "")
+                file_id = file_info.get("id", "")
+
+                emit("file", {"name": name})
+                stats["files"].append(name)
+
+                local_path = tmp_path / name
+                try:
+                    subprocess.run(
+                        ["gwsa", "drive", "download", file_id, str(local_path)],
+                        capture_output=True, text=True, check=True
+                    )
+                except subprocess.CalledProcessError as e:
+                    emit("error", {"name": name, "error": str(e)})
+                    stats["errors"] += 1
+                    continue
+
+                # Import the downloaded file
+                file_result = _import_single_file(
+                    local_path, year, party, record_type,
+                    drive_file_id=file_id
+                )
+                stats["imported"] += file_result["imported"]
+                stats["skipped"] += file_result["skipped"]
+                stats["errors"] += file_result["errors"]
+                stats["warnings"].extend(file_result.get("warnings", []))
+
+                if file_result["imported"]:
+                    emit("imported", {"name": name})
+                elif file_result["skipped"]:
+                    emit("skipped", {"name": name})
+                elif file_result["errors"]:
+                    emit("error", {"name": name, "error": file_result.get("error_msg", "unknown")})
+
+    else:
+        # Local folder
+        folder_path = Path(source)
+        if not folder_path.is_dir():
+            raise ValueError(f"Not a directory: {source}")
+
+        # Get JSON and PDF files
+        files = sorted(list(folder_path.glob("*.json")) + list(folder_path.glob("*.pdf")))
+        emit("start", {"source": source, "file_count": len(files)})
+
+        for file_path in files:
+            emit("file", {"name": file_path.name})
+            stats["files"].append(file_path.name)
+
+            file_result = _import_single_file(file_path, year, party, record_type)
+            stats["imported"] += file_result["imported"]
+            stats["skipped"] += file_result["skipped"]
+            stats["errors"] += file_result["errors"]
+            stats["warnings"].extend(file_result.get("warnings", []))
+
+            if file_result["imported"]:
+                emit("imported", {"name": file_path.name})
+            elif file_result["skipped"]:
+                emit("skipped", {"name": file_path.name})
+            elif file_result["errors"]:
+                emit("error", {"name": file_path.name, "error": file_result.get("error_msg", "unknown")})
+
+    emit("done", stats)
+    return stats
+
+
+# =============================================================================
+# AUTO-DETECTION IMPORT FUNCTIONS
+# =============================================================================
+
+def detect_party_from_employer(employer_name: str, profile: Optional[Dict] = None) -> Optional[str]:
+    """Match employer name to a party using profile config keywords.
+
+    Args:
+        employer_name: Employer name from parsed document
+        profile: Profile dict (loaded from load_profile() if not provided)
+
+    Returns:
+        Party name ("him", "her", etc.) if matched, None otherwise
+    """
+    if not employer_name:
+        return None
+
+    if profile is None:
+        from .config import load_profile
+        profile = load_profile()
+
+    normalized = employer_name.lower().replace(" ", "")
+
+    parties = profile.get("parties", {})
+    for party_name, party_data in parties.items():
+        if not isinstance(party_data, dict):
+            continue
+        for company in party_data.get("companies", []):
+            keywords = company.get("keywords", [])
+            # Also match on company name itself
+            company_name = company.get("name", "")
+            if company_name:
+                keywords = keywords + [company_name]
+
+            for keyword in keywords:
+                if keyword.lower().replace(" ", "") in normalized:
+                    return party_name
+
+    return None
+
+
+def detect_record_type_from_data(data: Dict[str, Any]) -> Optional[RecordType]:
+    """Detect record type (stub vs w2) from parsed data structure.
+
+    Args:
+        data: Parsed record data
+
+    Returns:
+        "stub", "w2", or None if can't detect
+    """
+    if not data:
+        return None
+
+    # Check both top-level and nested "data" field (some formats nest the actual data)
+    check_data = data
+    if "data" in data and isinstance(data["data"], dict):
+        check_data = data["data"]
+
+    # W-2 indicators
+    w2_fields = ["tax_year", "wages", "federal_tax_withheld",
+                 "wages_tips_other_comp", "federal_income_tax_withheld",
+                 "social_security_wages", "medicare_wages"]
+
+    w2_matches = sum(1 for f in w2_fields if f in check_data or f in data)
+    if w2_matches >= 2:
+        return "w2"
+
+    # Stub indicators: has pay_date and pay-related fields
+    if "pay_date" in data or "pay_date" in check_data:
+        return "stub"
+    if "pay_summary" in data or "pay_summary" in check_data:
+        return "stub"
+    if ("gross_pay" in check_data and "net_pay" in check_data) or \
+       ("gross_pay" in data and "net_pay" in data):
+        return "stub"
+
+    return None
+
+
+def extract_year_from_data(data: Dict[str, Any], record_type: RecordType,
+                           filename: Optional[str] = None) -> Optional[str]:
+    """Extract year from record data or filename.
+
+    Args:
+        data: Parsed record data
+        record_type: "stub" or "w2"
+        filename: Optional filename to extract year from if not in data
+
+    Returns:
+        Year string (e.g., "2025") or None
+    """
+    import re
+
+    if not data:
+        return None
+
+    # Check nested data field too
+    check_data = data.get("data", {}) if isinstance(data.get("data"), dict) else {}
+
+    if record_type == "stub":
+        pay_date = data.get("pay_date") or check_data.get("pay_date", "")
+        if pay_date and len(pay_date) >= 4:
+            return pay_date[:4]
+    elif record_type == "w2":
+        tax_year = data.get("tax_year") or check_data.get("tax_year")
+        if tax_year:
+            return str(tax_year)
+
+    # Try to extract year from filename (e.g., "2024_manual-w2_1.json" or "2024 W-2...")
+    if filename:
+        # Match 4-digit year at start or after common separators
+        match = re.search(r'(?:^|[_\-\s])(\d{4})(?:[_\-\s]|$)', filename)
+        if match:
+            year = match.group(1)
+            if 2000 <= int(year) <= 2100:
+                return year
+
+    return None
+
+
+def extract_employer_from_data(data: Dict[str, Any], record_type: RecordType) -> Optional[str]:
+    """Extract employer name from record data.
+
+    Args:
+        data: Parsed record data
+        record_type: "stub" or "w2"
+
+    Returns:
+        Employer name or None
+    """
+    if not data:
+        return None
+
+    # Try common field names
+    for field in ["employer", "employer_name", "company", "company_name"]:
+        if field in data and data[field]:
+            return data[field]
+
+    return None
+
+
+def import_file_auto(
+    file_path: Path,
+    force: bool = False,
+    drive_file_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Import a single file with auto-detection of type, year, and party.
+
+    Parses the file, detects:
+    - Record type (stub vs W-2) from content structure
+    - Year from pay_date (stubs) or tax_year (W-2s)
+    - Party by matching employer to profile config keywords
+
+    Args:
+        file_path: Path to PDF or JSON file
+        force: If True, re-process previously discarded files
+        drive_file_id: Optional Drive file ID for tracking
+
+    Returns:
+        Dict with:
+        - status: "imported", "skipped", "discarded"
+        - type: "stub", "w2", or None
+        - year: Detected year or None
+        - party: Detected party or None
+        - employer: Detected employer name or None
+        - reason: Reason if skipped/discarded
+        - path: Saved file path if imported
+    """
+    result = {
+        "status": None,
+        "type": None,
+        "year": None,
+        "party": None,
+        "employer": None,
+        "reason": None,
+        "path": None,
+    }
+
+    # Check if already processed
+    if drive_file_id:
+        existing = find_by_drive_id(drive_file_id)
+        if existing:
+            existing_type = existing.get("meta", {}).get("type")
+            if existing_type == "discarded":
+                if not force:
+                    result["status"] = "skipped"
+                    result["reason"] = "previously discarded"
+                    return result
+                # With --force, continue to re-process
+            else:
+                result["status"] = "skipped"
+                result["reason"] = "already imported"
+                result["type"] = existing_type
+                return result
+
+    # Parse the file
+    suffix = file_path.suffix.lower()
+    data = None
+
+    if suffix == ".json":
+        try:
+            with open(file_path) as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, IOError) as e:
+            result["status"] = "discarded"
+            result["reason"] = f"parse_failed: {e}"
+            _save_discarded(file_path.name, drive_file_id, result["reason"])
+            return result
+
+    elif suffix == ".pdf":
+        # First try text extraction
+        data = _extract_pdf_auto(file_path)
+        if data is None:
+            result["status"] = "discarded"
+            result["reason"] = "unreadable"
+            _save_discarded(file_path.name, drive_file_id, result["reason"])
+            return result
+
+    else:
+        result["status"] = "discarded"
+        result["reason"] = "unsupported format"
+        return result
+
+    # Detect record type
+    record_type = detect_record_type_from_data(data)
+    if not record_type:
+        result["status"] = "discarded"
+        result["reason"] = "not_recognized"
+        _save_discarded(file_path.name, drive_file_id, result["reason"])
+        return result
+
+    result["type"] = record_type
+
+    # Extract year
+    year = extract_year_from_data(data, record_type)
+    if not year:
+        result["status"] = "discarded"
+        result["reason"] = "no_year_detected"
+        _save_discarded(file_path.name, drive_file_id, result["reason"])
+        return result
+
+    result["year"] = year
+
+    # Extract employer and detect party
+    employer = extract_employer_from_data(data, record_type)
+    result["employer"] = employer
+
+    party = detect_party_from_employer(employer)
+    if not party:
+        result["status"] = "discarded"
+        result["reason"] = f"unknown_party (employer: {employer or 'not found'})"
+        _save_discarded(file_path.name, drive_file_id, result["reason"])
+        return result
+
+    result["party"] = party
+
+    # Build metadata
+    meta = {
+        "type": record_type,
+        "year": year,
+        "party": party,
+        "source_filename": file_path.name,
+    }
+    if drive_file_id:
+        meta["drive_file_id"] = drive_file_id
+
+    # Validate and save
+    try:
+        path, warnings = validate_and_add_record(meta=meta, data=data)
+        result["status"] = "imported"
+        result["path"] = str(path)
+        return result
+
+    except ValidationError as e:
+        # Check if it's a duplicate
+        if any("duplicate" in err.lower() for err in e.errors):
+            result["status"] = "skipped"
+            result["reason"] = "duplicate"
+        else:
+            result["status"] = "discarded"
+            result["reason"] = f"validation_failed: {'; '.join(e.errors)}"
+            _save_discarded(file_path.name, drive_file_id, result["reason"])
+        return result
+
+
+def _extract_pdf_auto(pdf_path: Path) -> Optional[Dict[str, Any]]:
+    """Extract data from PDF with auto-detection.
+
+    Tries text extraction first, falls back to OCR if needed.
+
+    Returns:
+        Parsed data dict or None if extraction failed
+    """
+    logger.debug(f"_extract_pdf_auto: {pdf_path.name}")
+
+    try:
+        import PyPDF2
+
+        # Try text extraction
+        pdf_text = ""
+        try:
+            with open(pdf_path, 'rb') as f:
+                reader = PyPDF2.PdfReader(f)
+                for page in reader.pages:
+                    pdf_text += page.extract_text() or ""
+        except Exception as e:
+            logger.debug(f"PyPDF2 extract failed: {e}")
+            pdf_text = ""
+
+        logger.debug(f"extracted {len(pdf_text)} chars of text")
+
+        if pdf_text.strip():
+            # Text-based PDF - detect type and parse
+            logger.debug("calling _parse_text_pdf_auto")
+            result = _parse_text_pdf_auto(pdf_text, pdf_path)
+            if result:
+                return result
+            # Text parsing failed - fall back to OCR
+            logger.debug("text parsing returned None, falling back to OCR")
+
+        # Image-based PDF or text parsing failed - use OCR
+        logger.debug("calling _extract_pdf_ocr")
+        return _extract_pdf_ocr(pdf_path)
+
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _parse_text_pdf_auto(pdf_text: str, pdf_path: Path) -> Optional[Dict[str, Any]]:
+    """Parse text-based PDF with auto type detection.
+
+    Args:
+        pdf_text: Extracted text from PDF
+        pdf_path: Path to PDF file
+
+    Returns:
+        Parsed data dict or None
+    """
+    filename = pdf_path.name
+
+    # Detect type from text
+    text_lower = pdf_text.lower()
+
+    is_w2 = any(indicator in text_lower for indicator in [
+        "wage and tax statement", "form w-2", "w-2", "box 1", "box 2",
+        "employer identification", "employee's social security"
+    ])
+
+    is_stub = any(indicator in text_lower for indicator in [
+        "pay period", "pay date", "gross pay", "net pay", "ytd",
+        "earnings statement", "pay stub", "direct deposit"
+    ])
+
+    # Filename hints can help break ties
+    fname_lower = filename.lower()
+    if "w2" in fname_lower or "w-2" in fname_lower:
+        is_w2 = True
+    if "stub" in fname_lower or "pay" in fname_lower:
+        is_stub = True
+
+    logger.debug(f"type detection: is_w2={is_w2}, is_stub={is_stub}")
+
+    if is_w2 and not is_stub:
+        # Parse as W-2 - no text parser yet, fall back to OCR
+        logger.debug("W-2 detected, will fall back to OCR")
+        return None
+
+    elif is_stub and not is_w2:
+        # Parse as stub - detect processor from config-driven keywords
+        logger.debug("attempting stub text parse")
+        try:
+            from processors import get_processor
+            from .config import load_config
+
+            # Load config and search for matching employer keywords
+            processor_name = "generic"
+            employer = "Unknown"
+            detected_party = None
+
+            try:
+                config = load_config(require_exists=False)
+                parties = config.get("parties", {})
+
+                # Normalize text once for keyword matching
+                normalized_text = text_lower.replace(" ", "")
+
+                # Search all parties/companies for keyword match
+                for party_name, party_config in parties.items():
+                    companies = party_config.get("companies", [])
+                    for company in companies:
+                        keywords = company.get("keywords", [])
+                        for keyword in keywords:
+                            if keyword.lower().replace(" ", "") in normalized_text:
+                                processor_name = company.get("paystub_processor", "generic")
+                                employer = company.get("name", "Unknown")
+                                detected_party = party_name
+                                logger.debug(f"keyword match '{keyword}' → {employer} ({party_name})")
+                                break
+                        if detected_party:
+                            break
+                    if detected_party:
+                        break
+            except Exception as e:
+                logger.debug(f"config load failed, using defaults: {e}")
+
+            logger.debug(f"detected processor={processor_name}, employer={employer}, party={detected_party}")
+            processor_class = get_processor(processor_name)
+            result = processor_class.process(str(pdf_path), employer)
+            if result and result.get("pay_date"):
+                logger.debug(f"text parse successful: {result.get('pay_date')}")
+                return result
+        except Exception as e:
+            logger.debug(f"text parse failed: {e}")
+        # Text parsing failed - return None to trigger OCR fallback
+        logger.debug("stub text parse failed, will fall back to OCR")
+        return None
+
+    # Can't determine type from text - return None to trigger OCR
+    logger.debug("can't determine type from text, will fall back to OCR")
+    return None
+
+
+def _extract_pdf_ocr(pdf_path: Path) -> Optional[Dict[str, Any]]:
+    """Extract data from image-based PDF using Gemini OCR.
+
+    Uses unified prompt that detects type AND extracts data in one call.
+
+    Returns:
+        Parsed data dict with type indicator, or None
+    """
+    logger.debug(f"_extract_pdf_ocr starting for {pdf_path.name}")
+
+    try:
+        from gemini_client import process_file
+        logger.debug("calling gemini_client.process_file...")
+
+        # Unified prompt for type detection + extraction
+        prompt = """Analyze this document and extract data.
+
+First, identify the document type:
+- PAY STUB: Contains pay period, pay date, gross/net pay, YTD totals
+- W-2 (Wage and Tax Statement): Contains tax year, boxes 1-17, employer EIN
+
+Then extract the relevant data into JSON format:
+
+For PAY STUB:
+{
+  "pay_date": "YYYY-MM-DD",
+  "employer": "company name",
+  "net_pay": 0.00,
+  "pay_summary": {
+    "current": {"gross": 0.00},
+    "ytd": {"gross": 0.00}
+  },
+  "taxes": {
+    "federal_income": {"current": 0.00, "ytd": 0.00},
+    "social_security": {"current": 0.00, "ytd": 0.00},
+    "medicare": {"current": 0.00, "ytd": 0.00},
+    "state": {"current": 0.00, "ytd": 0.00}
+  }
+}
+
+For W-2:
+{
+  "tax_year": 2024,
+  "employer_name": "company name",
+  "employer_ein": "XX-XXXXXXX",
+  "wages": 0.00,
+  "federal_tax_withheld": 0.00,
+  "social_security_wages": 0.00,
+  "social_security_tax": 0.00,
+  "medicare_wages": 0.00,
+  "medicare_tax": 0.00,
+  "state": "XX",
+  "state_wages": 0.00,
+  "state_tax_withheld": 0.00
+}
+
+If unable to identify as either type, return: {"_unrecognized": true}
+
+Return ONLY the JSON object, no explanation."""
+
+        data = process_file(prompt, str(pdf_path))
+        if data.get("_unrecognized"):
+            return None
+        return data
+
+    except ImportError:
+        return None
+    except Exception:
+        return None
+
+
+def _save_discarded(
+    source_filename: str,
+    drive_file_id: Optional[str],
+    reason: str
+) -> Path:
+    """Save a discard marker for a file.
+
+    Args:
+        source_filename: Original filename
+        drive_file_id: Drive file ID if from Drive
+        reason: Why file was discarded
+
+    Returns:
+        Path to saved discard marker
+    """
+    meta = {
+        "type": "discarded",
+        "source_filename": source_filename,
+        "discard_reason": reason,
+    }
+    if drive_file_id:
+        meta["drive_file_id"] = drive_file_id
+
+    return add_record(meta, None)
+
+
+def import_from_folder_auto(
+    source: str,
+    callback: Optional[callable] = None,
+    force: bool = False,
+    debug: bool = False
+) -> Dict[str, Any]:
+    """Import records from a folder with full auto-detection.
+
+    Processes all JSON and PDF files, auto-detecting type, year, and party.
+
+    Args:
+        source: Drive folder ID or local folder path
+        callback: Progress callback(event, data)
+        force: Re-process previously discarded files
+        debug: Include detailed debug info
+
+    Returns:
+        Stats dict with: imported, skipped, discarded, errors, stubs, w2s
+    """
+    import tempfile
+
+    stats = {
+        "imported": 0,
+        "skipped": 0,
+        "discarded": 0,
+        "errors": 0,
+        "stubs": 0,
+        "w2s": 0,
+    }
+
+    def emit(event: str, data: dict = None):
+        if callback:
+            callback(event, data or {})
+
+    if is_drive_folder_id(source):
+        # Import from Google Drive
+        try:
+            import subprocess
+            result = subprocess.run(
+                ["gwsa", "drive", "list", "--folder-id", source],
+                capture_output=True, text=True
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"gwsa failed: {result.stderr}")
+
+            files_info = json.loads(result.stdout).get("items", [])
+        except FileNotFoundError:
+            raise RuntimeError("gwsa not installed - required for Drive imports")
+        except Exception as e:
+            raise RuntimeError(f"Failed to list Drive folder: {e}")
+
+        # Filter to processable files
+        processable = [f for f in files_info
+                       if f.get("name", "").lower().endswith((".json", ".pdf"))]
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            tmp_path = Path(tmp_dir)
+            emit("start", {"source": source, "file_count": len(processable)})
+
+            for file_info in processable:
+                name = file_info.get("name", "")
+                file_id = file_info.get("id", "")
+
+                logger.debug(f"downloading {name}...")
+
+                local_path = tmp_path / name
+                try:
+                    subprocess.run(
+                        ["gwsa", "drive", "download", file_id, str(local_path)],
+                        capture_output=True, text=True, check=True
+                    )
+                except subprocess.CalledProcessError as e:
+                    emit("error", {"name": name, "error": str(e)})
+                    stats["errors"] += 1
+                    continue
+
+                logger.debug(f"downloaded {name}, processing...")
+
+                # Import with auto-detection
+                result = import_file_auto(local_path, force=force, drive_file_id=file_id)
+                _accumulate_file_result(stats, result, name, emit)
+
+                logger.debug(f"{name} result: {result.get('status')}")
+
+    else:
+        # Local folder
+        folder_path = Path(source)
+        if not folder_path.is_dir():
+            raise ValueError(f"Not a directory: {source}")
+
+        files = sorted(list(folder_path.glob("*.json")) + list(folder_path.glob("*.pdf")))
+        emit("start", {"source": source, "file_count": len(files)})
+
+        for file_path in files:
+            result = import_file_auto(file_path, force=force)
+            _accumulate_file_result(stats, result, file_path.name, emit)
+
+    emit("done", stats)
+    return stats
+
+
+def _accumulate_file_result(stats: dict, result: dict, name: str, emit: callable):
+    """Accumulate import result into stats and emit events."""
+    status = result.get("status")
+    rec_type = result.get("type")
+
+    if status == "imported":
+        stats["imported"] += 1
+        if rec_type == "stub":
+            stats["stubs"] += 1
+        elif rec_type == "w2":
+            stats["w2s"] += 1
+        emit("imported", {
+            "name": name,
+            "type": rec_type,
+            "year": result.get("year"),
+            "party": result.get("party"),
+            "employer": result.get("employer"),
+        })
+
+    elif status == "skipped":
+        stats["skipped"] += 1
+        emit("skipped", {"name": name, "reason": result.get("reason")})
+
+    elif status == "discarded":
+        stats["discarded"] += 1
+        emit("discarded", {"name": name, "reason": result.get("reason")})
+
+
+# =============================================================================
+# LEGACY IMPORT FUNCTIONS (with explicit year/party/type)
+# =============================================================================
+
+def _import_single_file(
+    file_path: Path,
+    year: str,
+    party: str,
+    record_type: RecordType,
+    drive_file_id: Optional[str] = None
+) -> Dict[str, Any]:
+    """Import a single file (JSON or PDF) with explicit metadata.
+
+    LEGACY: Use import_file_auto() for new code.
+
+    For PDFs, extracts data using text extraction or Gemini OCR.
+    For JSON, loads directly.
+
+    Returns:
+        Dict with: imported (0/1), skipped (0/1), errors (0/1),
+                   warnings (list), error_msg (str if error)
+    """
+    result = {"imported": 0, "skipped": 0, "errors": 0, "warnings": [], "error_msg": None}
+
+    suffix = file_path.suffix.lower()
+
+    if suffix == ".pdf":
+        # Extract data from PDF
+        data = process_pdf_to_json(file_path, record_type, party)
+        if data is None:
+            result["errors"] = 1
+            result["error_msg"] = "Failed to extract data from PDF"
+            return result
+    elif suffix == ".json":
+        try:
+            with open(file_path) as f:
+                data = json.load(f)
+        except json.JSONDecodeError as e:
+            result["errors"] = 1
+            result["error_msg"] = f"Invalid JSON: {e}"
+            return result
+        except IOError as e:
+            result["errors"] = 1
+            result["error_msg"] = f"Read error: {e}"
+            return result
+    else:
+        result["errors"] = 1
+        result["error_msg"] = f"Unsupported file type: {suffix}"
+        return result
+
+    meta = {
+        "type": record_type,
+        "year": year,
+        "party": party,
+        "source_filename": file_path.name,
+    }
+    if drive_file_id:
+        meta["drive_file_id"] = drive_file_id
+
+    try:
+        path, warnings = validate_and_add_record(meta=meta, data=data)
+        result["imported"] = 1
+        result["warnings"] = warnings
+    except ValidationError as e:
+        # Check if it's a duplicate error (skip) vs other error
+        if any("duplicate" in err.lower() for err in e.errors):
+            result["skipped"] = 1
+        else:
+            result["errors"] = 1
+            result["error_msg"] = "; ".join(e.errors)
+    except ValueError as e:
+        result["errors"] = 1
+        result["error_msg"] = str(e)
+
+    return result
