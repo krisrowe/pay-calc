@@ -63,7 +63,11 @@ from .config import get_data_path
 
 # Configure logging based on LOG_LEVEL environment variable
 _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
-logging.basicConfig(level=getattr(logging, _log_level, logging.INFO))
+logging.basicConfig(
+    level=getattr(logging, _log_level, logging.INFO),
+    format="%(asctime)s.%(msecs)03d %(levelname)s: %(message)s",
+    datefmt="%H:%M:%S"
+)
 logger = logging.getLogger(__name__)
 
 RecordType = Literal["stub", "w2", "discarded"]
@@ -362,11 +366,11 @@ def validate_record(
     errors = []
     warnings = []
 
-    if record_type == "discarded":
-        return errors, warnings  # No validation for discarded records
+    if record_type in ("discarded", "unrelated"):
+        return errors, warnings  # No validation for tracking records
 
     if data is None:
-        errors.append("data cannot be None for non-discarded records")
+        errors.append("data cannot be None for non-tracking records")
         return errors, warnings
 
     # Schema validation (errors)
@@ -579,8 +583,8 @@ def list_records(
                 if type_filter and record_type != type_filter:
                     continue
 
-                # Skip discarded unless requested
-                if record_type == "discarded" and not include_discarded:
+                # Skip tracking records (discarded/unrelated) unless requested
+                if record_type in ("discarded", "unrelated") and not include_discarded:
                     continue
 
                 # Add ID and path for convenience
@@ -631,8 +635,9 @@ def add_record(meta: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Path:
         ValueError: If required metadata is missing
     """
     record_type = meta.get("type")
-    if record_type not in ("stub", "w2", "discarded"):
-        raise ValueError(f"meta.type must be 'stub', 'w2', or 'discarded', got: {record_type}")
+    valid_types = ("stub", "w2", "discarded", "unrelated")
+    if record_type not in valid_types:
+        raise ValueError(f"meta.type must be one of {valid_types}, got: {record_type}")
 
     # Ensure imported_at is set
     if "imported_at" not in meta:
@@ -644,8 +649,8 @@ def add_record(meta: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Path:
     # Determine storage path
     records_dir = get_records_dir()
 
-    if record_type == "discarded":
-        target_dir = records_dir / "_discarded"
+    if record_type in ("discarded", "unrelated"):
+        target_dir = records_dir / "_tracking"
     else:
         # Need year and party for stubs/W-2s
         year = meta.get("year")
@@ -1344,10 +1349,10 @@ def import_file_auto(
         existing = find_by_drive_id(drive_file_id)
         if existing:
             existing_type = existing.get("meta", {}).get("type")
-            if existing_type == "discarded":
+            if existing_type in ("discarded", "unrelated"):
                 if not force:
                     result["status"] = "skipped"
-                    result["reason"] = "previously discarded"
+                    result["reason"] = "previously skipped"
                     return result
                 # With --force, continue to re-process
             else:
@@ -1367,7 +1372,7 @@ def import_file_auto(
         except (json.JSONDecodeError, IOError) as e:
             result["status"] = "discarded"
             result["reason"] = f"parse_failed: {e}"
-            _save_discarded(file_path.name, drive_file_id, result["reason"])
+            _save_tracking(file_path.name, drive_file_id, result["reason"])
             return result
 
     elif suffix == ".pdf":
@@ -1376,7 +1381,7 @@ def import_file_auto(
         if data is None:
             result["status"] = "discarded"
             result["reason"] = "unreadable"
-            _save_discarded(file_path.name, drive_file_id, result["reason"])
+            _save_tracking(file_path.name, drive_file_id, result["reason"])
             return result
 
     else:
@@ -1389,7 +1394,7 @@ def import_file_auto(
     if not record_type:
         result["status"] = "discarded"
         result["reason"] = "not_recognized"
-        _save_discarded(file_path.name, drive_file_id, result["reason"])
+        _save_tracking(file_path.name, drive_file_id, result["reason"])
         return result
 
     result["type"] = record_type
@@ -1399,7 +1404,7 @@ def import_file_auto(
     if not year:
         result["status"] = "discarded"
         result["reason"] = "no_year_detected"
-        _save_discarded(file_path.name, drive_file_id, result["reason"])
+        _save_tracking(file_path.name, drive_file_id, result["reason"])
         return result
 
     result["year"] = year
@@ -1412,7 +1417,7 @@ def import_file_auto(
     if not party:
         result["status"] = "discarded"
         result["reason"] = f"unknown_party (employer: {employer or 'not found'})"
-        _save_discarded(file_path.name, drive_file_id, result["reason"])
+        _save_tracking(file_path.name, drive_file_id, result["reason"])
         return result
 
     result["party"] = party
@@ -1448,7 +1453,7 @@ def import_file_auto(
         else:
             result["status"] = "discarded"
             result["reason"] = f"validation_failed: {'; '.join(e.errors)}"
-            _save_discarded(file_path.name, drive_file_id, result["reason"])
+            _save_tracking(file_path.name, drive_file_id, result["reason"])
         return result
 
 
@@ -1496,15 +1501,15 @@ def import_file_auto_all(
     if drive_file_id and not targeted:
         existing_records = find_all_by_drive_id(drive_file_id)
         if existing_records:
-            # Already imported - return skipped results
+            # Already processed - return skipped results
             results = []
             for rec in existing_records:
                 rec_type = rec.get("meta", {}).get("type")
-                if rec_type == "discarded":
+                if rec_type in ("discarded", "unrelated"):
                     if not force:
                         results.append({
                             "status": "skipped",
-                            "reason": "previously discarded",
+                            "reason": "previously skipped",
                             "type": None,
                             "year": None,
                             "party": None,
@@ -1524,7 +1529,7 @@ def import_file_auto_all(
                         "employer": rec.get("data", {}).get("employer"),
                         "path": None,
                     })
-            if results and not (force and any(r.get("reason") == "previously discarded" for r in results)):
+            if results and not (force and any(r.get("reason") == "previously skipped" for r in results)):
                 return results
 
     # Check page count
@@ -1928,25 +1933,35 @@ Return ONLY the JSON object, no explanation."""
         return None
 
 
-def _save_discarded(
+def _save_tracking(
     source_filename: str,
     drive_file_id: Optional[str],
     reason: str
 ) -> Path:
-    """Save a discard marker for a file.
+    """Save a tracking marker for a file that wasn't imported.
 
     Args:
         source_filename: Original filename
         drive_file_id: Drive file ID if from Drive
-        reason: Why file was discarded
+        reason: Why file wasn't imported
 
     Returns:
-        Path to saved discard marker
+        Path to saved tracking marker
+
+    Tracking types:
+        - "unrelated": File is not a pay stub or W-2 (normal, expected)
+        - "discarded": File IS a pay stub but has actionable issues (unknown_party, parse_failed)
     """
+    # Determine tracking type based on reason
+    if reason == "not_recognized":
+        tracking_type = "unrelated"
+    else:
+        tracking_type = "discarded"
+
     meta = {
-        "type": "discarded",
+        "type": tracking_type,
         "source_filename": source_filename,
-        "discard_reason": reason,
+        "skip_reason": reason,
     }
     if drive_file_id:
         meta["drive_file_id"] = drive_file_id
@@ -2017,6 +2032,46 @@ def import_from_folder_auto(
                 name = file_info.get("name", "")
                 file_id = file_info.get("id", "")
 
+                # Check if already processed BEFORE downloading (efficiency)
+                # For folder imports: skip ANY file we've seen before (imported, discarded, or unrelated)
+                # Only targeted imports (by file ID) should re-process
+                if not force:
+                    existing_records = find_all_by_drive_id(file_id)
+                    if existing_records:
+                        # Categorize existing records by type
+                        tracking_types = ("discarded", "unrelated")
+                        discarded = [r for r in existing_records
+                                     if r.get("meta", {}).get("type") == "discarded"]
+                        unrelated = [r for r in existing_records
+                                     if r.get("meta", {}).get("type") == "unrelated"]
+                        imported = [r for r in existing_records
+                                    if r.get("meta", {}).get("type") not in tracking_types]
+
+                        if imported:
+                            logger.debug(f"skipping {name} (already imported, {len(imported)} records)")
+                            stats["skipped"] += len(imported)
+                            emit("skipped", {"name": name, "reason": "already imported"})
+                        elif unrelated:
+                            # Non-pay file - just info, no warning
+                            logger.debug(f"skipping {name} (unrelated file)")
+                            stats["skipped"] += 1
+                            emit("skipped", {"name": name, "reason": "unrelated"})
+                        elif discarded:
+                            # Pay stub that couldn't be processed - check if actionable
+                            skip_reason = discarded[0].get("meta", {}).get("skip_reason", "")
+                            logger.debug(f"skipping {name} (previously discarded: {skip_reason})")
+                            stats["skipped"] += 1
+                            emit("skipped", {"name": name, "reason": "previously discarded"})
+
+                            # Emit warning for actionable discard reasons
+                            if skip_reason.startswith("unknown_party"):
+                                emit("warning", {
+                                    "name": name,
+                                    "file_id": file_id,
+                                    "message": f"Unknown employer - update profile.yaml with employer keywords, then run: records import file {file_id}"
+                                })
+                        continue
+
                 logger.debug(f"downloading {name}...")
 
                 local_path = tmp_path / name
@@ -2086,6 +2141,106 @@ def _accumulate_file_result(stats: dict, result: dict, name: str, emit: callable
     elif status == "discarded":
         stats["discarded"] += 1
         emit("discarded", {"name": name, "reason": result.get("reason")})
+
+
+# =============================================================================
+# TARGETED FILE IMPORT (for recovery workflows)
+# =============================================================================
+
+def import_from_drive_file(
+    file_id: str,
+    force: bool = False,
+    callback: Optional[callable] = None
+) -> Dict[str, Any]:
+    """Import a specific Drive file by ID, bypassing file-level dedup.
+
+    This is the recovery workflow for re-importing a specific file. Unlike folder
+    imports which skip files that have any existing records, this function:
+    - Always downloads and processes the file
+    - Uses stub-level duplicate detection to avoid creating duplicate records
+    - Imports only genuinely new stubs from the file
+
+    Use cases:
+    - File was updated on Drive with new stubs (e.g., quarterly PDF with new month)
+    - Previous import had issues that are now fixed
+    - Re-processing after config changes (e.g., new employer keywords)
+
+    Args:
+        file_id: Google Drive file ID to import
+        force: If True, also re-process previously discarded files
+        callback: Progress callback(event, data)
+
+    Returns:
+        Stats dict with: imported, skipped, discarded, errors, stubs, w2s
+    """
+    import subprocess
+    import tempfile
+
+    stats = {
+        "imported": 0,
+        "skipped": 0,
+        "discarded": 0,
+        "errors": 0,
+        "stubs": 0,
+        "w2s": 0,
+    }
+
+    def emit(event: str, data: dict = None):
+        if callback:
+            callback(event, data or {})
+
+    # Get file metadata from Drive
+    try:
+        # Use gwsa to get file info (we need the filename)
+        result = subprocess.run(
+            ["gwsa", "drive", "get", file_id],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            # Fallback: just use the file_id as name
+            filename = f"{file_id}.pdf"
+        else:
+            file_info = json.loads(result.stdout)
+            filename = file_info.get("name", f"{file_id}.pdf")
+    except (FileNotFoundError, json.JSONDecodeError):
+        filename = f"{file_id}.pdf"
+
+    emit("start", {"source": file_id, "file_count": 1})
+    emit("file", {"name": filename})
+
+    # Download to temp directory
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        local_path = tmp_path / filename
+
+        try:
+            subprocess.run(
+                ["gwsa", "drive", "download", file_id, str(local_path)],
+                capture_output=True, text=True, check=True
+            )
+        except subprocess.CalledProcessError as e:
+            emit("error", {"name": filename, "error": str(e)})
+            stats["errors"] += 1
+            emit("done", stats)
+            return stats
+        except FileNotFoundError:
+            raise RuntimeError("gwsa not installed - required for Drive imports")
+
+        # Import with targeted=True to bypass file-level dedup
+        # This ensures stub-level dedup is used for each stub in the file
+        results = import_file_auto_all(
+            local_path,
+            force=force,
+            drive_file_id=file_id,
+            targeted=True
+        )
+
+        for result in results:
+            page_suffix = f" (page {result['page']})" if result.get('page') else ""
+            _accumulate_file_result(stats, result, f"{filename}{page_suffix}", emit)
+
+    emit("done", stats)
+    return stats
 
 
 # =============================================================================
