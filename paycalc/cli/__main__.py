@@ -234,16 +234,16 @@ def taxes(year, output, data_dir):
 def analysis(year, party, through_date, output_format):
     """Analyze imported pay stubs and validate YTD totals.
 
-    Reads pay stubs from local storage (imported via 'stubs import'),
+    Reads pay stubs from records storage (imported via 'records import'),
     validates continuity (gaps, employer changes), and reports
     YTD totals including 401k contributions.
 
     \b
-    Prerequisite: Import stubs first:
-        pay-calc stubs import <year> <party> <source>
+    Prerequisite: Import records first:
+        pay-calc records import
 
     \b
-    Output: ~/.local/share/pay-calc/YYYY_party_pay_all.json
+    Output: ~/.local/share/pay-calc/YYYY_party_full.json
 
     YEAR should be a 4-digit year (e.g., 2025).
     PARTY is 'him' or 'her'.
@@ -261,30 +261,36 @@ def analysis(year, party, through_date, output_format):
         except ValueError:
             raise click.BadParameter(f"Invalid date format '{through_date}'. Use YYYY-MM-DD.")
 
-    # Load stubs from local storage
-    stubs_dir = get_data_path() / "stubs" / year / party
-    if not stubs_dir.exists():
+    # Load stubs from records storage
+    records_dir = get_data_path() / "records" / year / party
+    if not records_dir.exists():
         raise click.ClickException(
-            f"No stubs found for {year}/{party}.\n"
-            f"Run 'pay-calc stubs import {year} {party} <source>' first."
+            f"No records found for {year}/{party}.\n"
+            f"Run 'pay-calc records import' first."
         )
 
-    stub_files = sorted(stubs_dir.glob("*.json"))
+    stub_files = sorted(records_dir.glob("*.json"))
     if not stub_files:
         raise click.ClickException(
-            f"No stub files in {stubs_dir}.\n"
-            f"Run 'pay-calc stubs import {year} {party} <source>' first."
+            f"No record files in {records_dir}.\n"
+            f"Run 'pay-calc records import' first."
         )
 
-    # Load all stubs
+    # Load all stubs (unwrap from records format)
     all_stubs = []
     for stub_file in stub_files:
         with open(stub_file) as f:
-            stub = json.load(f)
+            record = json.load(f)
+            # Records have meta/data wrapper; extract the data portion
+            if "data" in record and "meta" in record:
+                stub = record["data"]
+                stub["_meta"] = record["meta"]
+            else:
+                stub = record  # Legacy format without wrapper
             stub["_source_file"] = stub_file.name
             all_stubs.append(stub)
 
-    click.echo(f"Loaded {len(all_stubs)} stubs from {stubs_dir}")
+    click.echo(f"Loaded {len(all_stubs)} records from {records_dir}")
 
     # Sort by pay_date
     all_stubs.sort(key=lambda s: (s.get("pay_date", ""), s.get("pay_summary", {}).get("ytd", {}).get("gross", 0)))
