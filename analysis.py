@@ -30,6 +30,85 @@ from processors import get_processor
 from paycalc.sdk import detect_gaps, check_first_stub_ytd
 
 
+def sum_deductions(deductions: Any, current: bool = True) -> float:
+    """Sum all deduction amounts, handling both list and dict formats.
+
+    Args:
+        deductions: Either a list of deduction dicts or a dict of named deductions
+        current: If True, sum current period amounts; if False, sum YTD amounts
+
+    Returns:
+        Total deduction amount
+    """
+    total = 0.0
+
+    if isinstance(deductions, dict):
+        # Dict format: {"retirement_401k": {"current": 100, "ytd": 500}, ...}
+        for ded_vals in deductions.values():
+            if isinstance(ded_vals, dict):
+                amount_key = 'current' if current else 'ytd'
+                amount = ded_vals.get(amount_key) or ded_vals.get(f'{amount_key}_amount') or 0
+                total += abs(amount)
+            elif isinstance(ded_vals, (int, float)):
+                total += abs(ded_vals)
+    elif isinstance(deductions, list):
+        # List format: [{"type": "401k", "current_amount": 100}, ...]
+        for ded in deductions:
+            if isinstance(ded, dict):
+                amount_key = 'current_amount' if current else 'ytd_amount'
+                amount = ded.get(amount_key) or ded.get('amount') or 0
+                total += abs(amount)
+
+    return total
+
+
+def extract_401k_from_deductions(deductions: Any, current: bool = False) -> Dict[str, float]:
+    """Extract 401k amounts from deductions, handling both list and dict formats.
+
+    Args:
+        deductions: Either a list of deduction dicts or a dict of named deductions
+        current: If True, extract current period amounts; if False, extract YTD amounts
+
+    Returns:
+        Dict with keys 'employee_pretax', 'employee_aftertax', 'employer_match'
+    """
+    result = {'employee_pretax': 0.0, 'employee_aftertax': 0.0, 'employer_match': 0.0}
+
+    if isinstance(deductions, dict):
+        # Dict format from OCR: {"retirement_401k": {"current": 100, "ytd": 500}, ...}
+        for ded_name, ded_vals in deductions.items():
+            if not isinstance(ded_vals, dict):
+                continue
+            ded_name_lower = ded_name.lower()
+            if '401k' in ded_name_lower or 'retirement' in ded_name_lower:
+                amount_key = 'current' if current else 'ytd'
+                amount = ded_vals.get(amount_key) or ded_vals.get(f'{amount_key}_amount') or 0
+                # Assume dict-format 401k is pretax unless named otherwise
+                if 'after' in ded_name_lower or 'roth' in ded_name_lower:
+                    result['employee_aftertax'] += amount
+                else:
+                    result['employee_pretax'] += amount
+                # Check for employer match
+                match_key = 'employer_match' if current else 'employer_match_ytd'
+                result['employer_match'] += ded_vals.get(match_key, 0)
+    elif isinstance(deductions, list):
+        # List format: [{"type": "k pretax", "current_amount": 100, "ytd_amount": 500}, ...]
+        for ded in deductions:
+            if not isinstance(ded, dict):
+                continue
+            ded_type = ded.get("type", "").lower()
+            if "k pretax" in ded_type or "401k" in ded_type:
+                amount_key = 'current_amount' if current else 'ytd_amount'
+                result['employee_pretax'] += ded.get(amount_key, 0)
+                match_key = 'employer_match' if current else 'employer_match_ytd'
+                result['employer_match'] += ded.get(match_key, 0)
+            elif "k at" in ded_type or "after" in ded_type:
+                amount_key = 'current_amount' if current else 'ytd_amount'
+                result['employee_aftertax'] += ded.get(amount_key, 0)
+
+    return result
+
+
 def validate_stub_numbers(stub: Dict[str, Any]) -> List[str]:
     """Validate that pay stub numbers are consistent and add up correctly.
 
@@ -64,10 +143,8 @@ def validate_stub_numbers(stub: Dict[str, Any]) -> List[str]:
         if "medicare" in taxes:
             medicare_tax = taxes["medicare"].get("current", 0) or 0
 
-    # Sum deductions
-    for deduction in stub.get("deductions", []):
-        amount = deduction.get("current_amount", 0) or 0
-        total_deductions += abs(amount)
+    # Sum deductions (handles both list and dict formats)
+    total_deductions = sum_deductions(stub.get("deductions", []), current=True)
 
     # Validate required fields have values
     if not gross or gross <= 0:
@@ -513,10 +590,9 @@ def validate_segment_totals(segment: List[Dict[str, Any]], segment_name: str) ->
         sum_ss_withheld += taxes.get("social_security", {}).get("current_withheld", 0)
         sum_medicare_withheld += taxes.get("medicare", {}).get("current_withheld", 0)
 
-        for ded in stub.get("deductions", []):
-            ded_type = ded.get("type", "").lower()
-            if "k pretax" in ded_type or "401k" in ded_type or "k at" in ded_type:
-                sum_401k_employee += ded.get("current_amount", 0)
+        # Extract 401k from deductions (handles both list and dict formats)
+        k401 = extract_401k_from_deductions(stub.get("deductions", []), current=True)
+        sum_401k_employee += k401['employee_pretax'] + k401['employee_aftertax']
 
     # Get final YTD values from last stub in segment
     last_stub = segment[-1]
@@ -532,13 +608,10 @@ def validate_segment_totals(segment: List[Dict[str, Any]], segment_name: str) ->
     ytd_ss_withheld = final_taxes.get("social_security", {}).get("ytd_withheld", 0)
     ytd_medicare_withheld = final_taxes.get("medicare", {}).get("ytd_withheld", 0)
 
-    ytd_401k_employee = 0.0
-    ytd_401k_employer = 0.0
-    for ded in last_stub.get("deductions", []):
-        ded_type = ded.get("type", "").lower()
-        if "k pretax" in ded_type or "401k" in ded_type or "k at" in ded_type:
-            ytd_401k_employee += ded.get("ytd_amount", 0)
-            ytd_401k_employer += ded.get("employer_match_ytd", 0)
+    # Extract YTD 401k from last stub (handles both list and dict formats)
+    ytd_k401 = extract_401k_from_deductions(last_stub.get("deductions", []), current=False)
+    ytd_401k_employee = ytd_k401['employee_pretax'] + ytd_k401['employee_aftertax']
+    ytd_401k_employer = ytd_k401['employer_match']
 
     # Build comparison dict with metadata
     totals = {
@@ -763,17 +836,11 @@ def generate_401k_contributions(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
             continue
         last_stub = segment[-1]
 
-        for d in last_stub.get("deductions", []):
-            dtype = d.get("type", "")
-            ytd = d.get("ytd_amount", 0)
-
-            if dtype == "K Pretax":
-                yearly_totals["pretax"] += ytd
-                # Employer match YTD (if available)
-                employer_ytd = d.get("employer_match_ytd", 0)
-                yearly_totals["employer"] += employer_ytd
-            elif dtype == "K AT":
-                yearly_totals["aftertax"] += ytd
+        # Extract 401k from deductions (handles both list and dict formats)
+        k401 = extract_401k_from_deductions(last_stub.get("deductions", []), current=False)
+        yearly_totals["pretax"] += k401['employee_pretax']
+        yearly_totals["aftertax"] += k401['employee_aftertax']
+        yearly_totals["employer"] += k401['employer_match']
 
     yearly_totals["total"] = (
         yearly_totals["pretax"] +
@@ -792,19 +859,18 @@ def generate_401k_contributions(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
         month = int(pay_date[5:7])
 
-        for d in stub.get("deductions", []):
-            dtype = d.get("type", "")
-            current = d.get("current_amount", 0)
+        # Extract current 401k amounts (handles both list and dict formats)
+        k401 = extract_401k_from_deductions(stub.get("deductions", []), current=True)
+        monthly[month]["pretax"] += k401['employee_pretax']
+        monthly[month]["aftertax"] += k401['employee_aftertax']
 
-            if dtype == "K Pretax":
-                monthly[month]["pretax"] += current
-                employer_ytd = d.get("employer_match_ytd", 0)
-                if employer_ytd > prev_employer_ytd:
-                    delta = employer_ytd - prev_employer_ytd
-                    monthly[month]["employer"] += delta
-                    prev_employer_ytd = employer_ytd
-            elif dtype == "K AT":
-                monthly[month]["aftertax"] += current
+        # Track employer match delta from YTD changes (list format only has this detail)
+        k401_ytd = extract_401k_from_deductions(stub.get("deductions", []), current=False)
+        employer_ytd = k401_ytd['employer_match']
+        if employer_ytd > prev_employer_ytd:
+            delta = employer_ytd - prev_employer_ytd
+            monthly[month]["employer"] += delta
+            prev_employer_ytd = employer_ytd
 
     months_data = {}
     for month in range(1, 13):
@@ -913,14 +979,11 @@ def generate_ytd_breakdown(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
                 else:
                     earnings_breakdown[key] = {"display": normalize_earnings_type(etype), "amount": ytd}
 
-        # Add all 401k contributions
-        for ded in last_stub.get("deductions", []):
-            dtype = ded.get("type", "").lower()
-            if dtype == "k pretax":
-                employee_pretax_401k += ded.get("ytd_amount", 0)
-                employer_401k_total += ded.get("employer_match_ytd", 0)
-            elif dtype == "k at":
-                employee_aftertax_401k += ded.get("ytd_amount", 0)
+        # Add all 401k contributions (handles both list and dict formats)
+        k401 = extract_401k_from_deductions(last_stub.get("deductions", []), current=False)
+        employee_pretax_401k += k401['employee_pretax']
+        employee_aftertax_401k += k401['employee_aftertax']
+        employer_401k_total += k401['employer_match']
 
         # Add taxes from this segment's final YTD
         taxes = last_stub.get("taxes", {})
