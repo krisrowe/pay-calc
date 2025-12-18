@@ -34,11 +34,17 @@ def run_gwsa_command(args: List[str]) -> dict:
     return json.loads(result.stdout)
 
 
-def get_w2_pay_records_folder_id(year: str) -> Optional[str]:
-    """Get the Drive folder ID for W-2/pay records for a given year."""
+def get_pay_records_folders() -> List[Dict[str, str]]:
+    """Get all configured pay records folders.
+
+    Returns:
+        List of dicts with 'id' and optional 'comment' keys.
+    """
     config = load_config()
-    w2_records = config.get("drive", {}).get("w2_pay_records", {})
-    return w2_records.get(year) or w2_records.get(str(year))
+    pay_records = config.get("drive", {}).get("pay_records", [])
+    if isinstance(pay_records, list):
+        return pay_records
+    return []
 
 
 def list_drive_folder(folder_id: str) -> List[Dict[str, str]]:
@@ -52,52 +58,68 @@ def download_drive_file(file_id: str, save_path: str) -> dict:
     return run_gwsa_command(["drive", "download", file_id, save_path])
 
 
-def sync_w2_pay_records(year: str, use_cache: bool = False, verbose: bool = True) -> Path:
+def sync_pay_records(folder_id: Optional[str] = None, use_cache: bool = False, verbose: bool = True) -> Path:
     """
-    Sync W-2/pay records from Drive for a given year.
+    Sync pay records from Drive.
 
     Args:
-        year: The year to sync (e.g., "2024")
+        folder_id: Specific folder ID to sync. If None, syncs ALL configured folders.
         use_cache: If True, use XDG cache directory; if False, use temp directory
         verbose: Print progress messages
 
     Returns:
         Path to the local directory containing the synced files
     """
-    folder_id = get_w2_pay_records_folder_id(year)
-    if not folder_id:
-        raise ValueError(f"No w2_pay_records folder configured for year {year}")
-
-    # Determine working directory (XDG cache or temp)
-    if use_cache:
-        work_dir = get_year_cache_path(year, "w2_pay_records")
+    # Determine which folders to sync
+    if folder_id:
+        folders = [{"id": folder_id, "comment": "explicit"}]
     else:
-        work_dir = Path(tempfile.mkdtemp(prefix=f"w2_pay_records_{year}_"))
+        folders = get_pay_records_folders()
+        if not folders:
+            raise ValueError("No pay_records folders configured in profile")
+
+    # Determine working directory
+    if use_cache:
+        work_dir = get_cache_path() / "pay_records"
+        work_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        work_dir = Path(tempfile.mkdtemp(prefix="pay_records_"))
 
     if verbose:
-        print(f"Syncing W-2/pay records for {year} from Drive...")
-        print(f"  Folder ID: {folder_id}")
+        print(f"Syncing pay records from {len(folders)} folder(s)...")
         print(f"  Local dir: {work_dir}")
 
-    # List files in Drive folder
-    files = list_drive_folder(folder_id)
-    if verbose:
-        print(f"  Found {len(files)} file(s)")
-
-    # Download each file
-    for f in files:
-        file_name = f["name"]
-        file_id = f["id"]
-        local_path = work_dir / file_name
-
-        # Skip if already cached
-        if use_cache and local_path.exists():
-            if verbose:
-                print(f"    Using cached: {file_name}")
-            continue
+    total_files = 0
+    for folder in folders:
+        fid = folder.get("id")
+        comment = folder.get("comment", "")
 
         if verbose:
-            print(f"    Downloading: {file_name}")
-        download_drive_file(file_id, str(local_path))
+            print(f"\n  Folder: {comment or fid}")
+
+        # List files in Drive folder
+        files = list_drive_folder(fid)
+        if verbose:
+            print(f"    Found {len(files)} file(s)")
+
+        # Download each file
+        for f in files:
+            file_name = f["name"]
+            file_id = f["id"]
+            local_path = work_dir / file_name
+
+            # Skip if already cached
+            if use_cache and local_path.exists():
+                if verbose:
+                    print(f"      Cached: {file_name}")
+                continue
+
+            if verbose:
+                print(f"      Downloading: {file_name}")
+            download_drive_file(file_id, str(local_path))
+            total_files += 1
+
+    if verbose:
+        print(f"\n  Downloaded {total_files} new file(s)")
 
     return work_dir

@@ -1,15 +1,14 @@
 # Google Drive Folder Configuration
-# The process_year.py script looks for pay stubs in this folder structure:
-#   pay_stubs_folder/
-#     2024/           <- Year subfolder
-#       *.pdf         <- Multi-period pay stub PDFs
-#     2025/
-#       *.pdf
+# pay_records: Array of folders containing pay stubs and W-2s.
+#   Each folder will be scanned; file type is auto-detected from content.
+# pay_stubs_folder_id: Legacy - year subfolders approach (deprecated).
 drive:
   pay_stubs_folder_id: "YOUR_DRIVE_FOLDER_ID"
-  w2_pay_records:
-    "2024": "YOUR_2024_FOLDER_ID"
-    "2025": "YOUR_2025_FOLDER_ID"
+  pay_records:
+    - id: "YOUR_FOLDER_ID_1"
+      comment: "2024 Pay Records (optional description)"
+    - id: "YOUR_FOLDER_ID_2"
+      comment: "2025 Pay Records"
 
 # Party and Company Configuration
 # Defines parties, their companies, and how to process their documents.

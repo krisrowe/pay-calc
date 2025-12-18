@@ -42,6 +42,14 @@ from .tax import (
     load_party_w2_data,
 )
 
+from .gaps import (
+    Gap,
+    GapAnalysis,
+    detect_gaps,
+    check_first_stub_ytd,
+    MAX_INTERVAL_DAYS,
+)
+
 __all__ = [
     # New config architecture
     "get_config_dir",
@@ -80,4 +88,10 @@ __all__ = [
     "write_projection_csv",
     "load_tax_rules",
     "load_party_w2_data",
+    # Gap detection
+    "Gap",
+    "GapAnalysis",
+    "detect_gaps",
+    "check_first_stub_ytd",
+    "MAX_INTERVAL_DAYS",
 ]

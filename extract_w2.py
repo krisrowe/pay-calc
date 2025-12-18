@@ -25,7 +25,7 @@ import PyPDF2
 import yaml
 from collections import defaultdict
 
-from drive_sync import sync_w2_pay_records, load_config
+from drive_sync import sync_pay_records, load_config
 
 
 def extract_text_from_pdf(pdf_path):
@@ -99,9 +99,9 @@ def main():
         print(f"Error: {e}")
         sys.exit(1)
 
-    # Sync files from Drive
+    # Sync files from Drive (all configured folders)
     try:
-        source_dir = sync_w2_pay_records(year, use_cache=use_cache)
+        source_dir = sync_pay_records(use_cache=use_cache)
     except ValueError as e:
         print(f"Error: {e}")
         sys.exit(1)

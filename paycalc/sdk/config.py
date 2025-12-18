@@ -242,7 +242,7 @@ def get_profile_value(key: str, default: Any = None) -> Any:
     """Get a profile value by dot-notation key.
 
     Args:
-        key: Dot-notation key (e.g., "drive.w2_pay_records.2024")
+        key: Dot-notation key (e.g., "drive.pay_records.2024")
         default: Default value if key not found
 
     Returns:
@@ -266,7 +266,7 @@ def set_profile_value(key: str, value: Any) -> Path:
     """Set a profile value by dot-notation key.
 
     Args:
-        key: Dot-notation key (e.g., "drive.w2_pay_records.2024")
+        key: Dot-notation key (e.g., "drive.pay_records.2024")
         value: Value to set
 
     Returns:
@@ -592,11 +592,12 @@ def _validate_drive_folder_ids(profile: dict) -> tuple[list, list]:
     if "output_folder_id" in drive:
         check_folder_id("drive.output_folder_id", drive["output_folder_id"])
 
-    # Check w2_pay_records.<year>
-    w2_records = drive.get("w2_pay_records", {})
-    if isinstance(w2_records, dict):
-        for year, folder_id in w2_records.items():
-            check_folder_id(f"drive.w2_pay_records.{year}", folder_id)
+    # Check pay_records[] folder IDs
+    pay_records = drive.get("pay_records", [])
+    if isinstance(pay_records, list):
+        for i, record in enumerate(pay_records):
+            if isinstance(record, dict) and "id" in record:
+                check_folder_id(f"drive.pay_records[{i}].id", record["id"])
 
     return errors, warnings
 
@@ -624,11 +625,11 @@ def _validate_pay_stubs(profile: dict) -> dict:
     """Validate configuration for pay stub processing."""
     missing = []
 
-    # Check drive.pay_stubs_folder_id
+    # Check drive.pay_records has at least one folder
     drive = profile.get("drive", {})
-    folder_id = drive.get("pay_stubs_folder_id")
-    if not folder_id:
-        missing.append("drive.pay_stubs_folder_id (Google Drive folder for pay stubs)")
+    pay_records = drive.get("pay_records", [])
+    if not pay_records:
+        missing.append("drive.pay_records[] (list of Drive folder IDs)")
 
     # Check employers are configured
     employers = _get_all_employers(profile)
@@ -639,7 +640,7 @@ def _validate_pay_stubs(profile: dict) -> dict:
         return {
             "ready": False,
             "missing": missing,
-            "message": "Pay stub processing requires Drive folder and employer config",
+            "message": "Pay stub processing requires Drive folders and employer config",
         }
 
     return {
@@ -653,11 +654,11 @@ def _validate_w2_extract(profile: dict) -> dict:
     """Validate configuration for W-2 extraction."""
     missing = []
 
-    # Check drive.w2_pay_records has at least one year
+    # Check drive.pay_records has at least one folder
     drive = profile.get("drive", {})
-    w2_records = drive.get("w2_pay_records", {})
-    if not w2_records:
-        missing.append("drive.w2_pay_records.<year> (Drive folder IDs by year)")
+    pay_records = drive.get("pay_records", [])
+    if not pay_records:
+        missing.append("drive.pay_records[] (list of Drive folder IDs)")
 
     # Check parties are configured
     parties = profile.get("parties", {})
@@ -671,11 +672,11 @@ def _validate_w2_extract(profile: dict) -> dict:
             "message": "W-2 extraction requires Drive folders and party config",
         }
 
-    years = list(w2_records.keys())
+    folder_count = len(pay_records)
     return {
         "ready": True,
         "missing": [],
-        "message": f"Ready (years: {', '.join(years)})",
+        "message": f"Ready ({folder_count} folder(s) configured)",
     }
 
 
@@ -746,8 +747,7 @@ def _validate_employers(profile: dict) -> dict:
 # Valid top-level keys and their allowed nested patterns
 PROFILE_SCHEMA = {
     "drive": {
-        "pay_stubs_folder_id": str,
-        "w2_pay_records": dict,  # keys are years like "2024"
+        "pay_records": list,  # array of {id, comment} objects
         "output_folder_id": str,
     },
     "parties": {

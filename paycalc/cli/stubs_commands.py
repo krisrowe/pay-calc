@@ -10,7 +10,7 @@ from typing import Optional, List, Dict, Any, Tuple
 
 import click
 
-from paycalc.sdk import get_data_path
+from paycalc.sdk import get_data_path, detect_gaps
 
 
 def get_stubs_dir(year: str, party: str) -> Path:
@@ -469,13 +469,6 @@ def get_stubs_dirs_for_filters(
     return results
 
 
-def estimate_missing_date(prev_date: datetime, next_date: datetime) -> str:
-    """Estimate a display date for a missing stub between two dates."""
-    # If gap is roughly 2 pay periods, show midpoint month
-    midpoint = prev_date + (next_date - prev_date) / 2
-    return f"{midpoint.year}-{midpoint.month:02d}-??"
-
-
 def get_stub_gross(stub: Dict[str, Any]) -> float:
     """Extract gross pay from stub."""
     if "pay_summary" in stub and "current" in stub["pay_summary"]:
@@ -554,8 +547,8 @@ def stubs_list(filters: Tuple[str, ...]):
     total_missing = 0
     show_year = year is None
 
-    for (grp_year, grp_party), stubs in sorted(by_year_party.items()):
-        if not stubs:
+    for (grp_year, grp_party), stubs_list in sorted(by_year_party.items()):
+        if not stubs_list:
             continue
 
         # Header for this party group
@@ -564,50 +557,45 @@ def stubs_list(filters: Tuple[str, ...]):
         click.echo("-" * 75)
         click.echo(f"{'ID':<8} {'DATE':<12} {'STATUS':<10} {'EMPLOYER':<23} {'GROSS':>12}")
 
-        # Build list with gap detection
-        prev_date: Optional[datetime] = None
+        # Use shared gap detection
+        gap_analysis = detect_gaps(stubs_list, grp_year)
         group_stubs = 0
-        group_missing = 0
 
-        # Check for gap at beginning of year
-        if stubs:
-            first_stub = stubs[0]
-            first_date_str = first_stub.get("pay_date", "")
-            try:
-                first_date = datetime.strptime(first_date_str, "%Y-%m-%d")
-                year_start = datetime(first_date.year, 1, 1)
-                days_from_start = (first_date - year_start).days
-                if days_from_start > 20:  # First stub is late
-                    missing_date = f"{first_date.year}-01-??"
-                    click.echo(
-                        f"{'--':<8} {missing_date:<12} "
-                        f"{click.style('MISSING', fg='red'):<19} "
-                        f"{'(gap at start: ' + str(days_from_start) + ' days)':<23} {'':>12}"
-                    )
-                    group_missing += 1
-            except ValueError:
-                pass
+        # Build map of gap before_date -> gap for middle gaps
+        # and track start/end gaps separately
+        start_gap = None
+        end_gap = None
+        middle_gaps = {}  # before_date -> Gap
 
-        for stub in stubs:
-            # Parse current date
+        for gap in gap_analysis.gaps:
+            if gap.gap_type == "start":
+                start_gap = gap
+            elif gap.gap_type == "end":
+                end_gap = gap
+            else:  # middle
+                if gap.before_date:
+                    middle_gaps[gap.before_date] = gap
+
+        # Show start gap if any
+        if start_gap:
+            click.echo(
+                f"{'--':<8} {start_gap.estimated_date:<12} "
+                f"{click.style('MISSING', fg='red'):<19} "
+                f"{'(gap at start: ' + str(start_gap.days) + ' days)':<23} {'':>12}"
+            )
+
+        # Display stubs, inserting middle gaps before the stub they precede
+        for stub in stubs_list:
             pay_date_str = stub.get("pay_date", "unknown")
-            curr_date: Optional[datetime] = None
-            try:
-                curr_date = datetime.strptime(pay_date_str, "%Y-%m-%d")
-            except ValueError:
-                pass
 
-            # Check for gap before this stub
-            if prev_date and curr_date:
-                delta = (curr_date - prev_date).days
-                if delta > 20:  # Gap detected
-                    missing_date = estimate_missing_date(prev_date, curr_date)
-                    click.echo(
-                        f"{'--':<8} {missing_date:<12} "
-                        f"{click.style('MISSING', fg='red'):<19} "
-                        f"{'(gap: ' + str(delta) + ' days)':<23} {'':>12}"
-                    )
-                    group_missing += 1
+            # Check if there's a gap before this stub
+            if pay_date_str in middle_gaps:
+                gap = middle_gaps[pay_date_str]
+                click.echo(
+                    f"{'--':<8} {gap.estimated_date:<12} "
+                    f"{click.style('MISSING', fg='red'):<19} "
+                    f"{'(gap: ' + str(gap.days) + ' days)':<23} {'':>12}"
+                )
 
             # Get stub ID
             stub_path = stub.get("_path")
@@ -632,32 +620,22 @@ def stubs_list(filters: Tuple[str, ...]):
                 )
                 group_stubs += 1
 
-            prev_date = curr_date
-
-        # Check for gap at end (if last stub is old relative to today or year end)
-        if stubs and prev_date:
-            today = datetime.now()
-            year_end = datetime(prev_date.year, 12, 31)
-            # Use earlier of today or year end as reference
-            reference_date = min(today, year_end)
-            days_to_end = (reference_date - prev_date).days
-            if days_to_end > 20:  # Gap at end
-                missing_date = f"{prev_date.year}-{reference_date.month:02d}-??"
-                click.echo(
-                    f"{'--':<8} {missing_date:<12} "
-                    f"{click.style('MISSING', fg='red'):<19} "
-                    f"{'(gap at end: ' + str(days_to_end) + ' days)':<23} {'':>12}"
-                )
-                group_missing += 1
+        # Show end gap if any
+        if end_gap:
+            click.echo(
+                f"{'--':<8} {end_gap.estimated_date:<12} "
+                f"{click.style('MISSING', fg='red'):<19} "
+                f"{'(gap at end: ' + str(end_gap.days) + ' days)':<23} {'':>12}"
+            )
 
         click.echo("-" * 75)
         summary = f"{group_stubs} stubs"
-        if group_missing:
-            summary += click.style(f", {group_missing} missing", fg='red')
+        if gap_analysis.gap_count:
+            summary += click.style(f", {gap_analysis.gap_count} missing", fg='red')
         click.echo(summary)
 
         total_stubs += group_stubs
-        total_missing += group_missing
+        total_missing += gap_analysis.gap_count
 
     # Grand total if multiple groups
     if len(by_year_party) > 1:

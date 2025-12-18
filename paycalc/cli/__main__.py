@@ -41,19 +41,21 @@ cli.add_command(stubs_group)
 
 
 @cli.command("w2-extract")
-@click.argument("year")
+@click.argument("year", required=False)
 @click.option("--cache", is_flag=True, help="Cache downloaded files locally for reuse.")
 @click.option("--output-dir", "-o", type=click.Path(), help="Output directory for W-2 JSON files (default: XDG data dir)")
 def w2_extract(year, cache, output_dir):
     """Extract W-2 data from PDFs stored in Google Drive.
 
-    Downloads W-2 PDFs and manual JSON files from the configured
-    Google Drive folder for YEAR, parses them, and outputs
-    aggregated W-2 data to XDG data directory or --output-dir.
+    Downloads W-2 PDFs and manual JSON files from ALL configured
+    pay_records folders, parses them, and outputs aggregated W-2
+    data to XDG data directory or --output-dir.
+
+    If YEAR is provided, only processes files matching that year.
     """
     from paycalc.sdk import validate_profile, ProfileNotFoundError
 
-    if not year.isdigit() or len(year) != 4:
+    if year and (not year.isdigit() or len(year) != 4):
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
     # Validate profile has required configuration
@@ -63,7 +65,7 @@ def w2_extract(year, cache, output_dir):
     except (ProfileNotFoundError, ConfigNotFoundError) as e:
         raise click.ClickException(str(e))
 
-    from drive_sync import sync_w2_pay_records, load_config
+    from drive_sync import sync_pay_records, load_config
     from extract_w2 import (
         find_company_and_party_from_keywords,
         extract_text_from_pdf,
@@ -81,9 +83,9 @@ def w2_extract(year, cache, output_dir):
     except ConfigNotFoundError as e:
         raise click.ClickException(str(e))
 
-    # Sync files from Drive
+    # Sync files from Drive (all configured folders)
     try:
-        source_dir = sync_w2_pay_records(year, use_cache=cache)
+        source_dir = sync_pay_records(use_cache=cache)
     except ValueError as e:
         raise click.ClickException(str(e))
 
@@ -225,54 +227,143 @@ def taxes(year, output, data_dir):
 @cli.command("analysis")
 @click.argument("year")
 @click.argument("party", type=click.Choice(["him", "her"]))
-@click.option("--cache", is_flag=True, help="Cache downloaded pay stub PDFs locally.")
-@click.option("--through-date", type=str, help="Only process pay stubs through this date (YYYY-MM-DD). Useful for comparing against historical baselines.")
-def analysis(year, party, cache, through_date):
-    """Analyze pay stubs and validate YTD totals.
+@click.option("--through-date", type=str, help="Only process pay stubs through this date (YYYY-MM-DD).")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", help="Output format.")
+def analysis(year, party, through_date, output_format):
+    """Analyze imported pay stubs and validate YTD totals.
 
-    Downloads pay stub PDFs from Google Drive for the specified party,
+    Reads pay stubs from local storage (imported via 'stubs import'),
     validates continuity (gaps, employer changes), and reports
     YTD totals including 401k contributions.
 
     \b
-    Output: YYYY_party_full.json (e.g., 2025_him_full.json)
+    Prerequisite: Import stubs first:
+        pay-calc stubs import <year> <party> <source>
+
+    \b
+    Output: ~/.local/share/pay-calc/YYYY_party_pay_all.json
 
     YEAR should be a 4-digit year (e.g., 2025).
     PARTY is 'him' or 'her'.
     """
-    from paycalc.sdk import validate_profile, ProfileNotFoundError
+    from paycalc.sdk import get_data_path, detect_gaps, check_first_stub_ytd
+    from datetime import datetime
+    import json
 
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
-    # Validate profile has required configuration
-    try:
-        validation = validate_profile()
-        validation.require_feature("pay_stubs")
-    except (ProfileNotFoundError, ConfigNotFoundError) as e:
-        raise click.ClickException(str(e))
-
     if through_date:
-        # Validate date format
-        from datetime import datetime
         try:
             datetime.strptime(through_date, "%Y-%m-%d")
         except ValueError:
             raise click.BadParameter(f"Invalid date format '{through_date}'. Use YYYY-MM-DD.")
 
-    import subprocess
+    # Load stubs from local storage
+    stubs_dir = get_data_path() / "stubs" / year / party
+    if not stubs_dir.exists():
+        raise click.ClickException(
+            f"No stubs found for {year}/{party}.\n"
+            f"Run 'pay-calc stubs import {year} {party} <source>' first."
+        )
 
-    # Call analysis.py with appropriate arguments
-    cmd = ["python3", "analysis.py", year, party]
-    if cache:
-        cmd.append("--cache-paystubs")
+    stub_files = sorted(stubs_dir.glob("*.json"))
+    if not stub_files:
+        raise click.ClickException(
+            f"No stub files in {stubs_dir}.\n"
+            f"Run 'pay-calc stubs import {year} {party} <source>' first."
+        )
+
+    # Load all stubs
+    all_stubs = []
+    for stub_file in stub_files:
+        with open(stub_file) as f:
+            stub = json.load(f)
+            stub["_source_file"] = stub_file.name
+            all_stubs.append(stub)
+
+    click.echo(f"Loaded {len(all_stubs)} stubs from {stubs_dir}")
+
+    # Sort by pay_date
+    all_stubs.sort(key=lambda s: (s.get("pay_date", ""), s.get("pay_summary", {}).get("ytd", {}).get("gross", 0)))
+
+    # Filter by through_date if specified
     if through_date:
-        cmd.extend(["--through-date", through_date])
+        original_count = len(all_stubs)
+        all_stubs = [s for s in all_stubs if s.get("pay_date", "") <= through_date]
+        filtered = original_count - len(all_stubs)
+        if filtered > 0:
+            click.echo(f"Filtered out {filtered} stubs after {through_date}")
 
-    try:
-        result = subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Analysis failed with exit code {e.returncode}")
+    # Import analysis functions
+    import sys
+    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
+    from analysis import (
+        validate_year_totals,
+        validate_stub_deltas,
+        generate_summary,
+        generate_401k_contributions,
+        generate_imputed_income_summary,
+        generate_ytd_breakdown,
+        print_text_report,
+        identify_pay_type,
+    )
+
+    # Add pay type to stubs that don't have it
+    for stub in all_stubs:
+        if "_pay_type" not in stub:
+            stub["_pay_type"] = identify_pay_type(stub)
+
+    # Validate gaps using SDK
+    gap_analysis = detect_gaps(all_stubs, year, filter_regular_only=True)
+    gap_errors, gap_warnings = gap_analysis.to_errors_warnings()
+
+    # Check first stub YTD
+    ytd_error = check_first_stub_ytd(all_stubs)
+    if ytd_error:
+        gap_errors.insert(0, ytd_error)
+
+    # Validate totals
+    totals_errors, totals_warnings, totals_comparison = validate_year_totals(all_stubs)
+
+    # Validate per-stub deltas
+    delta_errors, delta_warnings = validate_stub_deltas(all_stubs)
+
+    # Combine errors and warnings
+    errors = gap_errors + totals_errors + delta_errors
+    warnings = gap_warnings + totals_warnings + delta_warnings
+
+    # Build report
+    report = {
+        "summary": generate_summary(all_stubs, year),
+        "errors": errors,
+        "warnings": warnings,
+        "totals_validation": totals_comparison,
+        "contributions_401k": generate_401k_contributions(all_stubs),
+        "imputed_income": generate_imputed_income_summary(all_stubs),
+        "ytd_breakdown": generate_ytd_breakdown(all_stubs) if not errors else None,
+        "stubs": all_stubs
+    }
+
+    # Output
+    if output_format == "json":
+        click.echo(json.dumps(report, indent=2))
+    else:
+        print_text_report(report)
+
+    # Save to data directory
+    data_dir = get_data_path()
+    data_dir.mkdir(parents=True, exist_ok=True)
+    output_file = data_dir / f"{year}_{party}_pay_all.json"
+
+    # Always include ytd_breakdown in saved file
+    if report["ytd_breakdown"] is None:
+        report["ytd_breakdown"] = generate_ytd_breakdown(all_stubs)
+
+    with open(output_file, "w") as f:
+        json.dump(report, f, indent=2)
+
+    click.echo(f"\nSaved to: {output_file}")
 
 
 @cli.command("projection")
@@ -330,6 +421,77 @@ def projection(year, party, input_file):
         result = subprocess.run(cmd, check=True)
     except subprocess.CalledProcessError as e:
         raise click.ClickException(f"Projection failed with exit code {e.returncode}")
+
+
+@cli.command("reset")
+@click.option("--force", is_flag=True, help="Skip confirmation prompt.")
+def reset(force: bool):
+    """Reset all pay-calc data (stubs, analysis output, cache).
+
+    This removes all data from the data directory (~/.local/share/pay-calc/)
+    but preserves configuration (~/.config/pay-calc/).
+
+    Use this to start fresh before re-importing pay stubs.
+    """
+    from paycalc.sdk import get_data_path
+    import shutil
+
+    data_dir = get_data_path()
+
+    if not data_dir.exists():
+        click.echo(f"Data directory does not exist: {data_dir}")
+        return
+
+    # Count what will be deleted
+    stubs_dir = data_dir / "stubs"
+    stub_count = 0
+    analysis_count = 0
+    other_files = []
+
+    if stubs_dir.exists():
+        for year_dir in stubs_dir.iterdir():
+            if year_dir.is_dir():
+                for party_dir in year_dir.iterdir():
+                    if party_dir.is_dir():
+                        stub_count += len(list(party_dir.glob("*.json")))
+
+    for f in data_dir.glob("*.json"):
+        if "_full.json" in f.name or "_pay_all.json" in f.name or "_w2" in f.name:
+            analysis_count += 1
+        else:
+            other_files.append(f.name)
+
+    # Show what will be deleted
+    click.echo(f"Data directory: {data_dir}")
+    click.echo(f"\nWill delete:")
+    click.echo(f"  - {stub_count} stub files")
+    click.echo(f"  - {analysis_count} analysis/W-2 output files")
+    if other_files:
+        click.echo(f"  - {len(other_files)} other files: {', '.join(other_files[:5])}")
+        if len(other_files) > 5:
+            click.echo(f"    ... and {len(other_files) - 5} more")
+
+    click.echo(f"\nConfiguration preserved: ~/.config/pay-calc/")
+
+    if not force:
+        click.confirm("\nProceed with reset?", abort=True)
+
+    # Delete the data directory contents
+    if stubs_dir.exists():
+        shutil.rmtree(stubs_dir)
+        click.echo("Deleted stubs directory")
+
+    for f in data_dir.glob("*.json"):
+        f.unlink()
+        click.echo(f"Deleted {f.name}")
+
+    # Also clear any subdirectories (cache, etc.) except stubs (already handled)
+    for item in data_dir.iterdir():
+        if item.is_dir() and item.name != "stubs":
+            shutil.rmtree(item)
+            click.echo(f"Deleted {item.name}/")
+
+    click.echo(click.style("\nReset complete.", fg='green'))
 
 
 def main():

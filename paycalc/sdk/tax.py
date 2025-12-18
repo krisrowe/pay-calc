@@ -55,10 +55,10 @@ def load_party_w2_data(data_dir: Path, year: str, party: str) -> dict:
 
     Data sources (in order of preference):
     1. W-2 JSON files (YYYY_party_w2_forms.json) - year-end
-    2. Analysis JSON files (YYYY_party_full.json) - mid-year fallback
+    2. Analysis JSON files (YYYY_party_pay_all.json) - mid-year
     """
     w2_file = data_dir / f"{year}_{party}_w2_forms.json"
-    analysis_file = data_dir / f"{year}_{party}_full.json"
+    analysis_file = data_dir / f"{year}_{party}_pay_all.json"
 
     # Try W-2 file first (year-end)
     if w2_file.exists():

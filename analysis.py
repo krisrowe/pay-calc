@@ -27,6 +27,7 @@ import yaml
 # Add parent directory to path for processor imports
 sys.path.insert(0, str(Path(__file__).parent))
 from processors import get_processor
+from paycalc.sdk import detect_gaps, check_first_stub_ytd
 
 
 def validate_stub_numbers(stub: Dict[str, Any]) -> List[str]:
@@ -442,92 +443,6 @@ def identify_pay_type(stub: Dict[str, Any]) -> str:
     return "other"
 
 
-def validate_gaps(stubs: List[Dict[str, Any]], year: str) -> Tuple[List[str], List[str]]:
-    """
-    Validate for gaps in pay stubs by checking pay date intervals.
-
-    For biweekly pay, expects ~14 days between regular pay stubs.
-    YTD continuity isn't used because YTD includes all earnings (bonuses, stock)
-    which cause valid jumps between regular pay periods.
-
-    Returns:
-        Tuple of (errors, warnings) where errors are fatal issues
-        and warnings are informational.
-    """
-    errors = []
-    warnings = []
-
-    # Filter to regular pay stubs only for gap detection
-    regular_stubs = [s for s in stubs if s.get("_pay_type") == "regular"]
-
-    if not regular_stubs:
-        errors.append("No regular pay stubs found")
-        return errors, warnings
-
-    # Check if first stub is actually first of year
-    first_stub = regular_stubs[0]
-    first_ytd = first_stub.get("pay_summary", {}).get("ytd", {}).get("gross", 0)
-    first_current = first_stub.get("pay_summary", {}).get("current", {}).get("gross", 0)
-    first_date = first_stub.get("pay_date", "unknown")
-
-    # If YTD equals current, it's likely the first pay period
-    if abs(first_ytd - first_current) > 0.01:
-        # YTD is higher than current, missing earlier stubs
-        errors.append(
-            f"First stub ({first_date}) has YTD ${first_ytd:,.2f} but current "
-            f"${first_current:,.2f} - missing earlier pay periods"
-        )
-
-    # Check if last stub is near end of year
-    last_stub = regular_stubs[-1]
-    last_date_str = last_stub.get("pay_date", "")
-    if last_date_str:
-        last_date = parse_pay_date(last_date_str)
-        year_end = datetime(int(year), 12, 31)
-        days_short = (year_end - last_date).days
-        if days_short > 20:  # More than ~2 pay periods short
-            warnings.append(
-                f"Last stub is {last_date_str}, which is {days_short} days before year end"
-            )
-
-    # Check for gaps between consecutive regular stubs using pay date intervals
-    # Biweekly pay = ~14 days between stubs; allow up to 21 days before flagging
-    MAX_INTERVAL_DAYS = 21
-    prev_date = None
-    prev_ytd = 0
-    employer_segments = []  # Track separate employer segments
-
-    for stub in regular_stubs:
-        pay_date_str = stub.get("pay_date", "")
-        pay_date = parse_pay_date(pay_date_str)
-        ytd_gross = stub.get("pay_summary", {}).get("ytd", {}).get("gross", 0)
-
-        if prev_date and pay_date != datetime.min:
-            days_gap = (pay_date - prev_date).days
-
-            # Check for employer change (YTD resets to low value)
-            if prev_ytd > 10000 and ytd_gross < prev_ytd * 0.5:
-                warnings.append(
-                    f"Employer change detected at {pay_date_str}: YTD reset from "
-                    f"${prev_ytd:,.2f} to ${ytd_gross:,.2f}"
-                )
-                # Reset tracking for new employer
-                prev_date = pay_date
-                prev_ytd = ytd_gross
-                continue
-
-            # Check for date gaps (skipped pay periods)
-            if days_gap > MAX_INTERVAL_DAYS:
-                missed_periods = (days_gap - 7) // 14  # Estimate missed biweekly periods
-                errors.append(
-                    f"Gap detected: {days_gap} days between {prev_date.strftime('%Y-%m-%d')} "
-                    f"and {pay_date_str} (~{missed_periods} missed pay period(s))"
-                )
-
-        prev_date = pay_date
-        prev_ytd = ytd_gross
-
-    return errors, warnings
 
 
 def detect_employer_segments(stubs: List[Dict[str, Any]]) -> List[List[Dict[str, Any]]]:
@@ -1350,8 +1265,14 @@ def main():
             log(f"Filtered out {filtered_count} stubs after {through_date}")
         log(f"Processing {len(all_stubs)} stubs through {through_date}")
 
-    # Validate for gaps
-    gap_errors, gap_warnings = validate_gaps(all_stubs, year)
+    # Validate for gaps using SDK
+    gap_analysis = detect_gaps(all_stubs, year, filter_regular_only=True)
+    gap_errors, gap_warnings = gap_analysis.to_errors_warnings()
+
+    # Check if first stub YTD indicates missing earlier stubs
+    ytd_error = check_first_stub_ytd(all_stubs)
+    if ytd_error:
+        gap_errors.insert(0, ytd_error)
 
     # Validate totals (sum of current vs YTD)
     totals_errors, totals_warnings, totals_comparison = validate_year_totals(all_stubs)

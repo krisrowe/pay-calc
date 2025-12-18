@@ -180,8 +180,11 @@ def profile_show():
 
     if not profile_path.exists():
         click.echo()
-        click.echo("Profile does not exist yet. Create with:")
-        click.echo("  pay-calc profile set drive.pay_stubs_folder_id YOUR_FOLDER_ID")
+        click.echo("Profile does not exist yet. Create profile.yaml with:")
+        click.echo("  drive:")
+        click.echo("    pay_records:")
+        click.echo("      - id: YOUR_FOLDER_ID")
+        click.echo("        comment: Description of folder")
         return
 
     # Profile exists - show validation
@@ -198,7 +201,7 @@ def profile_show():
 def profile_get(key):
     """Get a profile configuration value.
 
-    KEY is a dot-notation path like 'drive.w2_pay_records.2024'
+    KEY is a dot-notation path like 'drive.pay_stubs_folder_id'
 
     For scalar values, outputs the plain value.
     For complex values (dicts/lists), use 'profile show' instead.
@@ -221,12 +224,13 @@ def profile_get(key):
 def profile_set(key, value):
     """Set a profile configuration value.
 
-    KEY is a dot-notation path like 'drive.w2_pay_records.2024'
+    KEY is a dot-notation path like 'drive.pay_stubs_folder_id'
     VALUE is the value to set (string or number)
 
     Examples:
         pay-calc profile set drive.pay_stubs_folder_id YOUR_FOLDER_ID
-        pay-calc profile set drive.w2_pay_records.2026 FOLDER_ID
+
+    Note: pay_records is an array - edit profile.yaml directly to modify.
     """
     # Validate key against schema
     is_valid, error_msg = validate_profile_key(key)
@@ -260,6 +264,134 @@ def profile_set(key, value):
         _display_validation(validation, show_contents=False)
     except ProfileNotFoundError:
         pass  # Profile was just created, validation will work next time
+
+
+# =============================================================================
+# PROFILE RECORDS subgroup - manage drive.pay_records[]
+# =============================================================================
+
+@profile.group("records")
+def profile_records():
+    """Manage Drive folders in pay_records.
+
+    Pay records folders contain pay stubs and W-2 files that can be
+    imported with 'stubs import' or 'w2 import' commands.
+
+    Examples:
+        pay-calc profile records list
+        pay-calc profile records add 1abc123xyz --comment "2024 Records"
+        pay-calc profile records remove 1abc123xyz
+    """
+    pass
+
+
+@profile_records.command("list")
+def records_list():
+    """List all Drive folders in pay_records."""
+    from paycalc.sdk.config import load_profile
+
+    try:
+        profile = load_profile(require_exists=True)
+    except ProfileNotFoundError as e:
+        raise click.ClickException(str(e))
+
+    pay_records = profile.get("drive", {}).get("pay_records", [])
+
+    if not pay_records:
+        click.echo("No pay_records folders configured.")
+        click.echo()
+        click.echo("Add a folder with:")
+        click.echo("  pay-calc profile records add <folder_id> --comment 'Description'")
+        return
+
+    click.echo(f"Pay Records Folders ({len(pay_records)}):")
+    click.echo()
+    for i, record in enumerate(pay_records, 1):
+        folder_id = record.get("id", "???")
+        comment = record.get("comment", "")
+        if comment:
+            click.echo(f"  {i}. {folder_id}")
+            click.echo(f"     {comment}")
+        else:
+            click.echo(f"  {i}. {folder_id}")
+
+
+@profile_records.command("add")
+@click.argument("folder_id")
+@click.option("--comment", "-c", help="Optional description for the folder")
+def records_add(folder_id, comment):
+    """Add a Drive folder to pay_records.
+
+    FOLDER_ID is a Google Drive folder ID.
+
+    Examples:
+        pay-calc profile records add 1abc123xyz
+        pay-calc profile records add 1abc123xyz --comment "2024 Pay Records"
+    """
+    from paycalc.sdk.config import load_profile, save_profile, validate_folder_id
+
+    # Validate folder ID format
+    is_valid, msg = validate_folder_id(folder_id)
+    if not is_valid:
+        raise click.ClickException(msg)
+
+    profile = load_profile(require_exists=False)
+
+    # Ensure drive.pay_records exists as a list
+    if "drive" not in profile:
+        profile["drive"] = {}
+    if "pay_records" not in profile["drive"]:
+        profile["drive"]["pay_records"] = []
+
+    pay_records = profile["drive"]["pay_records"]
+
+    # Check for duplicate
+    for record in pay_records:
+        if record.get("id") == folder_id:
+            raise click.ClickException(f"Folder ID already exists: {folder_id}")
+
+    # Add new folder
+    new_record = {"id": folder_id}
+    if comment:
+        new_record["comment"] = comment
+    pay_records.append(new_record)
+
+    profile_file = save_profile(profile)
+    click.echo(f"Added folder: {folder_id}")
+    if comment:
+        click.echo(f"  Comment: {comment}")
+    click.echo(f"Saved to: {profile_file}")
+
+
+@profile_records.command("remove")
+@click.argument("folder_id")
+def records_remove(folder_id):
+    """Remove a Drive folder from pay_records.
+
+    FOLDER_ID is the Google Drive folder ID to remove.
+
+    Examples:
+        pay-calc profile records remove 1abc123xyz
+    """
+    from paycalc.sdk.config import load_profile, save_profile
+
+    profile = load_profile(require_exists=True)
+
+    pay_records = profile.get("drive", {}).get("pay_records", [])
+    if not pay_records:
+        raise click.ClickException("No pay_records folders configured")
+
+    # Find and remove
+    original_len = len(pay_records)
+    pay_records = [r for r in pay_records if r.get("id") != folder_id]
+
+    if len(pay_records) == original_len:
+        raise click.ClickException(f"Folder ID not found: {folder_id}")
+
+    profile["drive"]["pay_records"] = pay_records
+    profile_file = save_profile(profile)
+    click.echo(f"Removed folder: {folder_id}")
+    click.echo(f"Saved to: {profile_file}")
 
 
 @profile.command("import")
