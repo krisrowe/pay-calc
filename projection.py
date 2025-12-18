@@ -280,8 +280,11 @@ def print_text_report(projection: Dict[str, Any], analysis_data: Dict[str, Any])
     # Get 401k totals
     total_401k = contrib_401k.get("total", 0)
 
-    # Project additional 401k needed to reach total annual limit
-    projected_401k_add = max(0, total_annual_limit - total_401k)
+    # Project additional 401k needed to reach total annual limit, but cap it
+    # at the amount of projected regular pay available.
+    needed_401k = max(0, total_annual_limit - total_401k)
+    reg_proj = additional.get("regular_pay", 0)
+    projected_401k_add = min(needed_401k, reg_proj)
     projected_401k_total = total_401k + projected_401k_add
 
     # Calculate total compensation (gross + all 401k)
@@ -301,7 +304,6 @@ def print_text_report(projection: Dict[str, Any], analysis_data: Dict[str, Any])
     actual_stock = ytd_earnings.get("Goog Stock Unit", 0)
     actual_other = actual.get('gross', 0) - actual_regular - actual_stock
 
-    reg_proj = additional.get("regular_pay", 0)
     stock_proj = additional.get("stock_grants", 0)
 
     # Reduce regular pay projection by 401k projection (401k comes out of regular pay)

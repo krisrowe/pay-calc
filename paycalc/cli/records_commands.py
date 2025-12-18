@@ -313,53 +313,72 @@ def _accumulate_stats(total: dict, result: dict):
 
 
 def _import_single_file_auto(file_path: Path, debug: bool, force: bool) -> dict:
-    """Import a single file with auto-detection.
+    """Import a single file with auto-detection and multi-page support.
+
+    When a specific file is targeted (vs folder import), we use stub-level
+    duplicate detection instead of file-level tracking. This enables the
+    recovery workflow: re-importing a specific file that was partially imported.
 
     Returns stats dict with: imported, skipped, discarded, errors, stubs, w2s
     """
-    result = {"imported": 0, "skipped": 0, "discarded": 0, "errors": 0, "stubs": 0, "w2s": 0}
+    stats = {"imported": 0, "skipped": 0, "discarded": 0, "errors": 0, "stubs": 0, "w2s": 0}
 
     suffix = file_path.suffix.lower()
     if suffix not in (".json", ".pdf"):
         if debug:
             click.echo(f"  - {file_path.name} (skipped: unsupported format)")
-        return result
+        return stats
 
     if debug:
         click.echo(f"Processing: {file_path.name}")
 
     try:
-        import_result = records.import_file_auto(file_path, force=force)
+        # Use import_file_auto_all with targeted=True:
+        # - Processes all pages of multi-page PDFs
+        # - Bypasses file-level "already imported" check
+        # - Relies on stub-level duplicate detection
+        import_results = records.import_file_auto_all(
+            file_path, force=force, targeted=True
+        )
 
-        if import_result["status"] == "imported":
-            result["imported"] = 1
-            rec_type = import_result.get("type", "unknown")
-            if rec_type == "stub":
-                result["stubs"] = 1
-            elif rec_type == "w2":
-                result["w2s"] = 1
+        for import_result in import_results:
+            status = import_result.get("status")
 
-            if debug:
-                year = import_result.get("year", "?")
-                party = import_result.get("party", "?")
-                employer = import_result.get("employer", "")
-                click.echo(f"  ✓ {file_path.name} → {rec_type}, {year}/{party}, {employer}")
+            if status == "imported":
+                stats["imported"] += 1
+                rec_type = import_result.get("type", "unknown")
+                if rec_type == "stub":
+                    stats["stubs"] += 1
+                elif rec_type == "w2":
+                    stats["w2s"] += 1
 
-        elif import_result["status"] == "skipped":
-            result["skipped"] = 1
-            if debug:
-                click.echo(f"  - {file_path.name} (skipped: {import_result.get('reason', 'duplicate')})")
+                if debug:
+                    year = import_result.get("year", "?")
+                    party = import_result.get("party", "?")
+                    employer = import_result.get("employer", "")
+                    page = import_result.get("page", "")
+                    page_info = f" (page {page})" if page else ""
+                    click.echo(f"  ✓ {file_path.name}{page_info} → {rec_type}, {year}/{party}, {employer}")
 
-        elif import_result["status"] == "discarded":
-            result["discarded"] = 1
-            if debug:
-                click.echo(f"  ✗ {file_path.name} (discarded: {import_result.get('reason', 'unknown')})")
+            elif status == "skipped":
+                stats["skipped"] += 1
+                if debug:
+                    reason = import_result.get("reason", "duplicate")
+                    page = import_result.get("page", "")
+                    page_info = f" (page {page})" if page else ""
+                    click.echo(f"  - {file_path.name}{page_info} (skipped: {reason})")
+
+            elif status == "discarded":
+                stats["discarded"] += 1
+                if debug:
+                    reason = import_result.get("reason", "unknown")
+                    click.echo(f"  ✗ {file_path.name} (discarded: {reason})")
 
     except Exception as e:
-        result["errors"] = 1
+        stats["errors"] += 1
         click.echo(click.style(f"  ✗ {file_path.name}: {e}", fg="red"))
 
-    return result
+    return stats
 
 
 @records_cli.command("show")
@@ -402,41 +421,126 @@ def records_show(record_id: str, output_format: str):
 
 
 @records_cli.command("remove")
-@click.argument("record_id")
+@click.argument("filters", nargs=-1)
 @click.option("--force", is_flag=True, help="Skip confirmation prompt.")
-def records_remove(record_id: str, force: bool):
-    """Remove a record by ID.
+@click.option("--include-discarded", is_flag=True, help="Also remove discarded markers.")
+def records_remove(filters: Tuple[str, ...], force: bool, include_discarded: bool):
+    """Remove records by ID or by year/party filters.
+
+    FILTERS can be:
+    - A single record ID (8-char hex from 'records list')
+    - Year (4 digits) and/or party (him/her) to bulk remove
 
     \b
-    Arguments:
-      RECORD_ID    The 8-character record ID (from 'records list')
+    Examples:
+      pay-calc records remove abc12345           # Single record by ID
+      pay-calc records remove 2025 him           # All 2025/him records
+      pay-calc records remove 2025               # All 2025 records (both parties)
+      pay-calc records remove him                # All records for him (all years)
+      pay-calc records remove 2025 him --include-discarded  # Also clear discarded markers
     """
-    # First check if it exists
-    record = records.get_record(record_id)
-    if not record:
-        raise click.ClickException(f"Record not found: {record_id}")
+    if not filters:
+        raise click.ClickException(
+            "No filter specified. Provide a record ID or year/party filters.\n"
+            "Examples:\n"
+            "  pay-calc records remove abc12345    # Single record\n"
+            "  pay-calc records remove 2025 him    # Bulk remove"
+        )
 
-    meta = record.get("meta", {})
-    data = record.get("data", {})
+    # Check if first filter looks like a record ID (8+ hex chars, not a year)
+    first = filters[0]
+    is_record_id = (
+        len(first) >= 8 and
+        all(c in "0123456789abcdef" for c in first.lower()) and
+        not (first.isdigit() and len(first) == 4)
+    )
 
-    # Show what will be deleted
-    rec_type = meta.get("type", "unknown")
-    if rec_type == "stub":
-        desc = f"stub {data.get('pay_date', 'unknown')} {data.get('employer', 'unknown')}"
-    elif rec_type == "w2":
-        desc = f"W-2 {data.get('tax_year', 'unknown')} {data.get('employer_name', 'unknown')}"
+    if is_record_id and len(filters) == 1:
+        # Single record removal (existing behavior)
+        record_id = first
+        record = records.get_record(record_id)
+        if not record:
+            raise click.ClickException(f"Record not found: {record_id}")
+
+        meta = record.get("meta", {})
+        data = record.get("data", {})
+
+        # Show what will be deleted
+        rec_type = meta.get("type", "unknown")
+        if rec_type == "stub":
+            desc = f"stub {data.get('pay_date', 'unknown')} {data.get('employer', 'unknown')}"
+        elif rec_type == "w2":
+            desc = f"W-2 {data.get('tax_year', 'unknown')} {data.get('employer_name', 'unknown')}"
+        else:
+            desc = f"discarded record {meta.get('source_filename', 'unknown')}"
+
+        click.echo(f"Will remove: {desc}")
+
+        if not force:
+            click.confirm("Proceed?", abort=True)
+
+        if records.remove_record(record_id):
+            click.echo(click.style(f"Removed record {record_id}", fg="green"))
+        else:
+            raise click.ClickException(f"Failed to remove record {record_id}")
+
     else:
-        desc = f"discarded record {meta.get('source_filename', 'unknown')}"
+        # Bulk removal by year/party filters
+        year, party = parse_year_party_filters(filters)
 
-    click.echo(f"Will remove: {desc}")
+        if not year and not party:
+            raise click.ClickException(
+                "Bulk remove requires at least year or party filter.\n"
+                "Use 'pay-calc reset' to remove all data."
+            )
 
-    if not force:
-        click.confirm("Proceed?", abort=True)
+        # Get matching records (not including discarded - those are handled separately)
+        matching = records.list_records(
+            year=year,
+            party=party,
+            include_discarded=False
+        )
 
-    if records.remove_record(record_id):
-        click.echo(click.style(f"Removed record {record_id}", fg="green"))
-    else:
-        raise click.ClickException(f"Failed to remove record {record_id}")
+        # Get ALL discarded markers if flag is set (they don't have year/party)
+        discarded_to_remove = []
+        if include_discarded:
+            discarded_to_remove = records.list_discarded()
+
+        if not matching and not discarded_to_remove:
+            filter_desc = "/".join(f for f in [year, party] if f)
+            click.echo(f"No records found for {filter_desc}")
+            return
+
+        # Group by type for summary
+        stubs = [r for r in matching if r.get("meta", {}).get("type") == "stub"]
+        w2s = [r for r in matching if r.get("meta", {}).get("type") == "w2"]
+
+        filter_desc = "/".join(f for f in [year, party] if f)
+        total_count = len(matching) + len(discarded_to_remove)
+        click.echo(f"\nWill remove {total_count} item(s):")
+        if stubs:
+            click.echo(f"  - {len(stubs)} pay stubs ({filter_desc})")
+        if w2s:
+            click.echo(f"  - {len(w2s)} W-2s ({filter_desc})")
+        if discarded_to_remove:
+            click.echo(f"  - {len(discarded_to_remove)} discarded markers (ALL - these are not filtered by year/party)")
+
+        if not force:
+            click.confirm("\nProceed?", abort=True)
+
+        # Remove all matching records
+        removed = 0
+        for rec in matching:
+            rec_id = rec.get("id")
+            if rec_id and records.remove_record(rec_id):
+                removed += 1
+
+        click.echo(click.style(f"\nRemoved {removed} record(s)", fg="green"))
+        if removed < len(matching):
+            click.echo(click.style(
+                f"Warning: {len(matching) - removed} record(s) could not be removed",
+                fg="yellow"
+            ))
 
 
 @records_cli.command("validate")

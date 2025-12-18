@@ -7,6 +7,24 @@ CLI and MCP tools should be thin wrappers that call these functions.
 Design Rationale
 ----------------
 
+Why import cannot filter folders by year/party:
+    Year and party are auto-detected FROM file content (pay_date, employer name).
+    Filtering a folder import by year/party would require:
+    1. Downloading ALL files from Drive
+    2. AI/OCR processing potentially ALL of them
+    3. Just to determine which ones match the filter
+
+    This would be equivalent in time, processing, and network I/O to a nuclear reset.
+    There's no efficiency gain from "filtering" - you'd still process everything.
+
+    Instead, we use a two-tier approach:
+    - Folder imports: file-level tracking skips already-processed files (cheap, incremental)
+    - Specific file imports: always process fully with stub-level dedup (targeted recovery)
+
+    Recovery workflow:
+    - To re-import a specific file: `records import <file-id>` (efficient, targeted)
+    - To re-import everything: `reset` then `records import` (expensive, nuclear)
+
 Discard vs Import distinction:
     When importing records from Drive, files that can't be processed are "discarded"
     rather than deleted. A discarded record is stored locally with meta.type="discarded"
@@ -659,6 +677,38 @@ def find_by_drive_id(drive_file_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
+def find_all_by_drive_id(drive_file_id: str) -> List[Dict[str, Any]]:
+    """Find all records by their Drive file ID.
+
+    For multi-page PDFs, multiple records may share the same drive_file_id.
+    This returns all matching records.
+
+    Args:
+        drive_file_id: The Google Drive file ID to search for
+
+    Returns:
+        List of record dicts with 'meta', 'data', 'id', '_path' keys
+    """
+    records_dir = get_records_dir()
+    results = []
+
+    # Scan all JSON files in records directory tree
+    for json_file in records_dir.rglob("*.json"):
+        try:
+            with open(json_file) as f:
+                record = json.load(f)
+
+            if record.get("meta", {}).get("drive_file_id") == drive_file_id:
+                record["id"] = json_file.stem
+                record["_path"] = str(json_file)
+                results.append(record)
+
+        except (json.JSONDecodeError, IOError):
+            continue
+
+    return results
+
+
 def remove_record(record_id: str) -> bool:
     """Delete a record by its ID.
 
@@ -1279,6 +1329,215 @@ def import_file_auto(
         return result
 
 
+def import_file_auto_all(
+    file_path: Path,
+    force: bool = False,
+    drive_file_id: Optional[str] = None,
+    targeted: bool = False
+) -> List[Dict[str, Any]]:
+    """Import a file with multi-page PDF support.
+
+    For multi-page PDFs (common for quarterly pay stub bundles), splits the PDF
+    and processes each page as a separate record. For JSON files and single-page
+    PDFs, behaves like import_file_auto.
+
+    Args:
+        file_path: Path to PDF or JSON file
+        force: If True, re-process previously discarded files
+        drive_file_id: Optional Drive file ID for tracking
+        targeted: If True, bypass file-level "already imported" check and use
+                  stub-level duplicate detection instead. Use this for targeted
+                  re-import of specific files (recovery workflow).
+
+    Returns:
+        List of result dicts, one per imported record. Each has:
+        - status: "imported", "skipped", "discarded"
+        - type: "stub", "w2", or None
+        - year, party, employer, reason, path as in import_file_auto
+        - page: (multi-page PDFs only) page number within source file
+    """
+    import tempfile
+
+    suffix = file_path.suffix.lower()
+
+    # JSON files - single record
+    if suffix == ".json":
+        return [import_file_auto(file_path, force=force, drive_file_id=drive_file_id)]
+
+    # Not a PDF - delegate to single import
+    if suffix != ".pdf":
+        return [import_file_auto(file_path, force=force, drive_file_id=drive_file_id)]
+
+    # PDF - check if already processed (by drive_file_id)
+    # Skip this check for targeted imports - rely on stub-level dedup instead
+    if drive_file_id and not targeted:
+        existing_records = find_all_by_drive_id(drive_file_id)
+        if existing_records:
+            # Already imported - return skipped results
+            results = []
+            for rec in existing_records:
+                rec_type = rec.get("meta", {}).get("type")
+                if rec_type == "discarded":
+                    if not force:
+                        results.append({
+                            "status": "skipped",
+                            "reason": "previously discarded",
+                            "type": None,
+                            "year": None,
+                            "party": None,
+                            "employer": None,
+                            "path": None,
+                        })
+                    # With --force, continue to re-process
+                    else:
+                        break  # Will process below
+                else:
+                    results.append({
+                        "status": "skipped",
+                        "reason": "already imported",
+                        "type": rec_type,
+                        "year": rec.get("meta", {}).get("year"),
+                        "party": rec.get("meta", {}).get("party"),
+                        "employer": rec.get("data", {}).get("employer"),
+                        "path": None,
+                    })
+            if results and not (force and any(r.get("reason") == "previously discarded" for r in results)):
+                return results
+
+    # Check page count
+    page_count = _get_pdf_page_count(file_path)
+    if page_count <= 1:
+        # Single page - use standard import
+        return [import_file_auto(file_path, force=force, drive_file_id=drive_file_id)]
+
+    # Multi-page PDF - split and process each page
+    logger.debug(f"Multi-page PDF detected: {file_path.name} has {page_count} pages")
+    results = []
+
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        tmp_path = Path(tmp_dir)
+        page_files = _split_pdf_pages(file_path, tmp_path)
+
+        if not page_files:
+            # Split failed - fall back to single import
+            logger.warning(f"Failed to split PDF: {file_path.name}")
+            return [import_file_auto(file_path, force=force, drive_file_id=drive_file_id)]
+
+        for page_num, page_file in enumerate(page_files, start=1):
+            # Process this page
+            result = _import_single_page(
+                page_file,
+                source_filename=file_path.name,
+                page_number=page_num,
+                drive_file_id=drive_file_id,
+                force=force
+            )
+            result["page"] = page_num
+            results.append(result)
+
+    return results
+
+
+def _import_single_page(
+    page_file: Path,
+    source_filename: str,
+    page_number: int,
+    drive_file_id: Optional[str] = None,
+    force: bool = False
+) -> Dict[str, Any]:
+    """Import a single page from a multi-page PDF.
+
+    Args:
+        page_file: Path to the single-page PDF (temporary file)
+        source_filename: Original filename (for metadata)
+        page_number: Page number within the source file
+        drive_file_id: Optional Drive file ID
+        force: If True, re-process discarded files
+
+    Returns:
+        Result dict like import_file_auto
+    """
+    result = {
+        "status": None,
+        "type": None,
+        "year": None,
+        "party": None,
+        "employer": None,
+        "reason": None,
+        "path": None,
+    }
+
+    # Extract data from this page
+    data = _extract_pdf_auto(page_file)
+    if data is None:
+        result["status"] = "discarded"
+        result["reason"] = f"unreadable (page {page_number})"
+        return result
+
+    # Detect record type
+    record_type = detect_record_type_from_data(data)
+    if not record_type:
+        result["status"] = "discarded"
+        result["reason"] = f"not_recognized (page {page_number})"
+        return result
+
+    result["type"] = record_type
+
+    # Extract year
+    year = extract_year_from_data(data, record_type)
+    if not year:
+        result["status"] = "discarded"
+        result["reason"] = f"no_year_detected (page {page_number})"
+        return result
+
+    result["year"] = year
+
+    # Extract employer and detect party
+    employer = extract_employer_from_data(data, record_type)
+    result["employer"] = employer
+
+    party = detect_party_from_employer(employer)
+    if not party:
+        result["status"] = "discarded"
+        result["reason"] = f"unknown_party (page {page_number}, employer: {employer or 'not found'})"
+        return result
+
+    result["party"] = party
+
+    # Build metadata with source file and page number
+    meta = {
+        "type": record_type,
+        "year": year,
+        "party": party,
+        "source_filename": source_filename,
+        "source_page": page_number,
+    }
+    if drive_file_id:
+        meta["drive_file_id"] = drive_file_id
+    if data.get("_extraction_method"):
+        meta["extraction_method"] = data.pop("_extraction_method")
+
+    # Validate and save
+    try:
+        path, warnings = validate_and_add_record(meta=meta, data=data)
+        result["status"] = "imported"
+        result["path"] = str(path)
+        if warnings:
+            result["warnings"] = warnings
+            for w in warnings:
+                logger.warning(f"{source_filename} (page {page_number}): {w}")
+        return result
+
+    except ValidationError as e:
+        if any("duplicate" in err.lower() for err in e.errors):
+            result["status"] = "skipped"
+            result["reason"] = "duplicate"
+        else:
+            result["status"] = "discarded"
+            result["reason"] = f"validation_failed (page {page_number}): {'; '.join(e.errors)}"
+        return result
+
+
 def _extract_pdf_auto(pdf_path: Path) -> Optional[Dict[str, Any]]:
     """Extract data from PDF with auto-detection.
 
@@ -1323,6 +1582,52 @@ def _extract_pdf_auto(pdf_path: Path) -> Optional[Dict[str, Any]]:
         return None
     except Exception:
         return None
+
+
+def _get_pdf_page_count(pdf_path: Path) -> int:
+    """Get the number of pages in a PDF file.
+
+    Returns:
+        Number of pages, or 0 if file can't be read
+    """
+    try:
+        import PyPDF2
+        with open(pdf_path, 'rb') as f:
+            reader = PyPDF2.PdfReader(f)
+            return len(reader.pages)
+    except Exception:
+        return 0
+
+
+def _split_pdf_pages(pdf_path: Path, output_dir: Path) -> List[Path]:
+    """Split a multi-page PDF into individual page files.
+
+    Args:
+        pdf_path: Path to the multi-page PDF
+        output_dir: Directory to write individual page files
+
+    Returns:
+        List of paths to individual page PDFs
+    """
+    try:
+        import PyPDF2
+        reader = PyPDF2.PdfReader(pdf_path)
+        page_files = []
+        base_name = pdf_path.stem
+
+        for i, page in enumerate(reader.pages):
+            writer = PyPDF2.PdfWriter()
+            writer.add_page(page)
+
+            page_file = output_dir / f"{base_name}_page_{i+1:02d}.pdf"
+            with open(page_file, "wb") as f:
+                writer.write(f)
+            page_files.append(page_file)
+
+        return page_files
+    except Exception as e:
+        logger.debug(f"Failed to split PDF: {e}")
+        return []
 
 
 def _parse_text_pdf_auto(pdf_text: str, pdf_path: Path) -> Optional[Dict[str, Any]]:
@@ -1604,11 +1909,13 @@ def import_from_folder_auto(
 
                 logger.debug(f"downloaded {name}, processing...")
 
-                # Import with auto-detection
-                result = import_file_auto(local_path, force=force, drive_file_id=file_id)
-                _accumulate_file_result(stats, result, name, emit)
+                # Import with auto-detection (handles multi-page PDFs)
+                results = import_file_auto_all(local_path, force=force, drive_file_id=file_id)
+                for result in results:
+                    page_suffix = f" (page {result['page']})" if result.get('page') else ""
+                    _accumulate_file_result(stats, result, f"{name}{page_suffix}", emit)
 
-                logger.debug(f"{name} result: {result.get('status')}")
+                logger.debug(f"{name} result: {len(results)} record(s)")
 
     else:
         # Local folder
@@ -1620,8 +1927,11 @@ def import_from_folder_auto(
         emit("start", {"source": source, "file_count": len(files)})
 
         for file_path in files:
-            result = import_file_auto(file_path, force=force)
-            _accumulate_file_result(stats, result, file_path.name, emit)
+            # Import with auto-detection (handles multi-page PDFs)
+            results = import_file_auto_all(file_path, force=force)
+            for result in results:
+                page_suffix = f" (page {result['page']})" if result.get('page') else ""
+                _accumulate_file_result(stats, result, f"{file_path.name}{page_suffix}", emit)
 
     emit("done", stats)
     return stats

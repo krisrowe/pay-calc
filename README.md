@@ -2,6 +2,30 @@
 
 Tools for processing pay stubs, extracting W-2 data, and generating federal tax projections.
 
+## Why This Project
+
+This project serves multiple purposes:
+
+**1. Tax Planning and Liability Projection:** The primary, practical goal is to generate a precise federal tax projection. By processing pay stubs throughout the year, we can project year-end tax liability, optimize 401k contributions, and plan estimated tax payments with confidence—rather than waiting until next year to discover what is owed.
+
+**2. Practical AI Experimentation:** This project is an experiment in applying AI to personal productivity workflows. We've invested significant effort on what might seem like a narrow use case (pay stub analysis) precisely because it's a real-world test bed for AI-assisted tooling. The goal is to understand where AI helps (OCR for image PDFs, pattern detection) and where traditional approaches work better (text extraction, validation).
+
+**3. Detailed Investment Tracking:** The detailed pay stub data enables tracking of investment contributions (401k, RSU vests, ESPP purchases) with exact dates and amounts. This is valuable for entering transactions into portfolio tools (Monarch, Yahoo Finance) and calculating accurate returns on investment portfolios. While aggregators like Monarch can theoretically track contributions, historically financial aggregators have struggled to do much more than track balance history for accounts—they often miss the detailed holding-level transaction data needed for accurate return calculations.
+
+**4. A Template for Resilient, Portable Tooling:** A primary goal is to prove out a design pattern for building CLI tools that are both powerful and portable. Many useful, custom tools end up as "shelfware" because they are too dependent on a specific local machine's setup. They become brittle, difficult to share, and a nightmare to resurrect on a new workstation. This project directly confronts that problem by establishing a clear, repeatable configuration pattern that separates the public code (this repo) from the user's private data and configuration (a separate, private repo).
+
+   **The problem this solves:** Most developers use their personal GitHub accounts on work laptops, collaborating on company projects and open source with a public identity. This creates real risk: it's far too easy to accidentally commit sensitive information, or to have something private appear on screen while browsing repos during a demo or screen share. The traditional alternatives are unsatisfying—either keep everything private (losing the benefits of public collaboration and open source contribution), or accept the constant vigilance required to keep personal data out of public repos.
+
+   This pattern offers a third way: keep the *tool* public while keeping the *data* private. You get the benefits of cloud-backed storage for your personal tooling (sync across machines, backup, version history) without building something no one else can use. The public repo contains reusable code; the private repo contains your configuration and data references.
+
+   The core philosophy is that your tools should not make your workstation a precious, irreplaceable artifact. You should be able to clone this public repository on any machine, point it to your private configuration file with a single command, and have it work instantly, reliably, and identically. This approach offers several key advantages:
+    - **Resilience:** Your private data (like pay stubs on Google Drive) and configuration are managed independently, so the public code remains stateless and easily replaceable.
+    - **Portability:** Setting up the tool on a new machine is trivial, eliminating the high cognitive load and lack of confidence often associated with rebuilding a complex local environment.
+    - **Security:** It provides a safe way to use public code with private data, without ever committing sensitive information to a public repository. No more worrying about accidental exposure during demos or screen shares.
+    - **A Workable Pattern:** If successful, this project serves as a template for other similar tools, demonstrating a practical way to build and maintain personal software that is robust, secure, and built to last.
+
+Because of the AI component, we prioritize a **practical and repeatable configuration pattern**. The tool should be easy to set up on a new machine with minimal configuration steps, and the deployment strategy should be straightforward (local CLI, no server required). The Gemini CLI approach exemplifies this: users set up `gemini` CLI once, and the tool leverages it without additional API key management.
+
 ## Installation
 
 ```bash
@@ -116,6 +140,9 @@ pay-calc tax-projection 2024
 Downloads PDFs from Google Drive or local folders, extracts structured data, validates, and stores as JSON:
 - Text-based PDFs: Uses PyPDF2 and pattern matching to extract data
 - Image-based PDFs: Uses Gemini OCR for extraction
+- **Multi-page PDFs:** Each page is processed separately, creating one JSON record per logical pay stub
+  - A quarterly payroll PDF with 12 pages creates 12 individual record files
+  - This enables accurate pattern detection for projections (RSU vesting frequency, pay cadence)
 - Validates extracted data (schema, math checks)
 - Stores in local records directory for use by analysis commands
 
