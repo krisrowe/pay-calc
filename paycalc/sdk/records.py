@@ -398,11 +398,28 @@ def validate_record(
             except (ValueError, TypeError):
                 errors.append(f"tax_year not a valid year: {tax_year}")
 
-    # Duplicate check (error)
-    if check_duplicate and meta.get("drive_file_id"):
-        existing = find_by_drive_id(meta["drive_file_id"])
-        if existing:
-            errors.append(f"duplicate: record with drive_file_id already exists (id={existing['id']})")
+    # Duplicate check (error) - content-based for stubs, drive_file_id for W-2s
+    if check_duplicate:
+        if record_type == "stub":
+            # Stub-level duplicate detection by document_id or content signature
+            pay_date = data.get("pay_date") if data else None
+            employer = data.get("employer") if data else None
+            document_id = data.get("document_id") if data else None
+            earnings_sig = _get_stub_content_signature(data) if data else None
+            year = meta.get("year")
+            party = meta.get("party")
+            if pay_date and employer and year and party:
+                existing = find_duplicate_stub(
+                    pay_date, employer, year, party,
+                    document_id=document_id, earnings_sig=earnings_sig
+                )
+                if existing:
+                    errors.append(f"duplicate: stub with same identity exists (id={existing['id']})")
+        elif record_type == "w2" and meta.get("drive_file_id"):
+            # W-2s still use drive_file_id (one W-2 per file)
+            existing = find_by_drive_id(meta["drive_file_id"])
+            if existing:
+                errors.append(f"duplicate: W-2 with drive_file_id already exists (id={existing['id']})")
 
     return errors, warnings
 
@@ -463,11 +480,15 @@ def get_records_dir() -> Path:
 def _generate_record_id(meta: Dict[str, Any]) -> str:
     """Generate a unique record ID from metadata.
 
-    Uses drive_file_id if available, otherwise hashes source_filename + imported_at.
+    Uses drive_file_id + source_page if available (for multi-page PDFs),
+    otherwise hashes source_filename + imported_at.
     Returns first 8 chars of hash for brevity.
     """
     if meta.get("drive_file_id"):
         content = meta["drive_file_id"]
+        # Include page number for multi-page PDFs
+        if meta.get("source_page"):
+            content += f"_page_{meta['source_page']}"
     else:
         content = f"{meta.get('source_filename', '')}{meta.get('imported_at', '')}"
 
@@ -707,6 +728,108 @@ def find_all_by_drive_id(drive_file_id: str) -> List[Dict[str, Any]]:
             continue
 
     return results
+
+
+def _get_stub_content_signature(data: Dict[str, Any]) -> str:
+    """Generate a signature from stub content for duplicate detection.
+
+    Uses Medicare taxable wages as the primary identifier - it represents
+    total compensation for the pay period and is universal across employers
+    and pay types. A stub with $0 Medicare taxable likely means all earnings
+    are zero (placeholder or year-end adjustment).
+
+    Falls back to first earning current_amount if Medicare data unavailable.
+    """
+    # Primary: Medicare taxable wages (universal, always present when there's real pay)
+    taxes = data.get("taxes", {})
+    medicare = taxes.get("medicare", {})
+    medicare_taxable = medicare.get("taxable_wages")
+    if medicare_taxable is not None:
+        return f"medicare_taxable:{medicare_taxable}"
+
+    # Fallback: first earning current amount
+    earnings = data.get("earnings", [])
+    if earnings:
+        e = earnings[0]
+        amount = e.get("current_amount", 0)
+        return f"first_earning:{amount}"
+
+    return ""
+
+
+def find_duplicate_stub(
+    pay_date: str,
+    employer: str,
+    year: str,
+    party: str,
+    document_id: Optional[str] = None,
+    earnings_sig: Optional[str] = None
+) -> Optional[Dict[str, Any]]:
+    """Find an existing stub that matches the given stub's identity.
+
+    This is the stub-level duplicate detection used to prevent importing
+    the same pay stub twice (even from different source files).
+
+    Matching logic:
+    1. If document_id is provided: match by document_id (most specific)
+    2. Otherwise: match by pay_date + employer + earnings_sig (content-based)
+
+    The earnings_sig captures the first few earnings types and amounts,
+    which distinguishes stubs on the same date (e.g., regular pay vs stock grant).
+
+    Args:
+        pay_date: The pay date (YYYY-MM-DD format)
+        employer: The employer name
+        year: The year for scoping the search
+        party: The party (him/her) for scoping the search
+        document_id: Optional document ID from the pay stub
+        earnings_sig: Optional earnings signature for content-based matching
+
+    Returns:
+        Matching record dict if found, None otherwise
+    """
+    records_dir = get_records_dir()
+    search_dir = records_dir / year / party
+
+    if not search_dir.exists():
+        return None
+
+    for json_file in search_dir.glob("*.json"):
+        try:
+            with open(json_file) as f:
+                record = json.load(f)
+
+            rec_data = record.get("data", {})
+            rec_meta = record.get("meta", {})
+
+            # Only check stubs (not W-2s or discarded)
+            if rec_meta.get("type") != "stub":
+                continue
+
+            # Primary match: document_id (most reliable)
+            if document_id and rec_data.get("document_id"):
+                if rec_data.get("document_id") == document_id:
+                    record["id"] = json_file.stem
+                    record["_path"] = str(json_file)
+                    return record
+                # If both have document_id but they differ, not a match
+                continue
+
+            # Fallback match: pay_date + employer + content_sig
+            # (for stubs without document_id)
+            if not document_id and not rec_data.get("document_id"):
+                rec_sig = _get_stub_content_signature(rec_data)
+                if (rec_data.get("pay_date") == pay_date and
+                    rec_data.get("employer") == employer and
+                    rec_sig == earnings_sig):
+                    record["id"] = json_file.stem
+                    record["_path"] = str(json_file)
+                    return record
+
+        except (json.JSONDecodeError, IOError):
+            continue
+
+    return None
 
 
 def remove_record(record_id: str) -> bool:
