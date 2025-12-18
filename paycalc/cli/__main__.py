@@ -383,10 +383,10 @@ def projection(year, party, input_file):
 
     \b
     Prerequisite: Run analysis first to generate the input file.
-        pay-calc analysis <year> <party> --cache
+        pay-calc analysis <year> <party>
 
     \b
-    Input:  YYYY_party_full.json (from analysis)
+    Input:  YYYY_party_pay_all.json (from analysis)
     Output: Year-end projection report
 
     Use this for mid-year tax planning when full W-2 data is not yet available.
@@ -403,14 +403,14 @@ def projection(year, party, input_file):
     if input_file:
         input_path = Path(input_file)
     else:
-        input_path = get_data_path() / f"{year}_{party}_full.json"
+        input_path = get_data_path() / f"{year}_{party}_pay_all.json"
 
     # Check if input file exists with clear guidance
     if not input_path.exists():
         click.echo(f"Error: Input file not found: {input_path}", err=True)
         click.echo("", err=True)
         click.echo("Run analysis first to generate the required input:", err=True)
-        click.echo(f"    pay-calc analysis {year} {party} --cache", err=True)
+        click.echo(f"    pay-calc analysis {year} {party}", err=True)
         click.echo("", err=True)
         click.echo("Then run projection again:", err=True)
         click.echo(f"    pay-calc projection {year} {party}", err=True)
