@@ -1,5 +1,6 @@
 """Stubs command group for managing pay stub JSON files."""
 
+import hashlib
 import json
 import shutil
 import zipfile
@@ -468,10 +469,35 @@ def get_stubs_dirs_for_filters(
     return results
 
 
+def estimate_missing_date(prev_date: datetime, next_date: datetime) -> str:
+    """Estimate a display date for a missing stub between two dates."""
+    # If gap is roughly 2 pay periods, show midpoint month
+    midpoint = prev_date + (next_date - prev_date) / 2
+    return f"{midpoint.year}-{midpoint.month:02d}-??"
+
+
+def get_stub_gross(stub: Dict[str, Any]) -> float:
+    """Extract gross pay from stub."""
+    if "pay_summary" in stub and "current" in stub["pay_summary"]:
+        return stub["pay_summary"]["current"].get("gross", 0.0)
+    elif "earnings" in stub:
+        for earning in stub.get("earnings", []):
+            if earning.get("type", "").lower() in ["gross pay", "gross"]:
+                return earning.get("current_amount", 0.0)
+    return 0.0
+
+
+def get_stub_id(stub_path: Path) -> str:
+    """Generate a short ID for a stub based on its path."""
+    # Use first 6 chars of MD5 hash of relative path from stubs dir
+    rel_path = str(stub_path)
+    hash_input = rel_path.encode()
+    return hashlib.md5(hash_input).hexdigest()[:6]
+
+
 @stubs.command("list")
 @click.argument("filters", nargs=-1)
-@click.option("--gaps", is_flag=True, help="Show gap analysis for pay periods")
-def stubs_list(filters: Tuple[str, ...], gaps: bool):
+def stubs_list(filters: Tuple[str, ...]):
     """List available pay stubs.
 
     FILTERS can be year (4 digits) and/or party (him/her) in any order.
@@ -484,8 +510,8 @@ def stubs_list(filters: Tuple[str, ...], gaps: bool):
       pay-calc stubs list 2025 her     # Just 2025/her
       pay-calc stubs list her 2025     # Same as above
 
-    Shows date, employer, gross pay, and validation status for each stub.
-    Use --gaps to identify missing pay periods.
+    Lists are grouped by party with stubs in date order.
+    Gaps in pay periods are shown inline as MISSING rows.
     """
     year, party = parse_year_party_filters(filters)
     dirs_to_scan = get_stubs_dirs_for_filters(year, party)
@@ -501,127 +527,143 @@ def stubs_list(filters: Tuple[str, ...], gaps: bool):
         click.echo(f"\nRun 'pay-calc stubs import <year> <party> <source>' to import stubs.")
         return
 
-    # Determine if we need to show year/party columns
-    show_year = year is None
-    show_party = party is None
-
-    # Build header
-    header_parts = []
-    if show_year:
-        header_parts.append(f"{'YEAR':<6}")
-    if show_party:
-        header_parts.append(f"{'PARTY':<6}")
-    header_parts.extend([f"{'DATE':<12}", f"{'EMPLOYER':<25}", f"{'GROSS':>12}", f"{'STATUS':<10}"])
-
-    # Calculate line width
-    line_width = sum(len(p) + 1 for p in header_parts)
-
-    # Print header
-    filter_desc = []
-    if year:
-        filter_desc.append(year)
-    if party:
-        filter_desc.append(party)
-    click.echo(f"Pay stubs{' for ' + '/'.join(filter_desc) if filter_desc else ''}:")
-    click.echo(" ".join(header_parts))
-    click.echo("-" * line_width)
-
-    all_stubs = []
+    # Collect all stubs grouped by (year, party)
+    by_year_party: Dict[Tuple[str, str], List[Dict[str, Any]]] = {}
     for scan_year, scan_party, stubs_dir in dirs_to_scan:
-        stub_files = sorted(stubs_dir.glob("*.json"))
-
-        for stub_path in stub_files:
+        key = (scan_year, scan_party)
+        by_year_party.setdefault(key, [])
+        for stub_path in stubs_dir.glob("*.json"):
             try:
                 stub = load_stub(stub_path)
-                all_stubs.append((scan_year, scan_party, stub))
-
-                pay_date = stub.get("pay_date", "unknown")
-                employer = stub.get("employer", "unknown")[:23]
-
-                # Get gross
-                gross = 0.0
-                if "pay_summary" in stub and "current" in stub["pay_summary"]:
-                    gross = stub["pay_summary"]["current"].get("gross", 0.0)
-                elif "earnings" in stub:
-                    for earning in stub.get("earnings", []):
-                        if earning.get("type", "").lower() in ["gross pay", "gross"]:
-                            gross = earning.get("current_amount", 0.0)
-                            break
-
-                # Validation
-                errors = validate_stub_schema(stub)
-                status = "OK" if not errors else "⚠️ " + errors[0][:15]
-
-                # Build row
-                row_parts = []
-                if show_year:
-                    row_parts.append(f"{scan_year:<6}")
-                if show_party:
-                    row_parts.append(f"{scan_party:<6}")
-                row_parts.extend([
-                    f"{pay_date:<12}",
-                    f"{employer:<25}",
-                    f"${gross:>11,.2f}",
-                    f"{status:<10}"
-                ])
-                click.echo(" ".join(row_parts))
-
+                stub["_path"] = stub_path
+                by_year_party[key].append(stub)
             except Exception as e:
-                row_parts = []
-                if show_year:
-                    row_parts.append(f"{scan_year:<6}")
-                if show_party:
-                    row_parts.append(f"{scan_party:<6}")
-                row_parts.extend([
-                    f"{stub_path.name:<12}",
-                    f"{'ERROR':<25}",
-                    f"{'':>12}",
-                    f"{str(e)[:15]}"
-                ])
-                click.echo(" ".join(row_parts))
+                # Store error stub for display
+                by_year_party[key].append({
+                    "_error": str(e),
+                    "_path": stub_path,
+                    "pay_date": stub_path.stem  # filename as date
+                })
 
-    click.echo("-" * line_width)
-    click.echo(f"Total: {len(all_stubs)} stubs")
+    # Sort each group by pay_date
+    for key in by_year_party:
+        by_year_party[key].sort(key=lambda s: s.get("pay_date", ""))
 
-    # Gap analysis (only meaningful for single party)
-    if gaps:
-        if party is None and len(set(p for _, p, _ in all_stubs)) > 1:
-            click.echo("\nNote: Gap analysis works best with a single party filter.")
+    # Display
+    total_stubs = 0
+    total_missing = 0
+    show_year = year is None
 
-        if len(all_stubs) >= 2:
-            click.echo("\nGap Analysis:")
+    for (grp_year, grp_party), stubs in sorted(by_year_party.items()):
+        if not stubs:
+            continue
 
-            # Group by party for gap analysis
-            by_party: Dict[str, List[datetime]] = {}
-            for _, p, stub in all_stubs:
-                if stub.get("pay_date"):
-                    by_party.setdefault(p, []).append(
-                        datetime.strptime(stub["pay_date"], "%Y-%m-%d")
+        # Header for this party group
+        header_label = f"{grp_year}/{grp_party}" if show_year else grp_party
+        click.echo(f"\n{header_label}")
+        click.echo("-" * 75)
+        click.echo(f"{'ID':<8} {'DATE':<12} {'STATUS':<10} {'EMPLOYER':<23} {'GROSS':>12}")
+
+        # Build list with gap detection
+        prev_date: Optional[datetime] = None
+        group_stubs = 0
+        group_missing = 0
+
+        # Check for gap at beginning of year
+        if stubs:
+            first_stub = stubs[0]
+            first_date_str = first_stub.get("pay_date", "")
+            try:
+                first_date = datetime.strptime(first_date_str, "%Y-%m-%d")
+                year_start = datetime(first_date.year, 1, 1)
+                days_from_start = (first_date - year_start).days
+                if days_from_start > 20:  # First stub is late
+                    missing_date = f"{first_date.year}-01-??"
+                    click.echo(
+                        f"{'--':<8} {missing_date:<12} "
+                        f"{click.style('MISSING', fg='red'):<19} "
+                        f"{'(gap at start: ' + str(days_from_start) + ' days)':<23} {'':>12}"
                     )
+                    group_missing += 1
+            except ValueError:
+                pass
 
-            for p, dates in sorted(by_party.items()):
-                if len(dates) < 2:
-                    continue
+        for stub in stubs:
+            # Parse current date
+            pay_date_str = stub.get("pay_date", "unknown")
+            curr_date: Optional[datetime] = None
+            try:
+                curr_date = datetime.strptime(pay_date_str, "%Y-%m-%d")
+            except ValueError:
+                pass
 
-                dates = sorted(dates)
-                gaps_found = []
-                for i in range(1, len(dates)):
-                    delta = (dates[i] - dates[i-1]).days
-                    if delta > 20:  # More than ~3 weeks suggests a gap
-                        gaps_found.append((dates[i-1], dates[i], delta))
+            # Check for gap before this stub
+            if prev_date and curr_date:
+                delta = (curr_date - prev_date).days
+                if delta > 20:  # Gap detected
+                    missing_date = estimate_missing_date(prev_date, curr_date)
+                    click.echo(
+                        f"{'--':<8} {missing_date:<12} "
+                        f"{click.style('MISSING', fg='red'):<19} "
+                        f"{'(gap: ' + str(delta) + ' days)':<23} {'':>12}"
+                    )
+                    group_missing += 1
 
-                if show_party:
-                    click.echo(f"  {p}:")
-                    prefix = "    "
-                else:
-                    prefix = "  "
+            # Get stub ID
+            stub_path = stub.get("_path")
+            stub_id = get_stub_id(stub_path) if stub_path else "------"
 
-                if gaps_found:
-                    click.echo(f"{prefix}⚠️ Potential gaps detected:")
-                    for prev_date, next_date, delta in gaps_found:
-                        click.echo(f"{prefix}  {prev_date.strftime('%Y-%m-%d')} → {next_date.strftime('%Y-%m-%d')} ({delta} days)")
-                else:
-                    click.echo(f"{prefix}✓ No significant gaps detected")
+            # Display this stub
+            if "_error" in stub:
+                click.echo(
+                    f"{stub_id:<8} {pay_date_str:<12} "
+                    f"{click.style('ERROR', fg='yellow'):<19} "
+                    f"{stub['_error'][:21]:<23} {'':>12}"
+                )
+            else:
+                employer = stub.get("employer", "unknown")[:21]
+                gross = get_stub_gross(stub)
+                errors = validate_stub_schema(stub)
+                status = click.style("OK", fg='green') if not errors else click.style("⚠️", fg='yellow')
+
+                click.echo(
+                    f"{stub_id:<8} {pay_date_str:<12} {status:<19} "
+                    f"{employer:<23} ${gross:>11,.2f}"
+                )
+                group_stubs += 1
+
+            prev_date = curr_date
+
+        # Check for gap at end (if last stub is old relative to today or year end)
+        if stubs and prev_date:
+            today = datetime.now()
+            year_end = datetime(prev_date.year, 12, 31)
+            # Use earlier of today or year end as reference
+            reference_date = min(today, year_end)
+            days_to_end = (reference_date - prev_date).days
+            if days_to_end > 20:  # Gap at end
+                missing_date = f"{prev_date.year}-{reference_date.month:02d}-??"
+                click.echo(
+                    f"{'--':<8} {missing_date:<12} "
+                    f"{click.style('MISSING', fg='red'):<19} "
+                    f"{'(gap at end: ' + str(days_to_end) + ' days)':<23} {'':>12}"
+                )
+                group_missing += 1
+
+        click.echo("-" * 75)
+        summary = f"{group_stubs} stubs"
+        if group_missing:
+            summary += click.style(f", {group_missing} missing", fg='red')
+        click.echo(summary)
+
+        total_stubs += group_stubs
+        total_missing += group_missing
+
+    # Grand total if multiple groups
+    if len(by_year_party) > 1:
+        click.echo(f"\nTotal: {total_stubs} stubs")
+        if total_missing:
+            click.echo(f"Total missing: {total_missing}")
 
 
 @stubs.command("export")
