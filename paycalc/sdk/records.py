@@ -1536,7 +1536,13 @@ def import_file_auto_all(
     page_count = _get_pdf_page_count(file_path)
     if page_count <= 1:
         # Single page - use standard import
-        return [import_file_auto(file_path, force=force, drive_file_id=drive_file_id)]
+        result = import_file_auto(file_path, force=force, drive_file_id=drive_file_id)
+        # Track single-page duplicates so we don't re-download
+        if (drive_file_id and
+            result.get("status") == "skipped" and
+            result.get("reason") == "duplicate"):
+            _save_tracking(file_path.name, drive_file_id, "all_duplicates")
+        return [result]
 
     # Multi-page PDF - split and process each page
     logger.debug(f"Multi-page PDF detected: {file_path.name} has {page_count} pages")
@@ -1562,6 +1568,15 @@ def import_file_auto_all(
             )
             result["page"] = page_num
             results.append(result)
+
+    # If all stubs were duplicates, save a tracking record so we don't re-download
+    if drive_file_id and results:
+        all_duplicates = all(
+            r.get("status") == "skipped" and r.get("reason") == "duplicate"
+            for r in results
+        )
+        if all_duplicates:
+            _save_tracking(file_path.name, drive_file_id, "all_duplicates")
 
     return results
 
@@ -1953,7 +1968,7 @@ def _save_tracking(
         - "discarded": File IS a pay stub but has actionable issues (unknown_party, parse_failed)
     """
     # Determine tracking type based on reason
-    if reason == "not_recognized":
+    if reason in ("not_recognized", "all_duplicates"):
         tracking_type = "unrelated"
     else:
         tracking_type = "discarded"

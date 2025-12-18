@@ -278,11 +278,7 @@ class TestImportEfficiency:
 
         Setup: 3 PDFs imported (1 single + 3 multi + 1 dupe = 4 unique stubs)
         Action: 4th PDF added to folder, run folder import again
-        Expected: Files with imported records are skipped, new file downloaded
-
-        NOTE: file_c (whose stub was skipped as duplicate) will be re-downloaded
-        because no record was saved with its drive_file_id. This is a known gap
-        in file-level tracking (see TODO: track skipped-as-duplicate files).
+        Expected: All previously processed files skipped, only new file downloaded
         """
         from paycalc.sdk import records
 
@@ -306,32 +302,28 @@ class TestImportEfficiency:
             ocr.reset()
             drive.set_folder(FOLDER_ID, DRIVE_FILES_WITH_NEW)
 
-            # Second import - files_a and file_b should be skipped (have records)
-            # file_c re-downloads because its stub was duplicate (no record saved)
-            # file_d is new, so it downloads
+            # Second import - all 3 original files skipped (tracked), only file_d downloaded
             stats2 = records.import_from_folder_auto(FOLDER_ID)
-            assert len(drive.download_calls) == 2, \
-                f"Expected 2 downloads (file_c re-download + file_d new), got {drive.download_calls}"
-            assert FILE_C_ID in drive.download_calls
+            assert len(drive.download_calls) == 1, \
+                f"Expected 1 download (only file_d), got {drive.download_calls}"
             assert FILE_D_ID in drive.download_calls
             assert stats2["imported"] == 1  # Only file_d's stub is new
-            # Skipped = 4 (file-level: 1 from file_a + 3 from file_b) + 1 (stub-level: file_c dupe)
+            # Skipped = 5 (file_a: 1 + file_b: 3 + file_c: 1 tracking record)
             assert stats2["skipped"] == 5
 
-    def test_folder_import_skips_imported_files(self, isolated_config):
-        """Scenario 2: Folder import skips files that have imported records.
+    def test_folder_import_skips_all_tracked_files(self, isolated_config):
+        """Scenario 2: Folder re-import skips ALL tracked files (no downloads).
 
         Setup: 3 PDFs imported (1 single + 3 multi + 1 dupe)
         Action: Run folder import again (same files, file_b "updated" on server)
-        Expected: Files with records (file_a, file_b) skipped, no new downloads for them
+        Expected: All files skipped at file-level, NO downloads
 
         Key behaviors:
-        - file_a, file_b: have imported records → skipped at file-level
-        - file_b update: NOT detected because file-level tracking skips it
-        - file_c: was stub-level duplicate, no record saved → re-downloads
+        - file_a, file_b: have imported records → skipped
+        - file_c: has tracking record (all-duplicate stubs) → skipped
+        - file_b update: NOT detected (file-level tracking skips it)
 
-        NOTE: file_c re-downloading is a known gap - files whose stubs are all
-        duplicates don't get tracked. This is a known limitation.
+        To detect server-side updates, use targeted import: `records import file <id>`
         """
         from paycalc.sdk import records
 
@@ -353,15 +345,12 @@ class TestImportEfficiency:
             ocr.reset()
             drive.set_file_data(FILE_B_ID, "file_b_multi4")  # Now has 4 stubs
 
-            # Folder import - file_a and file_b skipped (have records)
-            # file_c re-downloads (no record because stub was duplicate)
+            # Folder import - ALL files skipped (all tracked)
             stats2 = records.import_from_folder_auto(FOLDER_ID)
-            assert len(drive.download_calls) == 1, \
-                f"Expected 1 download (file_c re-download), got {drive.download_calls}"
-            assert FILE_C_ID in drive.download_calls
-            assert FILE_B_ID not in drive.download_calls  # Key assertion: update not detected
-            assert stats2["imported"] == 0  # file_c stub is still a duplicate
-            # Skipped = 4 (file-level: file_a + file_b) + 1 (stub-level: file_c)
+            assert len(drive.download_calls) == 0, \
+                f"Expected 0 downloads (all tracked), got {drive.download_calls}"
+            assert stats2["imported"] == 0
+            # Skipped = 5 (file_a: 1 + file_b: 3 + file_c: 1 tracking)
             assert stats2["skipped"] == 5
 
     def test_targeted_file_import_reprocesses(self, isolated_config):
