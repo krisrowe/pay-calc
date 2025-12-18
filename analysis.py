@@ -1044,16 +1044,22 @@ def print_text_report(report: Dict[str, Any]):
     print("\nFinal YTD Totals:")
     ytd = summary['final_ytd']
     contrib_401k = report.get("contributions_401k", {}).get("yearly_totals", {})
+    employee_401k = contrib_401k.get("pretax", 0) + contrib_401k.get("aftertax", 0)
+    employer_401k = contrib_401k.get("employer", 0)
     total_401k = contrib_401k.get("total", 0)
     total_comp = ytd['gross'] + total_401k
-    print(f"  Gross:              ${ytd['gross']:>12,.2f}")
-    print(f"  Total Compensation: ${total_comp:>12,.2f}  (Gross + All 401k)")
+    print(f"  Gross Pay:          ${ytd['gross']:>12,.2f}")
+    print(f"  + Employee 401k:    ${employee_401k:>12,.2f}")
+    print(f"  + Employer 401k:    ${employer_401k:>12,.2f}")
+    print(f"  {'─' * 18} {'─' * 13}")
+    print(f"  Total Compensation: ${total_comp:>12,.2f}")
+    print()
     print(f"  FIT Taxable Wages:  ${ytd['fit_taxable_wages']:>12,.2f}")
     print(f"  Taxes Withheld:     ${ytd['taxes']:>12,.2f}")
     print(f"  Net Pay:            ${ytd['net_pay']:>12,.2f}")
 
-    # YTD Breakdown (only if no errors / continuity is good)
-    if not errors and ytd_breakdown:
+    # YTD Breakdown (always show if available - YTD comes from final stubs, not dependent on continuity)
+    if ytd_breakdown:
         print("\n" + "-" * 60)
         print("YTD EARNINGS BREAKDOWN:")
         earnings = ytd_breakdown.get("earnings", {})
@@ -1315,7 +1321,7 @@ def main():
         "totals_validation": totals_comparison,
         "contributions_401k": generate_401k_contributions(all_stubs),
         "imputed_income": generate_imputed_income_summary(all_stubs),
-        "ytd_breakdown": generate_ytd_breakdown(all_stubs) if not errors else None,
+        "ytd_breakdown": generate_ytd_breakdown(all_stubs),
         "stubs": all_stubs
     }
 
@@ -1331,11 +1337,8 @@ def main():
     data_dir.mkdir(parents=True, exist_ok=True)
 
     output_file = data_dir / f"{year}_{party}_full.json"
-    report_with_breakdown = report.copy()
-    if report["ytd_breakdown"] is None:
-        report_with_breakdown["ytd_breakdown"] = generate_ytd_breakdown(all_stubs)
     with open(output_file, "w") as f:
-        json.dump(report_with_breakdown, f, indent=2)
+        json.dump(report, f, indent=2)
     log(f"\nFull data saved to: {output_file}")
 
     # Save 401k contributions to separate file for easy reference

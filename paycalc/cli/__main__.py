@@ -349,7 +349,7 @@ def analysis(year, party, through_date, output_format):
         "totals_validation": totals_comparison,
         "contributions_401k": generate_401k_contributions(all_stubs),
         "imputed_income": generate_imputed_income_summary(all_stubs),
-        "ytd_breakdown": generate_ytd_breakdown(all_stubs) if not errors else None,
+        "ytd_breakdown": generate_ytd_breakdown(all_stubs),
         "stubs": all_stubs
     }
 
@@ -363,10 +363,6 @@ def analysis(year, party, through_date, output_format):
     data_dir = get_data_path()
     data_dir.mkdir(parents=True, exist_ok=True)
     output_file = data_dir / f"{year}_{party}_pay_all.json"
-
-    # Always include ytd_breakdown in saved file
-    if report["ytd_breakdown"] is None:
-        report["ytd_breakdown"] = generate_ytd_breakdown(all_stubs)
 
     with open(output_file, "w") as f:
         json.dump(report, f, indent=2)
