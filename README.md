@@ -26,9 +26,9 @@ pay-calc records show <id>                # Show record details
 pay-calc records remove <id>              # Remove a record
 
 # Analysis and projection
-pay-calc pay-analysis 2025 --cache    # Process pay stubs (reads from local records)
-pay-calc pay-projection 2025          # Project year-end (requires pay-analysis first)
-pay-calc tax-projection 2024          # Generate tax projection
+pay-calc analysis 2025 him            # Validate stubs, extract YTD totals
+pay-calc projection 2025 him          # Project year-end (requires analysis first)
+pay-calc taxes 2024                   # Calculate tax liability from W-2s or analysis
 
 # Profile management
 pay-calc profile show                 # Show profile location, validation, feature readiness
@@ -77,10 +77,18 @@ Records are stored in: `~/.local/share/pay-calc/records/<year>/<party>/<hash>.js
 
 ### Stage 2: Analyze Pay Stubs
 
-The `pay-analysis` command reads the imported JSON records (not PDFs directly), validates continuity, and produces an aggregated summary:
+The `analysis` command reads the imported JSON records (not PDFs directly), validates continuity, and produces an aggregated summary.
+
+**Goal:** Extract accurate year-end totals from pay stub YTD values while validating data completeness.
+
+**How it works:**
+- **Year totals come from YTD values of the most recent stub** - the final stub's YTD is the source of truth for gross pay, taxes withheld, FIT taxable wages, etc.
+- **Earlier stubs validate completeness** - they ensure an unbroken pay history with no missing periods
+- **Intermediate stubs track timing details** - when 401k contributions were made (for IRS limit tracking), when RSUs vested, when bonuses paid
+- **Gap detection** warns if stubs are missing or if you don't have the latest/final stub
 
 ```bash
-pay-calc pay-analysis 2025 --cache
+pay-calc analysis 2025 him
 ```
 
 ### Stage 3: Tax Projection
@@ -97,9 +105,9 @@ pay-calc tax-projection 2024
 |---------|------------------|-------|--------|
 | `records import` | Convert PDFs to JSON | Drive folder or local folder | Local JSON records |
 | `records list` | View imported records | Local JSON records | Table display |
-| `pay-analysis` | Validate stubs, report YTD | Local JSON records | `YYYY_party_full.json` |
-| `pay-projection` | Project year-end totals | Analysis output | Projection report |
-| `tax-projection` | Calculate tax liability | W-2 JSON or analysis output | `YYYY_tax_projection.csv` |
+| `analysis` | Validate stubs, extract YTD totals | Local JSON records | `YYYY_party_pay_all.json` |
+| `projection` | Project year-end totals | Analysis output | Projection report |
+| `taxes` | Calculate tax liability | W-2 JSON or analysis output | `YYYY_tax_projection.csv` |
 
 ### Command Details
 
@@ -111,24 +119,27 @@ Downloads PDFs from Google Drive or local folders, extracts structured data, val
 - Validates extracted data (schema, math checks)
 - Stores in local records directory for use by analysis commands
 
-**`pay-analysis`** - Pay stub analysis (single party)
+**`analysis`** - Pay stub analysis (single party)
 
-Multi-level validation:
-- **Completeness**: Detects gaps in pay history (missing pay periods)
-- **Consistency**: Validates current amounts vs YTD increases
-- **Continuity**: Detects employer changes and YTD resets
+**Goal:** Extract accurate year totals from the most recent stub's YTD values, while validating data completeness.
+
+- **Year totals from final stub YTD** - gross, taxes, FIT taxable wages all come from YTD of most recent stub
+- **Completeness validation** - detects gaps in pay history (missing pay periods)
+- **Consistency checks** - validates current amounts vs YTD increases
+- **Continuity tracking** - detects employer changes and YTD resets
+- **Timing details** - tracks when 401k contributions, RSU vests, and bonuses occurred
 
 Reads from local records (imported via `records import`) and produces aggregated output.
 
-**`pay-projection`** - Year-end projection from partial year data
+**`projection`** - Year-end projection from partial year data
 
-Reads the JSON output from `pay-analysis` and projects year-end totals:
+Reads the JSON output from `analysis` and projects year-end totals:
 - Analyzes regular pay cadence to project remaining pay periods
 - Detects stock vesting pattern to project remaining vests
 - Projects 401k contributions to annual limit
 - Estimates tax withholding based on effective rate
 
-**`tax-projection`** - Federal tax calculation
+**`taxes`** - Federal tax calculation
 - Loads W-2 data for both parties (him + her)
 - Falls back to analysis output if W-2s not available (mid-year projections)
 - Applies tax brackets, calculates liability, determines refund/owed

@@ -732,12 +732,18 @@ def validate_year_totals(stubs: List[Dict[str, Any]]) -> Tuple[List[str], List[s
 
 def generate_401k_contributions(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Generate 401k contributions breakdown by month.
+    Generate 401k contributions from YTD values of final stubs.
+
+    Uses YTD values from the last stub of each employer segment to get
+    accurate totals regardless of how many intermediate stubs are available.
 
     Tracks:
     - Pre-tax employee contributions (traditional 401k)
     - After-tax employee contributions (mega backdoor Roth)
     - Employer match
+
+    Also tracks monthly breakdown from available stubs (may be incomplete
+    if intermediate stubs are missing).
 
     Combines across all employer segments.
     """
@@ -746,19 +752,45 @@ def generate_401k_contributions(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
     from collections import defaultdict
 
-    # Track by month: {month_num: {pretax, aftertax, employer}}
-    monthly = defaultdict(lambda: {"pretax": 0.0, "aftertax": 0.0, "employer": 0.0})
+    # Get employer segments and extract YTD from final stub of each
+    segments = detect_employer_segments(stubs)
 
-    # Track previous YTD for employer match delta calculation
+    # Yearly totals from final stub YTD (source of truth)
+    yearly_totals = {"pretax": 0.0, "aftertax": 0.0, "employer": 0.0, "total": 0.0}
+
+    for segment in segments:
+        if not segment:
+            continue
+        last_stub = segment[-1]
+
+        for d in last_stub.get("deductions", []):
+            dtype = d.get("type", "")
+            ytd = d.get("ytd_amount", 0)
+
+            if dtype == "K Pretax":
+                yearly_totals["pretax"] += ytd
+                # Employer match YTD (if available)
+                employer_ytd = d.get("employer_match_ytd", 0)
+                yearly_totals["employer"] += employer_ytd
+            elif dtype == "K AT":
+                yearly_totals["aftertax"] += ytd
+
+    yearly_totals["total"] = (
+        yearly_totals["pretax"] +
+        yearly_totals["aftertax"] +
+        yearly_totals["employer"]
+    )
+
+    # Monthly breakdown from available stubs (informational, may be incomplete)
+    monthly = defaultdict(lambda: {"pretax": 0.0, "aftertax": 0.0, "employer": 0.0})
     prev_employer_ytd = 0.0
-    prev_month = None
 
     for stub in stubs:
         pay_date = stub.get("pay_date", "")
         if not pay_date:
             continue
 
-        month = int(pay_date[5:7])  # Extract month from YYYY-MM-DD
+        month = int(pay_date[5:7])
 
         for d in stub.get("deductions", []):
             dtype = d.get("type", "")
@@ -766,20 +798,15 @@ def generate_401k_contributions(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
 
             if dtype == "K Pretax":
                 monthly[month]["pretax"] += current
-                # Track employer match via YTD delta
                 employer_ytd = d.get("employer_match_ytd", 0)
                 if employer_ytd > prev_employer_ytd:
-                    # Attribute the delta to current month
                     delta = employer_ytd - prev_employer_ytd
                     monthly[month]["employer"] += delta
                     prev_employer_ytd = employer_ytd
             elif dtype == "K AT":
                 monthly[month]["aftertax"] += current
 
-    # Build result with monthly and yearly totals
     months_data = {}
-    yearly_totals = {"pretax": 0.0, "aftertax": 0.0, "employer": 0.0, "total": 0.0}
-
     for month in range(1, 13):
         m = monthly[month]
         total = m["pretax"] + m["aftertax"] + m["employer"]
@@ -789,10 +816,6 @@ def generate_401k_contributions(stubs: List[Dict[str, Any]]) -> Dict[str, Any]:
             "employer": m["employer"],
             "total": total
         }
-        yearly_totals["pretax"] += m["pretax"]
-        yearly_totals["aftertax"] += m["aftertax"]
-        yearly_totals["employer"] += m["employer"]
-        yearly_totals["total"] += total
 
     return {
         "by_month": months_data,
