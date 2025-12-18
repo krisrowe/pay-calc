@@ -20,15 +20,13 @@ pay-calc pay-analysis 2025 --cache    # Process pay stubs (single party)
 pay-calc pay-projection 2025          # Project year-end (requires pay-analysis first)
 pay-calc household-ytd 2025           # Aggregate YTD across all parties
 
-# Configuration management
-pay-calc config path                  # Show config paths and active profile
-pay-calc config set-profile <path>    # Point to profile in your config repo
-pay-calc config show                  # Show machine settings (settings.json)
-
-# Profile management (your personal data)
-pay-calc profile show                 # Show active profile (profile.yaml)
-pay-calc profile init                 # Create new profile
+# Profile management
+pay-calc profile show                 # Show profile location, validation, feature readiness
+pay-calc profile use <path>           # Point to profile in your config repo
+pay-calc profile get <key>            # Get profile value
 pay-calc profile set <key> <value>    # Set profile value (e.g., Drive folder IDs)
+pay-calc profile import <path>        # Copy external profile to central location
+pay-calc profile export <path>        # Export current profile to external location
 ```
 
 ## Command Inventory
@@ -40,6 +38,8 @@ pay-calc profile set <key> <value>    # Set profile value (e.g., Drive folder ID
 | `pay-analysis` | Validate pay stubs, report YTD | Pay stub PDFs from Drive | `YYYY_pay_stubs_full.json` | Single |
 | `pay-projection` | Project year-end totals | `YYYY_pay_stubs_full.json` | Projection report | Single |
 | `household-ytd` | Aggregate YTD across parties | `YYYY_party_pay_stubs.json` | `YYYY_party_ytd.json` | Both (per-party + combined) |
+
+> **⚠️ Workflow Gap:** `pay-analysis` outputs `_pay_stubs_full.json` but `household-ytd` expects `_party_pay_stubs.json`. These formats are incompatible. Currently, `household-ytd` requires running the legacy `extract_pay_stub.py` script (not a CLI command) to produce its input. See TODO.md for fix plan.
 
 ### Command Details
 
@@ -107,28 +107,22 @@ pay-calc pay-projection 2025
 YEAR-END (W-2 available):
   W-2 PDFs ──► w2-extract ──► YYYY_party_w2_forms.json ──► tax-projection ──► CSV
 
-MID-YEAR (no W-2 yet):
+MID-YEAR (no W-2 yet) - CURRENT STATE (broken):
+  Pay stub PDFs ──► pay-analysis ──► YYYY_pay_stubs_full.json ──► ??? (dead end)
+
+MID-YEAR (no W-2 yet) - LEGACY WORKAROUND:
   Pay stub PDFs ──► extract_pay_stub.py ──► YYYY_party_pay_stubs.json
-                                                    │
-                                                    ▼
-                                            household-ytd
-                                                    │
-                                                    ▼
-                                          YYYY_party_ytd.json ──► tax-projection ──► CSV
-                                                                    (fallback input)
+                    (not a CLI command)              │
+                                                     ▼
+                                             household-ytd
+                                                     │
+                                                     ▼
+                                           YYYY_party_ytd.json ──► tax-projection ──► CSV
 ```
 
+> **Note:** The mid-year workflow is currently broken. `pay-analysis` output is not consumed by downstream commands. Use legacy `extract_pay_stub.py` until this is fixed.
+
 ## Configuration
-
-Configuration is split into two files:
-
-### settings.json (Machine-specific)
-
-Located in `~/.config/pay-calc/settings.json`. Contains:
-- `profile`: Path to your profile.yaml (if not in default location)
-- Tool preferences (output format, etc.)
-
-These are ephemeral settings that can be recreated easily.
 
 ### profile.yaml (Your personal data)
 
@@ -137,6 +131,13 @@ Contains your private configuration:
 - `parties`: him/her definitions with employer keywords
 
 This data is consequential - store it in a config repo you control.
+
+### settings.json (Machine-specific, auto-managed)
+
+Located in `~/.config/pay-calc/settings.json`. Automatically managed by CLI:
+- `profile`: Path to your profile.yaml (set via `pay-calc profile use`)
+
+You typically don't edit this file directly.
 
 ### Profile Resolution Order
 
@@ -149,18 +150,24 @@ This data is consequential - store it in a config repo you control.
 If you keep your profile in a separate config repo:
 
 ```bash
-# Create profile in your config repo
-pay-calc profile init --path ~/repos/my-config/pay-calc/profile.yaml
+# Create profile manually or copy from example
+cp config.yaml.example ~/repos/my-config/pay-calc/profile.yaml
+# Edit with your Drive folder IDs, employer config, etc.
 
 # Point pay-calc to use it
-pay-calc config set-profile ~/repos/my-config/pay-calc/profile.yaml
+pay-calc profile use ~/repos/my-config/pay-calc/profile.yaml
 
 # Verify
-pay-calc config path
+pay-calc profile show
 ```
 
 This writes the path to `~/.config/pay-calc/settings.json`, so it works
 from any directory without environment variables.
+
+To copy an existing profile to a config repo:
+```bash
+pay-calc profile export ~/repos/my-config/pay-calc/profile.yaml --set-path
+```
 
 ### Data Paths (XDG Base Directory Spec)
 
@@ -351,28 +358,25 @@ pip install PyPDF2 PyYAML
 
 ---
 
-## Future Considerations
+## Known Issues
 
-### Workflow Integration
+### Workflow Gap (Mid-Year Tax Projection)
 
-**`pay-analysis` output is disconnected:**
-- Currently outputs `_pay_stubs_full.json` (single consolidated file)
-- This format is not consumed by `household-ytd` or `tax-projection`
-- `household-ytd` expects `_party_pay_stubs.json` (per-party files)
+The mid-year workflow is broken. See "Data Flow" section above and TODO.md for details.
 
-**Options to consider:**
-1. Have `pay-analysis` output per-party `_pay_stubs.json` files
-2. Enhance `household-ytd` to also accept `_pay_stubs_full.json` (would require party breakdown in that format)
-3. Keep workflows separate (Drive-based vs local-file-based)
+**Summary:** `pay-analysis` and `household-ytd` use incompatible file formats. Fix requires merging `extract_pay_stub.py` functionality into `analysis.py`.
 
 ### Standalone Scripts
 
 Several standalone Python scripts exist alongside CLI commands:
-- `extract_pay_stub.py` - Single PDF processor (outputs `_party_pay_stubs.json`)
-- `calc_ytd.py` - YTD aggregation (now wrapped by `household-ytd` command)
-- `analysis.py` - Full year pay stub processor (called by `pay-analysis`)
-- `projection.py` - Year-end projection (called by `pay-projection`)
-- `generate_tax_projection.py` - Tax calculation (called by `tax-projection`)
+
+| Script | CLI Wrapper | Notes |
+|--------|-------------|-------|
+| `analysis.py` | `pay-analysis` | Hardcodes "employer_a" processor |
+| `projection.py` | `pay-projection` | Works |
+| `calc_ytd.py` | `household-ytd` | Works, but input not produced by CLI |
+| `extract_pay_stub.py` | None | Legacy, uses old config schema |
+| `generate_tax_projection.py` | `tax-projection` | Works |
 
 These may eventually be fully integrated into the CLI/SDK structure.
 

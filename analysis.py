@@ -29,6 +29,71 @@ sys.path.insert(0, str(Path(__file__).parent))
 from processors import get_processor
 
 
+def validate_stub_numbers(stub: Dict[str, Any]) -> List[str]:
+    """Validate that pay stub numbers are consistent and add up correctly.
+
+    Returns list of validation errors (empty if valid).
+    """
+    errors = []
+
+    # Get values from stub structure
+    gross = 0.0
+    net_pay = stub.get("net_pay", 0) or 0
+    federal_tax = 0.0
+    ss_tax = 0.0
+    medicare_tax = 0.0
+    total_deductions = 0.0
+
+    # Extract gross from pay_summary or earnings
+    if "pay_summary" in stub and "current" in stub["pay_summary"]:
+        gross = stub["pay_summary"]["current"].get("gross", 0) or 0
+    elif "earnings" in stub:
+        for earning in stub.get("earnings", []):
+            if earning.get("type", "").lower() in ["gross pay", "gross"]:
+                gross = earning.get("current_amount", 0) or 0
+                break
+
+    # Extract taxes
+    if "taxes" in stub:
+        taxes = stub["taxes"]
+        if "federal_income" in taxes:
+            federal_tax = taxes["federal_income"].get("current", 0) or 0
+        if "social_security" in taxes:
+            ss_tax = taxes["social_security"].get("current", 0) or 0
+        if "medicare" in taxes:
+            medicare_tax = taxes["medicare"].get("current", 0) or 0
+
+    # Sum deductions
+    for deduction in stub.get("deductions", []):
+        amount = deduction.get("current_amount", 0) or 0
+        total_deductions += abs(amount)
+
+    # Validate required fields have values
+    if not gross or gross <= 0:
+        errors.append("Missing or invalid gross pay")
+    if not net_pay or net_pay <= 0:
+        errors.append("Missing or invalid net pay")
+
+    # Validate net pay roughly equals gross - taxes - deductions
+    # Allow for some tolerance due to rounding
+    if gross > 0 and net_pay > 0:
+        total_taxes = federal_tax + ss_tax + medicare_tax
+        expected_net = gross - total_taxes - total_deductions
+        tolerance = max(gross * 0.05, 10)  # 5% or $10, whichever is larger
+
+        if abs(net_pay - expected_net) > tolerance:
+            errors.append(
+                f"Net pay ${net_pay:,.2f} doesn't match expected ${expected_net:,.2f} "
+                f"(gross ${gross:,.2f} - taxes ${total_taxes:,.2f} - deductions ${total_deductions:,.2f})"
+            )
+
+    # Validate net < gross
+    if net_pay > gross and gross > 0:
+        errors.append(f"Net pay ${net_pay:,.2f} exceeds gross pay ${gross:,.2f}")
+
+    return errors
+
+
 def extract_with_gemini_ocr(pdf_path: str) -> Optional[Dict[str, Any]]:
     """Extract pay stub data from image-based PDF using Gemini CLI.
 
@@ -44,30 +109,35 @@ def extract_with_gemini_ocr(pdf_path: str) -> Optional[Dict[str, Any]]:
         print("  Warning: gemini CLI not found, cannot OCR image-based PDF")
         return None
 
-    # Copy to /tmp to avoid gitignore issues
+    # Copy to /tmp to avoid gitignore issues with cache dirs
     tmp_path = f"/tmp/paycalc_ocr_{Path(pdf_path).name}"
     shutil.copy(pdf_path, tmp_path)
 
-    prompt = '''Read this PDF and extract pay stub data. Return ONLY valid JSON (no markdown) with these fields:
-{
+    # Prompt asks Gemini to analyze the PDF image and return structured data
+    prompt = f'''Analyze the pay stub document at {tmp_path} and extract the financial data.
+
+Return ONLY a valid JSON object (no markdown code blocks, no explanation) with these exact fields:
+{{
   "pay_date": "YYYY-MM-DD",
-  "period": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"},
-  "employer": "string",
-  "gross_pay": number,
-  "net_pay": number,
-  "federal_income_tax_withheld": number,
-  "social_security_withheld": number,
-  "medicare_withheld": number,
-  "ytd_gross": number,
-  "ytd_federal_withheld": number,
-  "ytd_social_security": number,
-  "ytd_medicare": number
-}'''
+  "period": {{"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"}},
+  "employer": "company name",
+  "gross_pay": 0.00,
+  "net_pay": 0.00,
+  "federal_income_tax_withheld": 0.00,
+  "social_security_withheld": 0.00,
+  "medicare_withheld": 0.00,
+  "state_tax_withheld": 0.00,
+  "ytd_gross": 0.00,
+  "ytd_federal_withheld": 0.00,
+  "ytd_social_security": 0.00,
+  "ytd_medicare": 0.00
+}}
+
+All number fields must be numeric values (not strings). Dates must be in YYYY-MM-DD format.'''
 
     try:
         result = subprocess.run(
-            ["gemini", "--allowed-mcp-server-names", "none", "--include-directories", "/tmp", "-o", "text",
-             f"Read {tmp_path} and extract pay stub data. {prompt}"],
+            ["gemini", "--allowed-mcp-server-names", "none", "--include-directories", "/tmp", "-o", "text", prompt],
             capture_output=True,
             text=True,
             timeout=120
@@ -75,11 +145,22 @@ def extract_with_gemini_ocr(pdf_path: str) -> Optional[Dict[str, Any]]:
 
         output = result.stdout.strip()
 
+        # Debug: show raw output if it doesn't look like JSON
+        if not output.startswith("{") and not "```" in output:
+            print(f"  Debug: Gemini raw output: {output[:200]}...")
+
         # Extract JSON from response (may have markdown backticks)
         if "```json" in output:
             output = output.split("```json")[1].split("```")[0].strip()
         elif "```" in output:
             output = output.split("```")[1].split("```")[0].strip()
+
+        # Try to find JSON object in output
+        if not output.startswith("{"):
+            start = output.find("{")
+            end = output.rfind("}") + 1
+            if start >= 0 and end > start:
+                output = output[start:end]
 
         data = json.loads(output)
 
@@ -97,7 +178,8 @@ def extract_with_gemini_ocr(pdf_path: str) -> Optional[Dict[str, Any]]:
             "taxes": {
                 "federal_income": {"current": data.get("federal_income_tax_withheld", 0), "ytd": data.get("ytd_federal_withheld", 0)},
                 "social_security": {"current": data.get("social_security_withheld", 0), "ytd": data.get("ytd_social_security", 0)},
-                "medicare": {"current": data.get("medicare_withheld", 0), "ytd": data.get("ytd_medicare", 0)}
+                "medicare": {"current": data.get("medicare_withheld", 0), "ytd": data.get("ytd_medicare", 0)},
+                "state": {"current": data.get("state_tax_withheld", 0), "ytd": 0}
             },
             "deductions": [],
             "pay_summary": {
@@ -109,6 +191,13 @@ def extract_with_gemini_ocr(pdf_path: str) -> Optional[Dict[str, Any]]:
             "_ocr": True
         }
 
+        # Validate the extracted numbers
+        validation_errors = validate_stub_numbers(stub)
+        if validation_errors:
+            print(f"  Warning: OCR validation issues for {Path(pdf_path).name}:")
+            for err in validation_errors:
+                print(f"    - {err}")
+
         # Clean up temp file
         Path(tmp_path).unlink(missing_ok=True)
 
@@ -119,6 +208,8 @@ def extract_with_gemini_ocr(pdf_path: str) -> Optional[Dict[str, Any]]:
         return None
     except json.JSONDecodeError as e:
         print(f"  Warning: Could not parse Gemini OCR output as JSON: {e}")
+        if 'output' in locals():
+            print(f"  Debug: Output was: {output[:500]}...")
         return None
     except Exception as e:
         print(f"  Warning: Gemini OCR failed: {e}")

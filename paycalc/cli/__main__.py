@@ -12,6 +12,7 @@ from paycalc.sdk import ConfigNotFoundError
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from .profile_commands import profile as profile_group
+from .stubs_commands import stubs as stubs_group
 
 
 @click.group()
@@ -34,8 +35,9 @@ def cli():
     pass
 
 
-# Add profile subcommand group
+# Add subcommand groups
 cli.add_command(profile_group)
+cli.add_command(stubs_group)
 
 
 @cli.command("w2-extract")
