@@ -16,6 +16,7 @@ from .stubs_commands import stubs as stubs_group
 from .records_commands import records_cli as records_group
 from .settings_commands import settings as settings_group
 from .rsus_commands import rsus as rsus_group
+from .withhold_commands import withhold as withhold_group
 
 
 @click.group()
@@ -44,6 +45,7 @@ cli.add_command(settings_group)
 cli.add_command(stubs_group)
 cli.add_command(records_group, name="records")
 cli.add_command(rsus_group)
+cli.add_command(withhold_group)
 
 
 @cli.command("w2-extract")
