@@ -140,26 +140,39 @@ pay-calc tax-projection 2024
 Downloads PDFs from Google Drive or local folders, extracts structured data, validates, and stores as JSON:
 - Text-based PDFs: Uses PyPDF2 and pattern matching to extract data
 - Image-based PDFs: Uses Gemini OCR for extraction
-- **Multi-page PDFs:** Each page is processed separately, creating one JSON record per logical pay stub
-  - A quarterly payroll PDF with 12 pages creates 12 individual record files
-  - This enables accurate pattern detection for projections (RSU vesting frequency, pay cadence)
+- **Multi-page PDFs:** Extracts one JSON record per logical document (pay stub or W-2)
+  - A quarterly payroll PDF with 12 pay stubs creates 12 individual record files
+  - Pages without meaningful data are not tracked separately
 - Validates extracted data (schema, math checks)
 - Stores in local records directory for use by analysis commands
 
-**Duplicate Detection (Two-Tier Design):**
+**Tracking Model:**
 
-The import system uses two levels of duplicate detection to balance efficiency with correctness:
+The import system tracks files and documents at the appropriate level:
 
-1. **File-level tracking** (for folder imports): Skips files already processed based on Drive file ID. This makes incremental imports fast—re-running `records import` only processes new files.
+1. **File-level tracking**: For files that can't be processed (unrelated, unreadable), one tracking record is created per file. This prevents re-downloading files we've already determined are not useful.
 
-2. **Stub-level detection** (content-based): Prevents importing the same pay stub twice even from different source files. A stub's identity is:
-   - `pay_date` - when you were paid
-   - `employer` - who paid you
-   - `Medicare taxable wages` - total compensation for that pay period
+2. **Document-level records**: For processable files, one JSON record per actual document (pay stub or W-2). A multi-page PDF creates multiple records only if it contains multiple documents.
 
-   Medicare taxable wages is the key distinguisher—it's universal across all employers and pay types, and uniquely identifies same-day stubs (e.g., regular pay vs stock grant have different Medicare taxable amounts).
+3. **Document identity** (for duplicate detection):
+   - `document_id` - unique ID from the document itself (if available)
+   - `pay_date` + `employer` + `Medicare taxable wages` - content-based fallback
 
-**Recovery workflow:** To re-import a specific file (bypassing file-level tracking), use `records import <file-id>`. This uses stub-level detection to avoid duplicates while allowing re-extraction.
+   Medicare taxable wages uniquely identifies same-day stubs (e.g., regular pay vs stock grant have different amounts).
+
+4. **Record IDs** (filenames and display):
+
+   Record IDs are content-based hashes: `hash(type + document_id/medicare_wages + date)`. This means:
+   - Same stub → same ID, regardless of import source or when imported
+   - New imports get content-based filenames
+
+   The `records list` command **regenerates IDs from JSON data** rather than using filenames. This is intentional:
+   - **Data integrity**: Displayed ID reflects actual content, not storage location
+   - **Backward compatibility**: Older records may have filenames from previous ID logic (e.g., based on `drive_file_id + page`). By recomputing at display time, old and new records display consistently, enabling baseline comparisons across tool versions.
+
+   **Note**: Filenames are NOT guaranteed stable across tool versions. The displayed ID is the canonical identifier.
+
+**Recovery workflow:** To re-import a specific file (bypassing file-level tracking), use `records import <file-path>`. This uses document-level detection to avoid duplicates while allowing re-extraction.
 
 **`analysis`** - Pay stub analysis (single party)
 
@@ -203,11 +216,25 @@ Located in `~/.config/pay-calc/settings.json`. Automatically managed by CLI:
 
 You typically don't edit this file directly.
 
+### Environment Variables
+
+| Variable | Purpose |
+|----------|---------|
+| `PAY_CALC_CONFIG_PATH` | Override profile.yaml location |
+| `PAY_CALC_DATA` | Override data directory (records, output files) |
+| `LOG_LEVEL` | Set logging verbosity (DEBUG, INFO, WARNING, ERROR) |
+
 ### Profile Resolution Order
 
 1. `PAY_CALC_CONFIG_PATH` environment variable (if set)
 2. `settings.json` → `profile` key (if set via CLI)
 3. `~/.config/pay-calc/profile.yaml` (XDG default)
+
+### Data Directory Resolution Order
+
+1. `PAY_CALC_DATA` environment variable (if set)
+2. `settings.json` → `data_dir` key (if set via CLI)
+3. `~/.local/share/pay-calc/` (XDG default)
 
 ### Setup for Config Repo Pattern
 

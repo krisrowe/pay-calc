@@ -1,5 +1,6 @@
 """Records command group for unified pay stub and W-2 management."""
 
+import hashlib
 import json
 from pathlib import Path
 from typing import Optional, Tuple
@@ -39,9 +40,75 @@ def parse_year_party_filters(filters: Tuple[str, ...]) -> Tuple[Optional[str], O
     return year, party
 
 
-def format_record_row(record: dict, record_type: str) -> str:
+def _get_medicare_taxable(data: dict) -> float:
+    """Extract Medicare taxable wages from stub data."""
+    taxes = data.get("taxes", {})
+    medicare = taxes.get("medicare", {})
+    return medicare.get("taxable_wages", 0.0)
+
+
+def _generate_content_id(record: dict) -> str:
+    """Generate a deterministic ID from record content for display.
+
+    IMPORTANT: We regenerate this ID from the JSON data rather than using
+    the filename for two reasons:
+
+    1. DATA INTEGRITY: If a file gets corrupted or renamed, the displayed ID
+       still reflects the actual content. The ID is a function of the data,
+       not the storage location.
+
+    2. BACKWARD COMPATIBILITY: Older records may have filenames generated with
+       different logic (e.g., based on drive_file_id + page instead of content).
+       By computing from data at display time, we can compare baselines from
+       before this change against new imports - same content = same ID regardless
+       of when or how the file was created.
+
+    WARNING: Do NOT "optimize" this by using the filename instead. The explicit
+    recomputation from data is intentional and required for the above guarantees.
+    See also: sdk/records.py _generate_record_id() and README.md "Record IDs".
+
+    Hash is based on:
+    - record type (stub/w2)
+    - document_id (or medicare taxable wages if doc_id unavailable)
+    - pay_date (stubs) or tax_year (w2)
+
+    Returns first 8 chars of hash for brevity.
+    """
+    meta = record.get("meta", {})
+    data = record.get("data", {})
+    record_type = meta.get("type", "unknown")
+
+    parts = [record_type]
+
+    if record_type == "stub":
+        # Use document_id if available, else medicare taxable wages
+        doc_id = data.get("document_id", "")
+        if doc_id and doc_id not in ("", "null", "None", "N/A"):
+            parts.append(f"doc:{doc_id}")
+        else:
+            medicare = _get_medicare_taxable(data)
+            parts.append(f"med:{medicare:.2f}")
+
+        parts.append(data.get("pay_date", ""))
+
+    elif record_type == "w2":
+        parts.append(str(data.get("tax_year", "")))
+        # W-2s use employer + wages as identifier
+        parts.append(data.get("employer_name", ""))
+        parts.append(f"{data.get('wages', 0):.2f}")
+
+    else:
+        # Fallback for discarded/unknown
+        parts.append(meta.get("source_filename", "unknown"))
+
+    content = "|".join(parts)
+    return hashlib.sha256(content.encode()).hexdigest()[:8]
+
+
+def format_record_row(record: dict, record_type: str, verbose: bool = False) -> str:
     """Format a record as a table row."""
-    rec_id = record.get("id", "--------")[:8]
+    # Use content-based ID for deterministic diffing between importers
+    rec_id = _generate_content_id(record)
     data = record.get("data") or {}
     meta = record.get("meta") or {}
 
@@ -50,17 +117,23 @@ def format_record_row(record: dict, record_type: str) -> str:
     warn_str = f" ⚠{len(warnings)}" if warnings else ""
 
     if record_type == "stub":
-        pay_date = data.get("pay_date", "unknown")
-        employer = data.get("employer", "unknown")[:21]
+        pay_date = data.get("pay_date") or "unknown"
+        employer = (data.get("employer") or "unknown")[:21]
+        doc_id = data.get("document_id") or ""
 
         # Get gross from various locations
         gross = 0.0
         if "pay_summary" in data and "current" in data["pay_summary"]:
-            gross = data["pay_summary"]["current"].get("gross", 0.0)
+            gross = data["pay_summary"]["current"].get("gross") or 0.0
         elif "gross_pay" in data:
-            gross = data["gross_pay"]
+            gross = data["gross_pay"] or 0.0
 
-        return f"{rec_id:<10} {pay_date:<12} {'stub':<8} {employer:<21} ${gross:>11,.2f}{warn_str}"
+        if verbose:
+            # Show content ID + dedup fields: doc_id, pay_date, medicare taxable
+            medicare = _get_medicare_taxable(data)
+            return f"{rec_id:<10} {pay_date:<12} {doc_id:<8} {medicare:>12,.2f} ${gross:>11,.2f}{warn_str}"
+        else:
+            return f"{rec_id:<10} {pay_date:<12} {'stub':<8} {employer:<21} ${gross:>11,.2f}{warn_str}"
 
     elif record_type == "w2":
         tax_year = str(data.get("tax_year", "unknown"))
@@ -68,7 +141,10 @@ def format_record_row(record: dict, record_type: str) -> str:
         wages = data.get("wages", 0.0)
         fed_tax = data.get("federal_tax_withheld", 0.0)
 
-        return f"{rec_id:<10} {tax_year:<12} {'w2':<8} {employer:<21} ${wages:>11,.2f}{warn_str}"
+        if verbose:
+            return f"{tax_year:<12} {'w2':<8} ${wages:>12,.2f} ${fed_tax:>11,.2f}{warn_str}"
+        else:
+            return f"{rec_id:<10} {tax_year:<12} {'w2':<8} {employer:<21} ${wages:>11,.2f}{warn_str}"
 
     elif record_type == "discarded":
         filename = meta.get("source_filename", "unknown")[:30]
@@ -106,8 +182,10 @@ def records_cli():
               help="Also show discarded records.")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]),
               default="text", help="Output format.")
+@click.option("--verbose", "-v", is_flag=True,
+              help="Show dedup fields (doc_id, medicare) for diffing between importers.")
 def records_list(filters: Tuple[str, ...], type_filter: Optional[str],
-                 show_discarded: bool, output_format: str):
+                 show_discarded: bool, output_format: str, verbose: bool):
     """List pay records.
 
     FILTERS can be year (4 digits) and/or party (him/her) in any order.
@@ -119,6 +197,7 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str],
       pay-calc records list her          # All years for her
       pay-calc records list 2025 her     # Just 2025/her
       pay-calc records list --type stub  # Only stubs
+      pay-calc records list -v           # Verbose with dedup fields
     """
     year, party = parse_year_party_filters(filters)
 
@@ -183,14 +262,18 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str],
             header = grp_party
 
         click.echo(f"\n{header}")
-        click.echo("-" * 75)
-        click.echo(f"{'ID':<10} {'DATE/YEAR':<12} {'TYPE':<8} {'EMPLOYER/FILE':<21} {'AMOUNT':>12}")
+        if verbose:
+            click.echo("-" * 67)
+            click.echo(f"{'ID':<10} {'PAY_DATE':<12} {'DOC_ID':<8} {'MEDICARE':>12} {'GROSS':>12}")
+        else:
+            click.echo("-" * 75)
+            click.echo(f"{'ID':<10} {'DATE/YEAR':<12} {'TYPE':<8} {'EMPLOYER/FILE':<21} {'AMOUNT':>12}")
 
         for rec, rec_type in grp_records:
-            click.echo(format_record_row(rec, rec_type))
+            click.echo(format_record_row(rec, rec_type, verbose=verbose))
             total_count += 1
 
-    click.echo("-" * 75)
+    click.echo("-" * (67 if verbose else 75))
     click.echo(f"Total: {total_count} record(s)")
 
 

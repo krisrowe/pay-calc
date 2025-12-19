@@ -9,16 +9,16 @@ qualifier:
   description: "Payroll format with 'Document' ID and 'Pay Summary' section"
   patterns:
     # Match on structural elements, not employer name
-    - regex: 'Document\s+\d+'
-      example_match: "Document 123456"
-      note: "Document ID format unique to this payroll system"
+    - regex: 'Document\s+[A-Z0-9]+'
+      example_match: "Document AB1234567"
+      note: "Document ID format unique to this payroll system (alphanumeric)"
     - regex: 'Pay\s+Summar\s*y\s+Gross'
       example_match: "Pay Summary Gross FIT Taxable Wages Taxes"
       note: "Pay Summary section header"
     - regex: 'Earnings\s+Pay\s+T\s*ype\s+Hours'
       example_match: "Earnings Pay Type Hours Pay Rate Current YTD"
       note: "Earnings section with Hours column"
-  min_matches: 2
+  min_matches: 3
 
 type: stub
 
@@ -86,8 +86,11 @@ sections:
     end_patterns:
       - regex: 'Total\s+Hours'
     # Header text to remove before extracting items
+    # Note: After whitespace normalization, header becomes single line
     strip_headers:
-      - regex: 'Earnings\s+Pay\s+T\s*ype\s+Hours\s+Pay\s*Rate\s+Current\s+YTD\s*'
+      # OCR variations: "Hours Pay Rate" vs "HoursPay Rate" (no space)
+      - regex: 'Earnings\s+Pay\s+T\s*ype\s+Hours\s*Pay\s*Rate\s+Current\s+YTD\s*'
+      - regex: 'Pay\s+T\s*ype\s+Hours\s*Pay\s*Rate\s+Current\s+YTD\s*'
     item_patterns:
       # Pattern 1: Full line with hours, rate, current, YTD
       - regex: '([A-Za-z][A-Za-z0-9\s/\-]*?)\s*(\d+\.\d+)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'

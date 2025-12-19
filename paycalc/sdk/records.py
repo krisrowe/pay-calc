@@ -481,20 +481,59 @@ def get_records_dir() -> Path:
     return records_dir
 
 
-def _generate_record_id(meta: Dict[str, Any]) -> str:
-    """Generate a unique record ID from metadata.
+def _generate_record_id(meta: Dict[str, Any], data: Optional[Dict[str, Any]] = None) -> str:
+    """Generate a record ID from content for filename.
 
-    Uses drive_file_id + source_page if available (for multi-page PDFs),
-    otherwise hashes source_filename + imported_at.
+    This ID is used as the JSON filename on disk. It's content-based so that:
+    - Same stub imported from different sources gets the same filename
+    - Re-importing the same PDF overwrites rather than duplicates
+
+    NOTE: Filenames are NOT guaranteed stable across tool versions. This logic
+    may change. The CLI regenerates IDs from data at display time for stability.
+
+    For stubs: hash of "stub|doc:{document_id}|{pay_date}" or "stub|med:{medicare_wages}|{pay_date}"
+    For W-2s: hash of "w2|{tax_year}|{employer}|{wages}"
+    For tracking records (discarded/unrelated): hash of drive_file_id or source_filename
+
+    IMPORTANT: The CLI's _generate_content_id() uses the SAME logic to regenerate
+    IDs at display time rather than reading the filename. This intentional redundancy
+    provides data integrity and backward compatibility with older records that used
+    different filename logic (e.g., drive_file_id + page).
+
+    WARNING: If you change this logic, you MUST update cli/records_commands.py
+    _generate_content_id() to match. The two functions must stay in sync.
+    See also: README.md "Record IDs" section.
+
     Returns first 8 chars of hash for brevity.
     """
-    if meta.get("drive_file_id"):
-        content = meta["drive_file_id"]
-        # Include page number for multi-page PDFs
-        if meta.get("source_page"):
-            content += f"_page_{meta['source_page']}"
+    record_type = meta.get("type", "unknown")
+
+    if record_type == "stub" and data:
+        # Use document_id if available, else medicare taxable wages
+        doc_id = data.get("document_id", "")
+        if doc_id and doc_id not in ("", "None", "null", "N/A"):
+            identifier = f"doc:{doc_id}"
+        else:
+            taxes = data.get("taxes", {})
+            medicare = taxes.get("medicare", {})
+            medicare_wages = medicare.get("taxable_wages", 0.0)
+            identifier = f"med:{medicare_wages:.2f}"
+
+        pay_date = data.get("pay_date", "")
+        content = f"stub|{identifier}|{pay_date}"
+
+    elif record_type == "w2" and data:
+        tax_year = str(data.get("tax_year", ""))
+        employer = data.get("employer_name", "")
+        wages = data.get("wages", 0.0)
+        content = f"w2|{tax_year}|{employer}|{wages:.2f}"
+
     else:
-        content = f"{meta.get('source_filename', '')}{meta.get('imported_at', '')}"
+        # Tracking records: use drive_file_id or source_filename
+        if meta.get("drive_file_id"):
+            content = meta["drive_file_id"]
+        else:
+            content = f"{meta.get('source_filename', '')}{meta.get('imported_at', '')}"
 
     return hashlib.sha256(content.encode()).hexdigest()[:8]
 
@@ -643,8 +682,8 @@ def add_record(meta: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Path:
     if "imported_at" not in meta:
         meta["imported_at"] = datetime.now().isoformat()
 
-    # Generate record ID
-    record_id = _generate_record_id(meta)
+    # Generate record ID from content
+    record_id = _generate_record_id(meta, data)
 
     # Determine storage path
     records_dir = get_records_dir()
