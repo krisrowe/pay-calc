@@ -1,5 +1,6 @@
 """Pay Calc CLI - Command-line interface for pay and tax projections."""
 
+import json
 import sys
 from pathlib import Path
 
@@ -238,7 +239,9 @@ def taxes(year, output, data_dir):
 @click.option("--final-stub-date", type=str, help="Date of final pay stub if not Dec 31 (YYYY-MM-DD).")
 @click.option("--output", "-o", type=click.Path(), help="Output JSON path (default: XDG data dir)")
 @click.option("--employer", type=str, help="Filter to specific employer (substring match).")
-def w2_generate(year, party, final_stub_date, output, employer):
+@click.option("--include-projection", is_flag=True, help="Include projected income to year-end.")
+@click.option("--price", type=float, help="Stock price for RSU projection (required with --include-projection if RSUs enabled).")
+def w2_generate(year, party, final_stub_date, output, employer, include_projection, price):
     """Generate W-2 JSON from pay stub analysis data.
 
     Creates W-2 form data from analyzed pay stubs. Requires analysis
@@ -251,14 +254,22 @@ def w2_generate(year, party, final_stub_date, output, employer):
       2. Wait until year-end stubs are imported
 
     \b
+    With --include-projection, shows three sections:
+      1. YTD W-2 (from latest stub)
+      2. Projected additional income by type
+      3. Combined W-2 (YTD + projected)
+
+    \b
     Output format matches w2-extract output for use with 'taxes' command.
 
     Examples:
       pay-calc w2-generate 2025 him
       pay-calc w2-generate 2025 him --employer "Employer A LLC"
       pay-calc w2-generate 2025 him --final-stub-date 2025-12-19
+      pay-calc w2-generate 2025 him --include-projection --price 175.50
     """
-    from paycalc.sdk import generate_w2_from_analysis, save_w2_forms
+    from paycalc.sdk import generate_w2_from_analysis, save_w2_forms, get_data_path
+    from paycalc.sdk.income_projection import generate_projection, is_rsus_enabled
 
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
@@ -291,11 +302,82 @@ def w2_generate(year, party, final_stub_date, output, employer):
     form = w2_data["forms"][0]
     w2_box = form["data"]
 
-    click.echo(f"Generated W-2 data from analysis:")
+    # Section 1: YTD W-2
+    click.echo("=" * 60)
+    click.echo("SECTION 1: YTD W-2 (from latest stub)")
+    click.echo("=" * 60)
     click.echo(f"  Source: {form['source_file']}")
     click.echo(f"  Date range: {date_range.get('start')} to {date_range.get('end')}")
     click.echo(f"  Employer(s): {form['employer']}")
     click.echo()
+    _print_w2_boxes(w2_box)
+
+    # Section 2 & 3: Projection (if requested)
+    if include_projection:
+        # Load analysis data for projection
+        data_path = get_data_path()
+        analysis_file = data_path / f"{year}_{party}_pay_all.json"
+
+        if analysis_file.exists():
+            with open(analysis_file) as f:
+                analysis_data = json.load(f)
+
+            stubs = analysis_data.get("stubs", [])
+            if stubs:
+                proj = generate_projection(stubs, year, party=party, stock_price=price)
+
+                if proj and proj.get("days_remaining", 0) > 0:
+                    additional = proj.get("projected_additional", {})
+
+                    # Section 2: Projected Additional Income
+                    click.echo()
+                    click.echo("=" * 60)
+                    click.echo(f"SECTION 2: Projected Additional Income ({proj.get('days_remaining')} days remaining)")
+                    click.echo("=" * 60)
+                    click.echo(f"  Regular Pay:    ${additional.get('regular_pay', 0):>12,.2f}")
+                    click.echo(f"  Stock Vesting:  ${additional.get('stock_grants', 0):>12,.2f}")
+                    click.echo(f"  ─────────────────────────────")
+                    click.echo(f"  Total:          ${additional.get('total_gross', 0):>12,.2f}")
+                    click.echo(f"  Est. Taxes:     ${additional.get('taxes', 0):>12,.2f}")
+
+                    # Show warnings if any
+                    stock_info = proj.get("stock_grant_info", {})
+                    warnings = stock_info.get("warnings", [])
+                    if warnings:
+                        click.echo()
+                        click.echo("  Warnings:")
+                        for w in warnings:
+                            click.echo(f"    - {w}")
+
+                    # Section 3: Combined W-2
+                    click.echo()
+                    click.echo("=" * 60)
+                    click.echo("SECTION 3: Combined W-2 (YTD + Projected)")
+                    click.echo("=" * 60)
+
+                    # Calculate combined values
+                    combined_w2 = {
+                        "wages_tips_other_comp": w2_box["wages_tips_other_comp"] + additional.get("total_gross", 0),
+                        "federal_income_tax_withheld": w2_box["federal_income_tax_withheld"] + additional.get("taxes", 0),
+                        "social_security_wages": min(
+                            w2_box["medicare_wages_and_tips"] + additional.get("total_gross", 0),
+                            176100  # 2025 SS wage base
+                        ),
+                        "social_security_tax_withheld": w2_box["social_security_tax_withheld"],  # Estimate same
+                        "medicare_wages_and_tips": w2_box["medicare_wages_and_tips"] + additional.get("total_gross", 0),
+                        "medicare_tax_withheld": w2_box["medicare_tax_withheld"],  # Estimate same
+                    }
+                    _print_w2_boxes(combined_w2)
+                else:
+                    click.echo()
+                    click.echo("No additional projection - year appears complete.")
+
+    click.echo()
+    click.echo(f"Output: {saved_path}")
+
+
+def _print_w2_boxes(w2_box: dict):
+    """Print W-2 box values."""
     click.echo("W-2 Box Values:")
     click.echo(f"  Box 1 (Wages):           ${w2_box['wages_tips_other_comp']:>12,.2f}")
     click.echo(f"  Box 2 (Federal WH):      ${w2_box['federal_income_tax_withheld']:>12,.2f}")
@@ -303,8 +385,6 @@ def w2_generate(year, party, final_stub_date, output, employer):
     click.echo(f"  Box 4 (SS Tax):          ${w2_box['social_security_tax_withheld']:>12,.2f}")
     click.echo(f"  Box 5 (Medicare Wages):  ${w2_box['medicare_wages_and_tips']:>12,.2f}")
     click.echo(f"  Box 6 (Medicare Tax):    ${w2_box['medicare_tax_withheld']:>12,.2f}")
-    click.echo()
-    click.echo(f"Output: {saved_path}")
 
 
 @cli.command("analysis")
@@ -455,7 +535,9 @@ def analysis(year, party, through_date, output_format):
 @click.argument("year")
 @click.argument("party", type=click.Choice(["him", "her"]))
 @click.option("--input", "-i", "input_file", type=click.Path(exists=True), help="Input JSON from analysis (default: XDG data dir)")
-def projection(year, party, input_file):
+@click.option("--json", "output_json", is_flag=True, help="Output as JSON instead of formatted text")
+@click.option("--price", type=float, help="Stock price for RSU value projection")
+def projection(year, party, input_file, output_json, price):
     """Project year-end totals from partial year pay data.
 
     Reads pay stub data from analysis output and projects year-end
@@ -479,6 +561,7 @@ def projection(year, party, input_file):
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
     from paycalc.sdk import get_data_path
+    from paycalc.sdk.income_projection import generate_projection
 
     # Determine input file path
     if input_file:
@@ -497,15 +580,128 @@ def projection(year, party, input_file):
         click.echo(f"    pay-calc projection {year} {party}", err=True)
         raise SystemExit(1)
 
-    import subprocess
+    # Load analysis data
+    with open(input_path) as f:
+        analysis_data = json.load(f)
 
-    # Call projection.py with the input file
-    cmd = ["python3", "projection.py", str(input_path)]
+    stubs = analysis_data.get("stubs", [])
+    if not stubs:
+        raise click.ClickException(f"No pay stub data found in {input_path}")
 
-    try:
-        result = subprocess.run(cmd, check=True)
-    except subprocess.CalledProcessError as e:
-        raise click.ClickException(f"Projection failed with exit code {e.returncode}")
+    # Generate projection using SDK (pass party to enable RSU SDK if configured)
+    proj = generate_projection(stubs, year, party=party, stock_price=price)
+
+    if output_json:
+        click.echo(json.dumps(proj, indent=2))
+        return
+
+    if not proj:
+        click.echo("No projection data available - year may be complete.")
+        return
+
+    # Format text output
+    _print_projection_report(proj, analysis_data)
+
+
+def _print_projection_report(proj: dict, analysis_data: dict):
+    """Print formatted projection report."""
+    summary = analysis_data.get("summary", {})
+    ytd_breakdown = analysis_data.get("ytd_breakdown", {})
+    contrib_401k = analysis_data.get("contributions_401k", {}).get("yearly_totals", {})
+
+    click.echo("=" * 60)
+    click.echo(f"YEAR-END PROJECTION (as of {proj.get('as_of_date', 'N/A')}, {proj.get('days_remaining', 0)} days remaining)")
+    click.echo("=" * 60)
+    click.echo()
+
+    actual = proj.get("actual", {})
+    additional = proj.get("projected_additional", {})
+    total = proj.get("projected_total", {})
+
+    # Get 401k totals
+    total_401k = contrib_401k.get("total", 0)
+    total_annual_limit = 70000  # Default, could load from tax rules
+
+    needed_401k = max(0, total_annual_limit - total_401k)
+    reg_proj = additional.get("regular_pay", 0)
+    projected_401k_add = min(needed_401k, reg_proj)
+    projected_401k_total = total_401k + projected_401k_add
+
+    actual_total_comp = actual.get('gross', 0) + total_401k
+    projected_total_comp = total.get('gross', 0) + projected_401k_total
+
+    # Main projection table
+    click.echo(f"  {'Category':<25} {'Actual':>14} {'Projected Add':>14} {'Est. Total':>14}")
+    click.echo(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
+
+    # Gross
+    click.echo(f"  {'Gross':<25} ${actual.get('gross', 0):>13,.2f} ${additional.get('total_gross', 0):>13,.2f} ${total.get('gross', 0):>13,.2f}")
+
+    # Break down by type
+    ytd_earnings = ytd_breakdown.get("earnings", {}) if ytd_breakdown else {}
+    actual_regular = ytd_earnings.get("Regular Pay", 0)
+    actual_stock = ytd_earnings.get("Goog Stock Unit", 0)
+    actual_other = actual.get('gross', 0) - actual_regular - actual_stock
+
+    stock_proj = additional.get("stock_grants", 0)
+    reg_proj_display = reg_proj - projected_401k_add
+
+    click.echo(f"    {'└ Regular Pay':<23} ${actual_regular:>13,.2f} ${reg_proj_display:>13,.2f}")
+    click.echo(f"    {'└ Stock Vesting':<23} ${actual_stock:>13,.2f} ${stock_proj:>13,.2f}")
+    click.echo(f"    {'└ Other (bonuses, etc)':<23} ${actual_other:>13,.2f} {'$0.00':>14}")
+
+    if total_401k > 0 or projected_401k_add > 0:
+        click.echo(f"  {'+ 401k Contributions':<25} ${total_401k:>13,.2f} ${projected_401k_add:>13,.2f} ${projected_401k_total:>13,.2f}")
+
+    projected_comp_add = additional.get('total_gross', 0) + projected_401k_add
+    click.echo(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
+    click.echo(f"  {'Total Compensation':<25} ${actual_total_comp:>13,.2f} ${projected_comp_add:>13,.2f} ${projected_total_comp:>13,.2f}")
+
+    click.echo(f"  {'Taxes Withheld':<25} ${actual.get('taxes_withheld', 0):>13,.2f} ${additional.get('taxes', 0):>13,.2f} ${total.get('taxes_withheld', 0):>13,.2f}")
+    click.echo(f"  {'─' * 25} {'─' * 14} {'─' * 14} {'─' * 14}")
+
+    # Pattern info
+    reg_info = proj.get("regular_pay_info", {})
+    stock_info = proj.get("stock_grant_info", {})
+
+    if reg_info:
+        click.echo(f"\n  Regular Pay Pattern:")
+        click.echo(f"    Frequency: {reg_info.get('frequency', 'unknown')} ({reg_info.get('interval_days', 0)} days)")
+        click.echo(f"    Last pay date: {reg_info.get('last_pay_date', 'unknown')}")
+        click.echo(f"    Last amount: ${reg_info.get('last_amount', 0):,.2f}")
+        click.echo(f"    Remaining periods: {reg_info.get('remaining_periods', 0)}")
+
+    if stock_info:
+        click.echo(f"\n  Stock Vesting Pattern:")
+        source = stock_info.get('source', 'unknown')
+        if source == 'rsu_sdk':
+            click.echo(f"    Source: RSU Schedule (from SDK)")
+            after_date = stock_info.get('after_date', '')
+            if after_date:
+                click.echo(f"    Projecting after: {after_date}")
+            click.echo(f"    Projected shares: {stock_info.get('rsu_shares', 0):,.4f}")
+            if stock_info.get('price'):
+                click.echo(f"    Stock price: ${stock_info.get('price'):,.2f}")
+                click.echo(f"    Projected value: ${stock_info.get('projected', 0):,.2f}")
+            months = stock_info.get('months_covered', [])
+            if months:
+                click.echo(f"    Months with vests: {', '.join(months)}")
+            warnings = stock_info.get('warnings', [])
+            if warnings:
+                click.echo(f"    Warnings:")
+                for w in warnings:
+                    click.echo(f"      - {w}")
+        else:
+            # Stub-inference format
+            month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
+            click.echo(f"    Frequency: {stock_info.get('frequency', 'unknown')}")
+            remaining = stock_info.get('remaining_months', [])
+            remaining_names = [month_names[m-1] for m in remaining]
+            click.echo(f"    Remaining months: {', '.join(remaining_names) if remaining_names else 'none'}")
+            click.echo(f"    Avg per vest: ${stock_info.get('avg_vesting', 0):,.2f}")
+            click.echo(f"    Remaining vests: {stock_info.get('remaining_vests', 0)}")
+
+    click.echo("\n" + "=" * 60)
 
 
 @cli.command("reset")

@@ -56,6 +56,13 @@ from .w2 import (
     SS_WAGE_BASE,
 )
 
+from .income_projection import (
+    generate_projection as generate_income_projection_from_stubs,
+    generate_income_projection,
+    parse_pay_date,
+    detect_employer_segments,
+)
+
 from . import records
 
 __all__ = [
@@ -106,6 +113,11 @@ __all__ = [
     "generate_w2_from_analysis",
     "save_w2_forms",
     "SS_WAGE_BASE",
+    # Income projection
+    "generate_income_projection_from_stubs",
+    "generate_income_projection",
+    "parse_pay_date",
+    "detect_employer_segments",
     # Records module
     "records",
 ]
