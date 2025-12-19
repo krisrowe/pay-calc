@@ -717,7 +717,7 @@ def stock_quote(ticker, last_closed):
       pay-calc stock-quote GOOG --last-closed
       pay-calc stock-quote AAPL --last-closed
     """
-    from gemini_client import get_stock_quote
+    from paycalc.gemini_client import get_stock_quote
 
     try:
         price = get_stock_quote(ticker)

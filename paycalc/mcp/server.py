@@ -162,7 +162,7 @@ async def get_stock_quote(
     2. Pass result['last_close'] to generate_income_projection(stock_price=...)
     """
     try:
-        from gemini_client import get_stock_quote as fetch_quote
+        from paycalc.gemini_client import get_stock_quote as fetch_quote
 
         price = fetch_quote(ticker)
         return {
