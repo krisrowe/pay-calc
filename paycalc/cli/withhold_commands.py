@@ -31,6 +31,101 @@ STD_DEDUCTION = {
     "2026": 32300,
 }
 
+# IRS Pub 15-T 2025 Percentage Method Tables (Annual)
+# For computing withholding from W-4 inputs
+# Format: (income_threshold, base_tax, marginal_rate)
+WITHHOLDING_TABLES_2025 = {
+    "mfj": [
+        (14600, 0, 0.00),        # Standard deduction zone
+        (28250, 0, 0.10),
+        (100500, 1365, 0.12),
+        (207050, 10035, 0.22),
+        (400400, 33476, 0.24),
+        (519550, 79880, 0.32),
+        (762950, 118008, 0.35),
+        (float('inf'), 203208, 0.37)
+    ],
+    "single": [
+        (7300, 0, 0.00),
+        (17125, 0, 0.10),
+        (53250, 983, 0.12),
+        (106525, 5318, 0.22),
+        (203200, 17043, 0.24),
+        (262775, 40265, 0.32),
+        (631700, 59332, 0.35),
+        (float('inf'), 188486, 0.37)
+    ]
+}
+
+PAY_PERIODS = {
+    "weekly": 52,
+    "biweekly": 26,
+    "semimonthly": 24,
+    "monthly": 12
+}
+
+
+def load_w4_settings(party: str) -> dict:
+    """Load W-4 settings from profile.yaml."""
+    from paycalc.sdk import get_data_path
+    import yaml
+
+    # profile.yaml is in parent of data directory
+    data_path = get_data_path()
+    profile_path = data_path.parent / "profile.yaml"
+    if not profile_path.exists():
+        # Also try in data directory itself
+        profile_path = data_path / "profile.yaml"
+    if not profile_path.exists():
+        return None
+
+    try:
+        with open(profile_path) as f:
+            profile = yaml.safe_load(f)
+        return profile.get("w4", {}).get(party)
+    except Exception:
+        return None
+
+
+def calc_withholding_per_period(gross_per_period: float, w4: dict) -> float:
+    """Calculate federal withholding per pay period using IRS Pub 15-T percentage method."""
+    filing = w4.get("filing_status", "mfj")
+    freq = w4.get("pay_frequency", "biweekly")
+    periods = PAY_PERIODS.get(freq, 26)
+
+    step3 = w4.get("step3_dependents", 0)
+    step4a = w4.get("step4a_other_income", 0)
+    step4b = w4.get("step4b_deductions", 0)
+    step4c = w4.get("step4c_extra_withholding", 0)
+
+    # Step 1: Annualize wages
+    annual_wages = gross_per_period * periods
+
+    # Step 2: Adjust for Step 4(a) and 4(b)
+    adjusted_annual = annual_wages + step4a - step4b
+
+    # Step 3: Look up tentative annual withholding from tables
+    table = WITHHOLDING_TABLES_2025.get(filing, WITHHOLDING_TABLES_2025["mfj"])
+    tentative_annual = 0
+    prev_threshold = 0
+    for threshold, base_tax, rate in table:
+        if adjusted_annual <= threshold:
+            tentative_annual = base_tax + (adjusted_annual - prev_threshold) * rate
+            break
+        prev_threshold = threshold
+
+    # Step 4: Divide by pay periods
+    tentative_per_period = tentative_annual / periods
+
+    # Step 5: Subtract prorated Step 3 credits
+    credit_per_period = step3 / periods
+    withholding = max(0, tentative_per_period - credit_per_period)
+
+    # Step 6: Add Step 4(c) extra withholding
+    withholding += step4c
+
+    return withholding
+
 
 def calc_federal_tax(income: float, brackets: list) -> float:
     """Calculate federal income tax using progressive brackets."""
@@ -166,7 +261,7 @@ def withhold():
 @click.option("--other-salary", type=float, default=110000, help="Other party's annual salary (default: $110,000)")
 @click.option("--future-grant", type=float, default=0, help="Annual future RSU grant value")
 @click.option("--price", type=float, default=180, help="Stock price for RSU valuation (default: $180)")
-@click.option("--salary-rate", type=float, default=0.084, help="Current salary withholding rate (default: 8.4%)")
+@click.option("--salary-rate", type=float, default=None, help="Salary withholding rate (default: calculated from W-4)")
 @click.option("--supplemental-rate", type=float, default=None, help="Supplemental income withholding rate (default: prior year or IRS min 22%)")
 @click.option("--other-rate", type=float, default=0.068, help="Other party's salary withholding rate (default: 6.8%)")
 def calc(year, party, salary, bonus, other_salary, future_grant, price, salary_rate, supplemental_rate, other_rate):
@@ -203,13 +298,39 @@ def calc(year, party, salary, bonus, other_salary, future_grant, price, salary_r
         brackets = TAX_BRACKETS_2026
         std_deduction = STD_DEDUCTION.get(year, STD_DEDUCTION["2026"])
 
+    # Load W-4 settings
+    w4_settings = load_w4_settings(party)
+    other_party = "her" if party == "him" else "him"
+    other_w4_settings = load_w4_settings(other_party)
+
     # Calculate salary (default from typical Employer A LLC biweekly)
     salary_source = None
+    biweekly_gross = 5000.00  # default
     if salary is None:
-        salary = 5000.00 * 26  # ~$202K
+        salary = biweekly_gross * 26  # ~$202K
         salary_source = "default ($7,800.00 biweekly)"
     else:
+        biweekly_gross = salary / 26
         salary_source = "command line"
+
+    # Calculate salary withholding rate from W-4 if not specified
+    salary_rate_source = None
+    if salary_rate is None and w4_settings:
+        # Prefer observed rate from stubs if available
+        observed = w4_settings.get("observed_salary_rate")
+        if observed:
+            salary_rate = observed
+            salary_rate_source = f"observed from stubs"
+        else:
+            wh_per_period = calc_withholding_per_period(biweekly_gross, w4_settings)
+            salary_rate = wh_per_period / biweekly_gross if biweekly_gross > 0 else 0
+            step3 = w4_settings.get("step3_dependents", 0)
+            salary_rate_source = f"W-4 calc ({w4_settings.get('filing_status', 'mfj').upper()}, ${step3:,} Step 3)"
+    elif salary_rate is None:
+        salary_rate = 0.084  # fallback
+        salary_rate_source = "default (no W-4 config)"
+    else:
+        salary_rate_source = "command line"
 
     # Get bonus - from arg or prior year
     bonus_source = None
@@ -313,6 +434,7 @@ def calc(year, party, salary, bonus, other_salary, future_grant, price, salary_r
     click.echo(f"\nDATA SOURCES")
     click.echo("-" * 50)
     click.echo(f"Salary: {salary_source}")
+    click.echo(f"Salary WH rate: {salary_rate_source} ({salary_rate*100:.1f}%)")
     click.echo(f"Bonus: {bonus_source}")
     click.echo(f"RSUs: {rsu_source}")
     click.echo(f"Supplemental rate: {supp_source} ({supplemental_rate*100:.1f}%)")
@@ -350,10 +472,9 @@ def calc(year, party, salary, bonus, other_salary, future_grant, price, salary_r
     click.echo(f"\nSHORTFALL:                       ${shortfall:>12,.2f}")
 
     if shortfall > 0:
-        click.echo(f"\nRECOMMENDED ADDITIONAL WITHHOLDING ({party_label})")
+        click.echo(f"\nRECOMMENDED W-4 STEP 4(c) ({party_label})")
         click.echo("-" * 50)
-        click.echo(f"Per paycheck (exact):            ${additional_per_period:>12,.2f}")
-        click.echo(f"Per paycheck (rounded to $50):   ${recommended:>12,.2f}")
+        click.echo(f"Extra withholding per paycheck:  ${recommended:>12,.0f}")
 
         # Alternative: Uniform rate with different supplemental rates
         if party_total > 0 and (bonus > 0 or total_rsu > 0):
