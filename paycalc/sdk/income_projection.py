@@ -327,21 +327,66 @@ def generate_projection(
     segments = detect_employer_segments(stubs)
     actual_gross = 0.0
     actual_fit_taxable = 0.0
-    actual_taxes = 0.0
+    actual_federal = 0.0
+    actual_ss_wages = 0.0
+    actual_ss_tax = 0.0
+    actual_medicare_wages = 0.0
+    actual_medicare_tax = 0.0
+
     for segment in segments:
         if segment:
             seg_ytd = segment[-1].get("pay_summary", {}).get("ytd", {})
             actual_gross += seg_ytd.get("gross", 0)
             actual_fit_taxable += seg_ytd.get("fit_taxable_wages", 0)
-            actual_taxes += seg_ytd.get("taxes", 0)
+
+            # Get tax breakdown from taxes section
+            taxes = segment[-1].get("taxes", {})
+            actual_federal += taxes.get("federal_income_tax", {}).get("ytd_withheld", 0)
+            actual_ss_tax += taxes.get("social_security", {}).get("ytd_withheld", 0)
+            actual_medicare_tax += taxes.get("medicare", {}).get("ytd_withheld", 0)
+
+            # SS and Medicare wages (usually same as gross for these)
+            actual_ss_wages += seg_ytd.get("gross", 0)
+            actual_medicare_wages += seg_ytd.get("gross", 0)
+
+    actual_taxes = actual_federal + actual_ss_tax + actual_medicare_tax
 
     # Calculate projected totals
     total_projection = regular_projection + stock_projection
     projected_gross = actual_gross + total_projection
 
-    # Estimate projected taxes (use effective rate from actuals)
-    effective_tax_rate = actual_taxes / actual_gross if actual_gross > 0 else 0.25
-    projected_additional_taxes = total_projection * effective_tax_rate
+    # Tax rates for 2025
+    SS_WAGE_BASE = 176100
+    SS_RATE = 0.062
+    MEDICARE_RATE = 0.0145
+    MEDICARE_ADDITIONAL_RATE = 0.009
+    MEDICARE_ADDITIONAL_THRESHOLD = 200000
+    SUPPLEMENTAL_FED_RATE = 0.22  # Could be 37% for >$1M supplemental
+
+    # Calculate projected additional taxes by type
+    # Federal: use supplemental rate for RSUs/bonuses, effective rate for regular pay
+    effective_fed_rate = actual_federal / actual_gross if actual_gross > 0 else 0.22
+    proj_fed_regular = regular_projection * effective_fed_rate
+    proj_fed_stock = stock_projection * SUPPLEMENTAL_FED_RATE
+    proj_federal = proj_fed_regular + proj_fed_stock
+
+    # SS: 6.2% up to wage base
+    remaining_ss_wages = max(0, SS_WAGE_BASE - actual_ss_wages)
+    ss_taxable_projection = min(total_projection, remaining_ss_wages)
+    proj_ss = ss_taxable_projection * SS_RATE
+
+    # Medicare: 1.45% + 0.9% additional over $200k
+    proj_medicare_base = total_projection * MEDICARE_RATE
+    # Check if we cross the additional Medicare threshold
+    if actual_medicare_wages < MEDICARE_ADDITIONAL_THRESHOLD:
+        additional_threshold_remaining = MEDICARE_ADDITIONAL_THRESHOLD - actual_medicare_wages
+        wages_over_threshold = max(0, total_projection - additional_threshold_remaining)
+    else:
+        wages_over_threshold = total_projection
+    proj_medicare_additional = wages_over_threshold * MEDICARE_ADDITIONAL_RATE
+    proj_medicare = proj_medicare_base + proj_medicare_additional
+
+    projected_additional_taxes = proj_federal + proj_ss + proj_medicare
     projected_total_taxes = actual_taxes + projected_additional_taxes
 
     return {
@@ -350,17 +395,30 @@ def generate_projection(
         "actual": {
             "gross": actual_gross,
             "fit_taxable_wages": actual_fit_taxable,
-            "taxes_withheld": actual_taxes
+            "federal_withheld": actual_federal,
+            "ss_wages": actual_ss_wages,
+            "ss_withheld": actual_ss_tax,
+            "medicare_wages": actual_medicare_wages,
+            "medicare_withheld": actual_medicare_tax,
+            "total_taxes_withheld": actual_taxes
         },
         "projected_additional": {
             "regular_pay": regular_projection,
             "stock_grants": stock_projection,
             "total_gross": total_projection,
-            "taxes": projected_additional_taxes
+            "federal_withheld": proj_federal,
+            "ss_withheld": proj_ss,
+            "medicare_withheld": proj_medicare,
+            "total_taxes": projected_additional_taxes
         },
         "projected_total": {
             "gross": projected_gross,
-            "taxes_withheld": projected_total_taxes
+            "federal_withheld": actual_federal + proj_federal,
+            "ss_wages": min(actual_ss_wages + total_projection, SS_WAGE_BASE),
+            "ss_withheld": actual_ss_tax + proj_ss,
+            "medicare_wages": actual_medicare_wages + total_projection,
+            "medicare_withheld": actual_medicare_tax + proj_medicare,
+            "total_taxes_withheld": projected_total_taxes
         },
         "regular_pay_info": regular_info,
         "stock_grant_info": stock_info

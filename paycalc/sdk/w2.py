@@ -135,6 +135,103 @@ def generate_w2_from_analysis(
     }
 
 
+def generate_w2_with_projection(
+    year: str,
+    party: str,
+    include_projection: bool = False,
+    stock_price: Optional[float] = None,
+    final_stub_date: Optional[str] = None,
+    employer_filter: Optional[str] = None,
+    data_dir: Optional[Path] = None,
+) -> dict:
+    """Generate W-2 data with optional projection for year-end.
+
+    Returns a structured result with up to 3 sections:
+    - ytd_w2: W-2 box values from latest stub YTD data
+    - projected_additional: Projected income and withholding for remainder of year
+    - projected_w2: W-2 box values including projections
+
+    Args:
+        year: Tax year (4 digits)
+        party: 'him' or 'her'
+        include_projection: Whether to include year-end projections
+        stock_price: Stock price for RSU valuation (use with include_projection)
+        final_stub_date: If provided, bypasses year-end coverage check
+        employer_filter: Optional employer name filter
+        data_dir: Override data directory
+
+    Returns:
+        dict with ytd_w2, and optionally projected_additional and projected_w2
+    """
+    # Get base W-2 data
+    w2_data = generate_w2_from_analysis(
+        year=year,
+        party=party,
+        final_stub_date=final_stub_date,
+        employer_filter=employer_filter,
+        data_dir=data_dir,
+    )
+
+    date_range = w2_data.get("analysis_date_range", {})
+    form = w2_data["forms"][0]
+    ytd_w2 = form["data"]
+
+    result = {
+        "year": year,
+        "party": party,
+        "date_range": date_range,
+        "source_file": form["source_file"],
+        "employer": form["employer"],
+        "ytd_w2": ytd_w2,
+    }
+
+    if include_projection:
+        from .income_projection import generate_projection
+
+        data_path = data_dir or get_data_path()
+        analysis_file = data_path / f"{year}_{party}_pay_all.json"
+
+        if analysis_file.exists():
+            with open(analysis_file) as f:
+                analysis_data = json.load(f)
+
+            stubs = analysis_data.get("stubs", [])
+            if stubs:
+                proj = generate_projection(stubs, year, party=party, stock_price=stock_price)
+
+                if proj and proj.get("days_remaining", 0) > 0:
+                    additional = proj.get("projected_additional", {})
+                    projected_total = proj.get("projected_total", {})
+
+                    result["projected_additional"] = {
+                        "days_remaining": proj.get("days_remaining"),
+                        "income": {
+                            "regular_pay": additional.get("regular_pay", 0),
+                            "stock_grants": additional.get("stock_grants", 0),
+                            "total_gross": additional.get("total_gross", 0),
+                        },
+                        "withholding": {
+                            "federal": additional.get("federal_withheld", 0),
+                            "social_security": additional.get("ss_withheld", 0),
+                            "medicare": additional.get("medicare_withheld", 0),
+                            "total": additional.get("total_taxes", 0),
+                        },
+                        "stock_price_used": stock_price,
+                        "warnings": proj.get("stock_grant_info", {}).get("warnings", []),
+                    }
+
+                    result["projected_w2"] = {
+                        "wages_tips_other_comp": projected_total.get("gross", 0),
+                        "federal_income_tax_withheld": projected_total.get("federal_withheld", 0),
+                        "social_security_wages": projected_total.get("ss_wages", 0),
+                        "social_security_tax_withheld": projected_total.get("ss_withheld", 0),
+                        "medicare_wages_and_tips": projected_total.get("medicare_wages", 0),
+                        "medicare_tax_withheld": projected_total.get("medicare_withheld", 0),
+                    }
+
+    return result
+
+
 def save_w2_forms(w2_data: dict, output_path: Optional[Path] = None) -> Path:
     """Save W-2 form data to JSON file.
 

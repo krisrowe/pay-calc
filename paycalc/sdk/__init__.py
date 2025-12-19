@@ -52,6 +52,7 @@ from .gaps import (
 
 from .w2 import (
     generate_w2_from_analysis,
+    generate_w2_with_projection,
     save_w2_forms,
     SS_WAGE_BASE,
 )
@@ -111,6 +112,7 @@ __all__ = [
     "MAX_INTERVAL_DAYS",
     # W-2 generation
     "generate_w2_from_analysis",
+    "generate_w2_with_projection",
     "save_w2_forms",
     "SS_WAGE_BASE",
     # Income projection

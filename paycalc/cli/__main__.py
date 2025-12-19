@@ -241,7 +241,8 @@ def taxes(year, output, data_dir):
 @click.option("--employer", type=str, help="Filter to specific employer (substring match).")
 @click.option("--include-projection", is_flag=True, help="Include projected income to year-end.")
 @click.option("--price", type=float, help="Stock price for RSU projection (required with --include-projection if RSUs enabled).")
-def w2_generate(year, party, final_stub_date, output, employer, include_projection, price):
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", help="Output format (default: text).")
+def w2_generate(year, party, final_stub_date, output, employer, include_projection, price, output_format):
     """Generate W-2 JSON from pay stub analysis data.
 
     Creates W-2 form data from analyzed pay stubs. Requires analysis
@@ -268,16 +269,19 @@ def w2_generate(year, party, final_stub_date, output, employer, include_projecti
       pay-calc w2-generate 2025 him --final-stub-date 2025-12-19
       pay-calc w2-generate 2025 him --include-projection --price 175.50
     """
-    from paycalc.sdk import generate_w2_from_analysis, save_w2_forms, get_data_path
-    from paycalc.sdk.income_projection import generate_projection, is_rsus_enabled
+    from paycalc.sdk import generate_w2_from_analysis, save_w2_forms
+    from paycalc.sdk.w2 import generate_w2_with_projection
 
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
     try:
-        w2_data = generate_w2_from_analysis(
+        # Use SDK function that handles all 3 sections
+        result = generate_w2_with_projection(
             year=year,
             party=party,
+            include_projection=include_projection,
+            stock_price=price,
             final_stub_date=final_stub_date,
             employer_filter=employer,
         )
@@ -293,84 +297,77 @@ def w2_generate(year, party, final_stub_date, output, employer, include_projecti
             f"  2. Use --final-stub-date {end_date} to confirm this is the final stub"
         )
 
-    # Save to file
+    # Save YTD W-2 to file
+    w2_for_save = {
+        "year": year,
+        "party": party,
+        "generated_from": "analysis",
+        "analysis_date_range": result["date_range"],
+        "forms": [{
+            "employer": result["employer"],
+            "source_type": "analysis",
+            "source_file": result["source_file"],
+            "data": result["ytd_w2"],
+        }],
+    }
     output_path = Path(output) if output else None
-    saved_path = save_w2_forms(w2_data, output_path)
+    saved_path = save_w2_forms(w2_for_save, output_path)
 
-    # Display results
-    date_range = w2_data.get("analysis_date_range", {})
-    form = w2_data["forms"][0]
-    w2_box = form["data"]
+    # Output based on format
+    if output_format == "json":
+        click.echo(json.dumps(result, indent=2))
+        return
 
-    # Section 1: YTD W-2
+    # Text format: display ASCII tables
+    date_range = result["date_range"]
     click.echo("=" * 60)
     click.echo("SECTION 1: YTD W-2 (from latest stub)")
     click.echo("=" * 60)
-    click.echo(f"  Source: {form['source_file']}")
+    click.echo(f"  Source: {result['source_file']}")
     click.echo(f"  Date range: {date_range.get('start')} to {date_range.get('end')}")
-    click.echo(f"  Employer(s): {form['employer']}")
+    click.echo(f"  Employer(s): {result['employer']}")
     click.echo()
-    _print_w2_boxes(w2_box)
+    _print_w2_boxes(result["ytd_w2"])
 
-    # Section 2 & 3: Projection (if requested)
-    if include_projection:
-        # Load analysis data for projection
-        data_path = get_data_path()
-        analysis_file = data_path / f"{year}_{party}_pay_all.json"
+    if include_projection and "projected_additional" in result:
+        additional = result["projected_additional"]
 
-        if analysis_file.exists():
-            with open(analysis_file) as f:
-                analysis_data = json.load(f)
+        # Section 2: Projected Additional Income & Withholding
+        click.echo()
+        click.echo("=" * 60)
+        click.echo(f"SECTION 2: Projected Additional ({additional['days_remaining']} days remaining)")
+        click.echo("=" * 60)
+        click.echo()
+        click.echo("  Income:")
+        click.echo(f"    Regular Pay:      ${additional['income']['regular_pay']:>12,.2f}")
+        click.echo(f"    Stock Vesting:    ${additional['income']['stock_grants']:>12,.2f}")
+        click.echo(f"    ─────────────────────────────────")
+        click.echo(f"    Total Gross:      ${additional['income']['total_gross']:>12,.2f}")
+        click.echo()
+        click.echo("  Withholding:")
+        click.echo(f"    Federal:          ${additional['withholding']['federal']:>12,.2f}")
+        click.echo(f"    Social Security:  ${additional['withholding']['social_security']:>12,.2f}")
+        click.echo(f"    Medicare:         ${additional['withholding']['medicare']:>12,.2f}")
+        click.echo(f"    ─────────────────────────────────")
+        click.echo(f"    Total Taxes:      ${additional['withholding']['total']:>12,.2f}")
 
-            stubs = analysis_data.get("stubs", [])
-            if stubs:
-                proj = generate_projection(stubs, year, party=party, stock_price=price)
+        warnings = additional.get("warnings", [])
+        if warnings:
+            click.echo()
+            click.echo("  Warnings:")
+            for w in warnings:
+                click.echo(f"    - {w}")
 
-                if proj and proj.get("days_remaining", 0) > 0:
-                    additional = proj.get("projected_additional", {})
+        # Section 3: Projected W-2
+        click.echo()
+        click.echo("=" * 60)
+        click.echo("SECTION 3: Projected W-2 (YTD + Projected)")
+        click.echo("=" * 60)
+        _print_w2_boxes(result["projected_w2"])
 
-                    # Section 2: Projected Additional Income
-                    click.echo()
-                    click.echo("=" * 60)
-                    click.echo(f"SECTION 2: Projected Additional Income ({proj.get('days_remaining')} days remaining)")
-                    click.echo("=" * 60)
-                    click.echo(f"  Regular Pay:    ${additional.get('regular_pay', 0):>12,.2f}")
-                    click.echo(f"  Stock Vesting:  ${additional.get('stock_grants', 0):>12,.2f}")
-                    click.echo(f"  ─────────────────────────────")
-                    click.echo(f"  Total:          ${additional.get('total_gross', 0):>12,.2f}")
-                    click.echo(f"  Est. Taxes:     ${additional.get('taxes', 0):>12,.2f}")
-
-                    # Show warnings if any
-                    stock_info = proj.get("stock_grant_info", {})
-                    warnings = stock_info.get("warnings", [])
-                    if warnings:
-                        click.echo()
-                        click.echo("  Warnings:")
-                        for w in warnings:
-                            click.echo(f"    - {w}")
-
-                    # Section 3: Combined W-2
-                    click.echo()
-                    click.echo("=" * 60)
-                    click.echo("SECTION 3: Combined W-2 (YTD + Projected)")
-                    click.echo("=" * 60)
-
-                    # Calculate combined values
-                    combined_w2 = {
-                        "wages_tips_other_comp": w2_box["wages_tips_other_comp"] + additional.get("total_gross", 0),
-                        "federal_income_tax_withheld": w2_box["federal_income_tax_withheld"] + additional.get("taxes", 0),
-                        "social_security_wages": min(
-                            w2_box["medicare_wages_and_tips"] + additional.get("total_gross", 0),
-                            176100  # 2025 SS wage base
-                        ),
-                        "social_security_tax_withheld": w2_box["social_security_tax_withheld"],  # Estimate same
-                        "medicare_wages_and_tips": w2_box["medicare_wages_and_tips"] + additional.get("total_gross", 0),
-                        "medicare_tax_withheld": w2_box["medicare_tax_withheld"],  # Estimate same
-                    }
-                    _print_w2_boxes(combined_w2)
-                else:
-                    click.echo()
-                    click.echo("No additional projection - year appears complete.")
+    elif include_projection:
+        click.echo()
+        click.echo("No additional projection - year appears complete.")
 
     click.echo()
     click.echo(f"Output: {saved_path}")

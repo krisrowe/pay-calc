@@ -259,54 +259,20 @@ async def generate_w2(
     Requires analysis data to exist (run 'pay-calc analysis YEAR PARTY' first).
     """
     try:
-        from paycalc.sdk import generate_w2_from_analysis, get_data_path
-        import json
+        from paycalc.sdk.w2 import generate_w2_with_projection
 
-        w2_data = generate_w2_from_analysis(year=year, party=party)
-
-        result = {
-            "year": year,
-            "party": party,
-            "w2": w2_data["forms"][0]["data"],
-            "date_range": w2_data.get("analysis_date_range"),
-        }
-
-        if include_projection:
-            data_path = get_data_path()
-            analysis_file = data_path / f"{year}_{party}_pay_all.json"
-
-            if analysis_file.exists():
-                with open(analysis_file) as f:
-                    analysis_data = json.load(f)
-
-                stubs = analysis_data.get("stubs", [])
-                if stubs:
-                    from paycalc.sdk.income_projection import generate_projection
-                    proj = generate_projection(stubs, year, party=party, stock_price=stock_price)
-
-                    if proj and proj.get("days_remaining", 0) > 0:
-                        result["projection"] = {
-                            "additional": proj.get("projected_additional"),
-                            "combined_w2": {
-                                "wages_tips_other_comp": (
-                                    result["w2"]["wages_tips_other_comp"] +
-                                    proj.get("projected_additional", {}).get("total_gross", 0)
-                                ),
-                                "federal_income_tax_withheld": (
-                                    result["w2"]["federal_income_tax_withheld"] +
-                                    proj.get("projected_additional", {}).get("taxes", 0)
-                                ),
-                            },
-                            "stock_price_used": stock_price,
-                        }
-
-        return result
+        return generate_w2_with_projection(
+            year=year,
+            party=party,
+            include_projection=include_projection,
+            stock_price=stock_price,
+        )
 
     except FileNotFoundError as e:
-        return {"error": str(e), "w2": None}
+        return {"error": str(e), "ytd_w2": None}
     except Exception as e:
         logger.error(f"Error generating W-2: {e}")
-        return {"error": str(e), "w2": None}
+        return {"error": str(e), "ytd_w2": None}
 
 
 # --- Resources (optional, for browsing) ---
