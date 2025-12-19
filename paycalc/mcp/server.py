@@ -249,9 +249,13 @@ async def generate_w2(
 
     Creates W-2 box values (wages, withholding, SS/Medicare) from YTD totals.
 
-    With include_projection=True, also returns:
-    - Projected additional income by type
-    - Combined W-2 (YTD + projected)
+    With include_projection=True, returns 3 W-2 format objects:
+    - ytd_w2: W-2 from current YTD data
+    - projected_additional_w2: W-2 for projected additional income
+    - projected_w2: Total W-2 (ytd + additional)
+
+    All three have identical structure. The third is the sum of the first two.
+    SS wages cap ($176,100) carries forward - additional shows only remaining taxable.
 
     For RSU projections with dollar values, first call get_stock_quote('GOOG')
     and pass the result's 'last_close' as stock_price.
