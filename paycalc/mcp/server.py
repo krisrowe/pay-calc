@@ -151,7 +151,16 @@ async def get_record(
 async def get_stock_quote(
     ticker: str = Field(description="Stock ticker symbol (e.g., 'GOOG', 'AAPL')"),
 ) -> dict[str, Any]:
-    """Get the last closing price for a stock ticker. Uses AI to look up the most recent closing price."""
+    """Get the last closing price for a stock ticker.
+
+    Use this to get the current stock price for RSU valuation in income projections.
+    The returned 'last_close' value can be passed to generate_income_projection()
+    or generate_w2() as the 'stock_price' parameter.
+
+    Example workflow:
+    1. Call get_stock_quote(ticker='GOOG') to get current price
+    2. Pass result['last_close'] to generate_income_projection(stock_price=...)
+    """
     try:
         from gemini_client import get_stock_quote as fetch_quote
 
@@ -166,6 +175,138 @@ async def get_stock_quote(
         return {"error": str(e), "ticker": ticker.upper(), "last_close": None}
     except RuntimeError as e:
         return {"error": f"Failed to get quote: {e}", "ticker": ticker.upper(), "last_close": None}
+
+
+@mcp.tool()
+async def generate_income_projection(
+    year: str = Field(description="Tax year (4 digits, e.g., '2025')"),
+    party: str = Field(description="Party identifier ('him' or 'her')"),
+    stock_price: float | None = Field(default=None, description="Stock price for RSU valuation. Use get_stock_quote() to fetch current price for GOOG."),
+) -> dict[str, Any]:
+    """Generate year-end income projection from pay stub analysis.
+
+    Projects total income to year-end based on:
+    - Regular pay pattern (biweekly/monthly cadence)
+    - RSU vesting schedule (if configured for party)
+
+    For RSU projections with dollar values, first call get_stock_quote('GOOG')
+    and pass the result's 'last_close' as stock_price.
+
+    Requires analysis data to exist (run 'pay-calc analysis YEAR PARTY' first).
+    """
+    try:
+        from paycalc.sdk.income_projection import generate_income_projection as sdk_projection
+        from paycalc.sdk import get_data_path
+        import json
+
+        data_path = get_data_path()
+        analysis_file = data_path / f"{year}_{party}_pay_all.json"
+
+        if not analysis_file.exists():
+            return {
+                "error": f"Analysis data not found for {year}/{party}. Run 'pay-calc analysis {year} {party}' first.",
+                "projection": None,
+            }
+
+        with open(analysis_file) as f:
+            analysis_data = json.load(f)
+
+        stubs = analysis_data.get("stubs", [])
+        if not stubs:
+            return {"error": "No pay stub data in analysis file", "projection": None}
+
+        from paycalc.sdk.income_projection import generate_projection
+        proj = generate_projection(stubs, year, party=party, stock_price=stock_price)
+
+        if not proj:
+            return {"message": "No projection needed - year appears complete", "projection": None}
+
+        return {
+            "projection": proj,
+            "summary": {
+                "as_of_date": proj.get("as_of_date"),
+                "days_remaining": proj.get("days_remaining"),
+                "actual_gross": proj.get("actual", {}).get("gross"),
+                "projected_additional": proj.get("projected_additional", {}).get("total_gross"),
+                "projected_total_gross": proj.get("projected_total", {}).get("gross"),
+                "stock_price_used": stock_price,
+            },
+        }
+
+    except Exception as e:
+        logger.error(f"Error generating projection: {e}")
+        return {"error": str(e), "projection": None}
+
+
+@mcp.tool()
+async def generate_w2(
+    year: str = Field(description="Tax year (4 digits, e.g., '2025')"),
+    party: str = Field(description="Party identifier ('him' or 'her')"),
+    include_projection: bool = Field(default=False, description="Include projected income to year-end"),
+    stock_price: float | None = Field(default=None, description="Stock price for RSU projection. Use get_stock_quote() to fetch current price for GOOG."),
+) -> dict[str, Any]:
+    """Generate W-2 data from pay stub analysis.
+
+    Creates W-2 box values (wages, withholding, SS/Medicare) from YTD totals.
+
+    With include_projection=True, also returns:
+    - Projected additional income by type
+    - Combined W-2 (YTD + projected)
+
+    For RSU projections with dollar values, first call get_stock_quote('GOOG')
+    and pass the result's 'last_close' as stock_price.
+
+    Requires analysis data to exist (run 'pay-calc analysis YEAR PARTY' first).
+    """
+    try:
+        from paycalc.sdk import generate_w2_from_analysis, get_data_path
+        import json
+
+        w2_data = generate_w2_from_analysis(year=year, party=party)
+
+        result = {
+            "year": year,
+            "party": party,
+            "w2": w2_data["forms"][0]["data"],
+            "date_range": w2_data.get("analysis_date_range"),
+        }
+
+        if include_projection:
+            data_path = get_data_path()
+            analysis_file = data_path / f"{year}_{party}_pay_all.json"
+
+            if analysis_file.exists():
+                with open(analysis_file) as f:
+                    analysis_data = json.load(f)
+
+                stubs = analysis_data.get("stubs", [])
+                if stubs:
+                    from paycalc.sdk.income_projection import generate_projection
+                    proj = generate_projection(stubs, year, party=party, stock_price=stock_price)
+
+                    if proj and proj.get("days_remaining", 0) > 0:
+                        result["projection"] = {
+                            "additional": proj.get("projected_additional"),
+                            "combined_w2": {
+                                "wages_tips_other_comp": (
+                                    result["w2"]["wages_tips_other_comp"] +
+                                    proj.get("projected_additional", {}).get("total_gross", 0)
+                                ),
+                                "federal_income_tax_withheld": (
+                                    result["w2"]["federal_income_tax_withheld"] +
+                                    proj.get("projected_additional", {}).get("taxes", 0)
+                                ),
+                            },
+                            "stock_price_used": stock_price,
+                        }
+
+        return result
+
+    except FileNotFoundError as e:
+        return {"error": str(e), "w2": None}
+    except Exception as e:
+        logger.error(f"Error generating W-2: {e}")
+        return {"error": str(e), "w2": None}
 
 
 # --- Resources (optional, for browsing) ---
