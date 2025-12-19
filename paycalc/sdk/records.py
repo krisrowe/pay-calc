@@ -995,10 +995,10 @@ PAYSTUB_OCR_PROMPT = """Extract pay stub data into this JSON structure:
     "ytd": {"gross": 0.00, "taxes": 0.00}
   },
   "taxes": {
-    "federal_income": {"current": 0.00, "ytd": 0.00},
-    "social_security": {"current": 0.00, "ytd": 0.00},
-    "medicare": {"current": 0.00, "ytd": 0.00},
-    "state": {"current": 0.00, "ytd": 0.00}
+    "federal_income": {"taxable_wages": 0.00, "current": 0.00, "ytd": 0.00},
+    "social_security": {"taxable_wages": 0.00, "current": 0.00, "ytd": 0.00},
+    "medicare": {"taxable_wages": 0.00, "current": 0.00, "ytd": 0.00},
+    "state": {"taxable_wages": 0.00, "current": 0.00, "ytd": 0.00}
   },
   "deductions": [
     {"type": "description", "current_amount": 0.00, "ytd_amount": 0.00}

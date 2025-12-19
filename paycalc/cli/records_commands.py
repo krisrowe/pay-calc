@@ -264,7 +264,7 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str],
         click.echo(f"\n{header}")
         if verbose:
             click.echo("-" * 67)
-            click.echo(f"{'ID':<10} {'PAY_DATE':<12} {'DOC_ID':<8} {'MEDICARE':>12} {'GROSS':>12}")
+            click.echo(f"{'ID':<10} {'PAY_DATE':<12} {'DOC_ID':<8} {'MED_WAGES':>12} {'GROSS':>12}")
         else:
             click.echo("-" * 75)
             click.echo(f"{'ID':<10} {'DATE/YEAR':<12} {'TYPE':<8} {'EMPLOYER/FILE':<21} {'AMOUNT':>12}")
