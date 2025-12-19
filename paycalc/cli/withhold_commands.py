@@ -64,6 +64,41 @@ PAY_PERIODS = {
     "monthly": 12
 }
 
+# W-4 Page 4: Multiple Jobs Worksheet Table (MFJ)
+# Annual additional withholding when both spouses work
+# Rows: Higher Paying Job annual wages
+# Cols: Lower Paying Job annual wages
+# Values: Additional annual withholding needed
+MFJ_TWO_JOBS_TABLE = {
+    # (min, max): {(min, max): additional_annual, ...}
+    (0, 9999): {(0, 9999): 0, (10000, 19999): 200, (20000, 29999): 850, (30000, 39999): 1020, (40000, 49999): 1020, (50000, 59999): 1020, (60000, 69999): 1020, (70000, 79999): 1020, (80000, 89999): 1020, (90000, 99999): 1020, (100000, 109999): 1020, (110000, 120000): 1020},
+    (10000, 19999): {(0, 9999): 200, (10000, 19999): 1700, (20000, 29999): 2220, (30000, 39999): 2220, (40000, 49999): 2220, (50000, 59999): 2220, (60000, 69999): 2220, (70000, 79999): 2220, (80000, 89999): 2220, (90000, 99999): 2220, (100000, 109999): 2220, (110000, 120000): 2220},
+    (20000, 29999): {(0, 9999): 850, (10000, 19999): 2220, (20000, 29999): 3420, (30000, 39999): 3420, (40000, 49999): 3420, (50000, 59999): 3420, (60000, 69999): 3420, (70000, 79999): 3420, (80000, 89999): 3420, (90000, 99999): 3420, (100000, 109999): 3420, (110000, 120000): 3420},
+    (30000, 39999): {(0, 9999): 1020, (10000, 19999): 2220, (20000, 29999): 3420, (30000, 39999): 3770, (40000, 49999): 3970, (50000, 59999): 3970, (60000, 69999): 3970, (70000, 79999): 3970, (80000, 89999): 3970, (90000, 99999): 3970, (100000, 109999): 3970, (110000, 120000): 3970},
+    (40000, 49999): {(0, 9999): 1020, (10000, 19999): 2220, (20000, 29999): 3420, (30000, 39999): 3970, (40000, 49999): 4080, (50000, 59999): 4080, (60000, 69999): 4080, (70000, 79999): 4080, (80000, 89999): 4080, (90000, 99999): 4080, (100000, 109999): 4080, (110000, 120000): 4080},
+    (50000, 59999): {(0, 9999): 1020, (10000, 19999): 2220, (20000, 29999): 3420, (30000, 39999): 3970, (40000, 49999): 4080, (50000, 59999): 5080, (60000, 69999): 5080, (70000, 79999): 5080, (80000, 89999): 5080, (90000, 99999): 5080, (100000, 109999): 5080, (110000, 120000): 5080},
+    (60000, 69999): {(0, 9999): 1020, (10000, 19999): 2220, (20000, 29999): 3420, (30000, 39999): 3970, (40000, 49999): 4080, (50000, 59999): 5080, (60000, 69999): 6080, (70000, 79999): 6080, (80000, 89999): 6080, (90000, 99999): 6080, (100000, 109999): 6080, (110000, 120000): 6080},
+    (70000, 79999): {(0, 9999): 1020, (10000, 19999): 2220, (20000, 29999): 3420, (30000, 39999): 3970, (40000, 49999): 4080, (50000, 59999): 5080, (60000, 69999): 6080, (70000, 79999): 7080, (80000, 89999): 7080, (90000, 99999): 7080, (100000, 109999): 7080, (110000, 120000): 7080},
+    (80000, 99999): {(0, 9999): 1020, (10000, 19999): 2220, (20000, 29999): 3420, (30000, 39999): 3970, (40000, 49999): 4080, (50000, 59999): 5080, (60000, 69999): 6080, (70000, 79999): 7080, (80000, 89999): 8080, (90000, 99999): 9080, (100000, 109999): 9080, (110000, 120000): 9080},
+    (100000, 124999): {(0, 9999): 1870, (10000, 19999): 4070, (20000, 29999): 5440, (30000, 39999): 5990, (40000, 49999): 6100, (50000, 59999): 7100, (60000, 69999): 8100, (70000, 79999): 9100, (80000, 89999): 10100, (90000, 99999): 10950, (100000, 109999): 10950, (110000, 120000): 11950},
+    (125000, 149999): {(0, 9999): 1870, (10000, 19999): 4070, (20000, 29999): 5690, (30000, 39999): 6690, (40000, 49999): 6890, (50000, 59999): 7890, (60000, 69999): 8890, (70000, 79999): 9890, (80000, 89999): 10890, (90000, 99999): 11950, (100000, 109999): 12950, (110000, 120000): 13950},
+    (150000, 174999): {(0, 9999): 2040, (10000, 19999): 4440, (20000, 29999): 6290, (30000, 39999): 7490, (40000, 49999): 7860, (50000, 59999): 8860, (60000, 69999): 9860, (70000, 79999): 10860, (80000, 89999): 11860, (90000, 99999): 12860, (100000, 109999): 13950, (110000, 120000): 14950},
+    (175000, 199999): {(0, 9999): 2040, (10000, 19999): 4440, (20000, 29999): 6590, (30000, 39999): 8090, (40000, 49999): 8690, (50000, 59999): 9690, (60000, 69999): 10690, (70000, 79999): 11690, (80000, 89999): 12690, (90000, 99999): 13690, (100000, 109999): 14950, (110000, 120000): 15950},
+    (200000, 249999): {(0, 9999): 2040, (10000, 19999): 4440, (20000, 29999): 6840, (30000, 39999): 8390, (40000, 49999): 9240, (50000, 59999): 10450, (60000, 69999): 11450, (70000, 79999): 12450, (80000, 89999): 13450, (90000, 99999): 14450, (100000, 109999): 15900, (110000, 120000): 17100},
+    (250000, 399999): {(0, 9999): 2040, (10000, 19999): 4440, (20000, 29999): 6840, (30000, 39999): 8390, (40000, 49999): 9390, (50000, 59999): 10930, (60000, 69999): 12130, (70000, 79999): 13330, (80000, 89999): 14530, (90000, 99999): 15730, (100000, 109999): 17200, (110000, 120000): 18400},
+    (400000, 999999): {(0, 9999): 2040, (10000, 19999): 4440, (20000, 29999): 6840, (30000, 39999): 8390, (40000, 49999): 9390, (50000, 59999): 10930, (60000, 69999): 12130, (70000, 79999): 13330, (80000, 89999): 14530, (90000, 99999): 15730, (100000, 109999): 17200, (110000, 120000): 18400},
+}
+
+
+def lookup_two_jobs_adjustment(higher_wage: float, lower_wage: float) -> float:
+    """Look up additional annual withholding from W-4 Multiple Jobs table."""
+    for (h_min, h_max), cols in MFJ_TWO_JOBS_TABLE.items():
+        if h_min <= higher_wage <= h_max:
+            for (l_min, l_max), adjustment in cols.items():
+                if l_min <= lower_wage <= l_max:
+                    return adjustment
+    return 0
+
 
 def load_w4_settings(party: str) -> dict:
     """Load W-4 settings from profile.yaml."""
@@ -92,6 +127,7 @@ def calc_withholding_per_period(gross_per_period: float, w4: dict) -> float:
     filing = w4.get("filing_status", "mfj")
     freq = w4.get("pay_frequency", "biweekly")
     periods = PAY_PERIODS.get(freq, 26)
+    step2_checkbox = w4.get("step2_checkbox", False)
 
     step3 = w4.get("step3_dependents", 0)
     step4a = w4.get("step4a_other_income", 0)
@@ -105,7 +141,12 @@ def calc_withholding_per_period(gross_per_period: float, w4: dict) -> float:
     adjusted_annual = annual_wages + step4a - step4b
 
     # Step 3: Look up tentative annual withholding from tables
-    table = WITHHOLDING_TABLES_2025.get(filing, WITHHOLDING_TABLES_2025["mfj"])
+    # If Step 2(c) checkbox is checked, use Single table (halves MFJ brackets)
+    if step2_checkbox and filing == "mfj":
+        table = WITHHOLDING_TABLES_2025["single"]
+    else:
+        table = WITHHOLDING_TABLES_2025.get(filing, WITHHOLDING_TABLES_2025["mfj"])
+
     tentative_annual = 0
     prev_threshold = 0
     for threshold, base_tax, rate in table:
@@ -315,17 +356,29 @@ def calc(year, party, salary, bonus, other_salary, future_grant, price, salary_r
 
     # Calculate salary withholding rate from W-4 if not specified
     salary_rate_source = None
+    two_jobs_adjustment = 0
+    two_jobs_per_period = 0
+    spouse_works_actual = True  # Reality: spouse does work
+
     if salary_rate is None and w4_settings:
-        # Prefer observed rate from stubs if available
-        observed = w4_settings.get("observed_salary_rate")
-        if observed:
-            salary_rate = observed
-            salary_rate_source = f"observed from stubs"
-        else:
-            wh_per_period = calc_withholding_per_period(biweekly_gross, w4_settings)
-            salary_rate = wh_per_period / biweekly_gross if biweekly_gross > 0 else 0
-            step3 = w4_settings.get("step3_dependents", 0)
-            salary_rate_source = f"W-4 calc ({w4_settings.get('filing_status', 'mfj').upper()}, ${step3:,} Step 3)"
+        # Check if W-4 indicates spouse works
+        spouse_works_on_w4 = w4_settings.get("step2_spouse_works", False)
+        step2_checkbox = w4_settings.get("step2_checkbox", False)
+
+        # Calculate base withholding from W-4
+        wh_per_period = calc_withholding_per_period(biweekly_gross, w4_settings)
+        salary_rate = wh_per_period / biweekly_gross if biweekly_gross > 0 else 0
+        step3 = w4_settings.get("step3_dependents", 0)
+        step2_note = ", Step 2(c) checked" if step2_checkbox else (", spouse works" if spouse_works_on_w4 else "")
+        salary_rate_source = f"W-4 ({w4_settings.get('filing_status', 'mfj').upper()}, ${step3:,} Step 3{step2_note})"
+
+        # If spouse actually works but W-4 doesn't reflect it, calculate adjustment needed
+        # (Step 2 checkbox already accounts for two jobs via halved brackets)
+        if spouse_works_actual and not spouse_works_on_w4 and not step2_checkbox:
+            higher_wage = max(salary, other_salary)
+            lower_wage = min(salary, other_salary)
+            two_jobs_adjustment = lookup_two_jobs_adjustment(higher_wage, lower_wage)
+            two_jobs_per_period = two_jobs_adjustment / 26
     elif salary_rate is None:
         salary_rate = 0.084  # fallback
         salary_rate_source = "default (no W-4 config)"
@@ -435,6 +488,8 @@ def calc(year, party, salary, bonus, other_salary, future_grant, price, salary_r
     click.echo("-" * 50)
     click.echo(f"Salary: {salary_source}")
     click.echo(f"Salary WH rate: {salary_rate_source} ({salary_rate*100:.1f}%)")
+    if two_jobs_adjustment > 0:
+        click.echo(f"Two-jobs adjustment: ${two_jobs_adjustment:,.0f}/yr (${two_jobs_per_period:,.0f}/check)")
     click.echo(f"Bonus: {bonus_source}")
     click.echo(f"RSUs: {rsu_source}")
     click.echo(f"Supplemental rate: {supp_source} ({supplemental_rate*100:.1f}%)")
@@ -471,10 +526,19 @@ def calc(year, party, salary, bonus, other_salary, future_grant, price, salary_r
 
     click.echo(f"\nSHORTFALL:                       ${shortfall:>12,.2f}")
 
-    if shortfall > 0:
+    if shortfall > 0 or two_jobs_adjustment > 0:
         click.echo(f"\nRECOMMENDED W-4 STEP 4(c) ({party_label})")
         click.echo("-" * 50)
-        click.echo(f"Extra withholding per paycheck:  ${recommended:>12,.0f}")
+
+        # Include two-jobs adjustment if spouse works but not on W-4
+        if two_jobs_adjustment > 0:
+            click.echo(f"Two-jobs table (W-4 pg 4):       ${two_jobs_per_period:>12,.0f}")
+            click.echo(f"Additional for shortfall:        ${max(0, additional_per_period):>12,.0f}")
+            total_extra = two_jobs_per_period + max(0, additional_per_period)
+            total_rounded = math.ceil(total_extra / 50) * 50
+            click.echo(f"TOTAL Step 4(c):                 ${total_rounded:>12,.0f}")
+        else:
+            click.echo(f"Extra withholding per paycheck:  ${recommended:>12,.0f}")
 
         # Alternative: Uniform rate with different supplemental rates
         if party_total > 0 and (bonus > 0 or total_rsu > 0):
