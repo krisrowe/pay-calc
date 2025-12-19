@@ -364,6 +364,9 @@ class YAMLParser:
             if hp:
                 normalized = re.sub(hp, '', normalized, flags=re.IGNORECASE)
 
+        # Track matched spans to prevent duplicate extraction
+        matched_spans = set()
+
         for pattern_def in item_patterns:
             if isinstance(pattern_def, str):
                 regex = pattern_def
@@ -381,6 +384,11 @@ class YAMLParser:
 
             try:
                 for match in re.finditer(regex, normalized, flags):
+                    # Skip if this span overlaps with already-matched text
+                    span = (match.start(), match.end())
+                    if any(s[0] < span[1] and span[0] < s[1] for s in matched_spans):
+                        continue
+
                     item = {}
 
                     if groups:
@@ -398,6 +406,7 @@ class YAMLParser:
 
                     if item:
                         items.append(item)
+                        matched_spans.add(span)
 
             except re.error as e:
                 self.debug_info["extraction_errors"].append(f"{section_name}_items: {e}")

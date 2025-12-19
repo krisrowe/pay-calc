@@ -1009,7 +1009,8 @@ PAYSTUB_OCR_PROMPT = """Extract pay stub data into this JSON structure:
 }
 
 Include all deductions (401k, health insurance, etc.) and all earnings types found.
-Use 0.00 for any tax fields not present on the stub.
+Include non-cash taxable fringe benefits (EEGTL, group term life, imputed income) in the earnings array.
+For taxable_wages: use value shown on stub, or 0.00 if not shown.
 pay_summary.current.taxes should be the sum of all tax withholdings.
 """
 
@@ -1720,6 +1721,155 @@ def _import_single_page(
         return result
 
 
+def _compute_taxable_wages(data: Dict[str, Any]) -> float:
+    """Compute FICA taxable wages from earnings minus Section 125 deductions.
+
+    FICA taxable wages = sum(earnings) - sum(section_125_deductions)
+
+    Section 125 deductions (reduce FICA wages):
+    - Health insurance (medical, dental, vision)
+    - FSA (Flexible Spending Account)
+    - HSA (Health Savings Account)
+
+    NOT Section 125 (do NOT reduce FICA wages):
+    - 401k contributions (only reduce federal income tax)
+    - After-tax deductions
+
+    Returns:
+        Computed FICA taxable wages, or 0.0 if no earnings found
+    """
+    # Get gross from pay_summary
+    pay_summary = data.get("pay_summary", {})
+    current = pay_summary.get("current", {})
+    gross = current.get("gross", 0.0) or 0.0
+
+    # Sum all earnings
+    earnings = data.get("earnings", [])
+    earnings_sum = 0.0
+    if isinstance(earnings, list):
+        for item in earnings:
+            amount = item.get("current_amount") or item.get("current") or 0.0
+            if isinstance(amount, (int, float)):
+                earnings_sum += amount
+
+    # Determine which value to use:
+    # - If earnings_sum > gross * 1.1: likely duplicate entries, use gross
+    # - If earnings_sum > gross: gross excludes non-cash fringe, use earnings_sum
+    # - Otherwise: use gross
+    # Note: non-cash fringe is typically <1% of gross, so 1.1x is generous
+    if gross > 0 and earnings_sum > gross * 1.1:
+        # Suspicious: earnings way higher than gross, probably parser duplicates
+        earnings_total = gross
+    elif earnings_sum > gross:
+        # Normal: earnings includes non-cash fringe not in gross
+        earnings_total = earnings_sum
+    else:
+        earnings_total = gross if gross > 0 else earnings_sum
+
+    if earnings_total == 0.0:
+        return 0.0
+
+    # Sum Section 125 deductions
+    section_125_total = 0.0
+    deductions = data.get("deductions", [])
+
+    # Section 125 keywords (case-insensitive matching)
+    # Note: 401k is pre-federal-income-tax but NOT pre-FICA, so we exclude "pretax"
+    section_125_keywords = [
+        "medical", "dental", "vision", "fsa", "hsa",
+        "flex", "cafeteria", "section 125"
+    ]
+
+    if isinstance(deductions, list):
+        for item in deductions:
+            ded_type = (item.get("type") or item.get("name") or "").lower()
+            amount = item.get("current_amount") or item.get("current") or 0.0
+
+            # Check if this is a Section 125 deduction
+            is_section_125 = any(kw in ded_type for kw in section_125_keywords)
+
+            # Explicitly NOT Section 125
+            if "401k" in ded_type or "401(k)" in ded_type or "retirement" in ded_type:
+                is_section_125 = False
+
+            if is_section_125 and isinstance(amount, (int, float)):
+                section_125_total += abs(amount)
+
+    elif isinstance(deductions, dict):
+        # OCR format: {"health_insurance": {"current": 100}, ...}
+        for ded_name, ded_vals in deductions.items():
+            ded_type = ded_name.lower()
+            if isinstance(ded_vals, dict):
+                amount = ded_vals.get("current") or ded_vals.get("current_amount") or 0.0
+            else:
+                amount = ded_vals or 0.0
+
+            is_section_125 = any(kw in ded_type for kw in section_125_keywords)
+            if "401k" in ded_type or "retirement" in ded_type:
+                is_section_125 = False
+
+            if is_section_125 and isinstance(amount, (int, float)):
+                section_125_total += abs(amount)
+
+    fica_taxable = earnings_total - section_125_total
+    logger.debug(f"FICA taxable: {earnings_total:.2f} earnings - {section_125_total:.2f} sec125 = {fica_taxable:.2f}")
+    return round(fica_taxable, 2)
+
+
+def _validate_taxable_wages(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Validate or populate taxable_wages for each tax type.
+
+    Computes expected taxable_wages from earnings sum, then:
+    - If taxable_wages missing/zero: populate with computed value (debug log)
+    - If taxable_wages present: validate against computed (debug if match, warning if not)
+
+    Args:
+        data: Extracted stub data dict
+
+    Returns:
+        Modified data dict with taxable_wages populated/validated
+    """
+    # Only process pay stubs, not W-2s
+    if "pay_date" not in data:
+        return data
+
+    computed = _compute_taxable_wages(data)
+    if computed == 0.0:
+        logger.debug("taxable_wages: no earnings to compute from")
+        return data
+
+    taxes = data.get("taxes", {})
+    if not taxes:
+        return data
+
+    # Tax types to check (Medicare is primary, others should match)
+    tax_types = ["medicare", "social_security", "federal_income", "federal_income_tax"]
+
+    for tax_type in tax_types:
+        tax_data = taxes.get(tax_type, {})
+        if not tax_data:
+            continue
+
+        existing = tax_data.get("taxable_wages", 0.0) or 0.0
+
+        if existing == 0.0:
+            # Populate with computed value
+            tax_data["taxable_wages"] = computed
+            logger.debug(f"taxable_wages: populated {tax_type} with computed {computed}")
+        else:
+            # Validate against computed
+            tolerance = 1.0  # Allow $1 rounding difference
+            if abs(existing - computed) <= tolerance:
+                logger.debug(f"taxable_wages: {tax_type} validated ({existing} == {computed})")
+            else:
+                logger.warning(
+                    f"taxable_wages: {tax_type} mismatch - stub has {existing}, "
+                    f"computed {computed} (keeping stub value)"
+                )
+
+    return data
+
+
 def _extract_pdf_auto(pdf_path: Path) -> Optional[Dict[str, Any]]:
     """Extract data from PDF with auto-detection.
 
@@ -1752,13 +1902,16 @@ def _extract_pdf_auto(pdf_path: Path) -> Optional[Dict[str, Any]]:
             result = _parse_text_pdf_auto(pdf_text, pdf_path)
             if result:
                 result["_extraction_method"] = "text"
-                return result
+                return _validate_taxable_wages(result)
             # Text parsing failed - fall back to OCR
             logger.debug("text parsing returned None, falling back to OCR")
 
         # Image-based PDF or text parsing failed - use OCR
         logger.debug("calling _extract_pdf_ocr")
-        return _extract_pdf_ocr(pdf_path)
+        ocr_result = _extract_pdf_ocr(pdf_path)
+        if ocr_result:
+            return _validate_taxable_wages(ocr_result)
+        return None
 
     except ImportError:
         return None
@@ -1938,6 +2091,9 @@ For PAY STUB:
     "current": {"gross": 0.00},
     "ytd": {"gross": 0.00}
   },
+  "earnings": [
+    {"type": "description", "current_amount": 0.00, "ytd_amount": 0.00}
+  ],
   "taxes": {
     "federal_income": {"current": 0.00, "ytd": 0.00},
     "social_security": {"current": 0.00, "ytd": 0.00},
@@ -1952,8 +2108,10 @@ For PAY STUB:
   }
 }
 
-IMPORTANT: Extract ALL deductions shown on the pay stub (401k, health, dental, FSA, HSA, etc).
-The math should work: gross - taxes - deductions ≈ net_pay
+IMPORTANT:
+- Extract ALL earnings including "Non-Cash Fringe" items (EEGTL, Group Term Life, imputed income)
+- Extract ALL deductions (401k, health, dental, FSA, HSA, etc)
+- The math should work: gross - taxes - deductions ≈ net_pay
 
 For W-2:
 {
