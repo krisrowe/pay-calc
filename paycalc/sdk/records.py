@@ -1738,33 +1738,20 @@ def _compute_taxable_wages(data: Dict[str, Any]) -> float:
     Returns:
         Computed FICA taxable wages, or 0.0 if no earnings found
     """
-    # Get gross from pay_summary
-    pay_summary = data.get("pay_summary", {})
-    current = pay_summary.get("current", {})
-    gross = current.get("gross", 0.0) or 0.0
-
-    # Sum all earnings
+    # Sum all earnings (includes non-cash fringe like EEGTL)
     earnings = data.get("earnings", [])
-    earnings_sum = 0.0
+    earnings_total = 0.0
     if isinstance(earnings, list):
         for item in earnings:
             amount = item.get("current_amount") or item.get("current") or 0.0
             if isinstance(amount, (int, float)):
-                earnings_sum += amount
+                earnings_total += amount
 
-    # Determine which value to use:
-    # - If earnings_sum > gross * 1.1: likely duplicate entries, use gross
-    # - If earnings_sum > gross: gross excludes non-cash fringe, use earnings_sum
-    # - Otherwise: use gross
-    # Note: non-cash fringe is typically <1% of gross, so 1.1x is generous
-    if gross > 0 and earnings_sum > gross * 1.1:
-        # Suspicious: earnings way higher than gross, probably parser duplicates
-        earnings_total = gross
-    elif earnings_sum > gross:
-        # Normal: earnings includes non-cash fringe not in gross
-        earnings_total = earnings_sum
-    else:
-        earnings_total = gross if gross > 0 else earnings_sum
+    # Fallback: use gross from pay_summary if no earnings
+    if earnings_total == 0.0:
+        pay_summary = data.get("pay_summary", {})
+        current = pay_summary.get("current", {})
+        earnings_total = current.get("gross", 0.0) or 0.0
 
     if earnings_total == 0.0:
         return 0.0
