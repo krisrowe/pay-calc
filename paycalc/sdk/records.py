@@ -1747,12 +1747,6 @@ def _compute_taxable_wages(data: Dict[str, Any]) -> float:
             if isinstance(amount, (int, float)):
                 earnings_total += amount
 
-    # Fallback: use gross from pay_summary if no earnings
-    if earnings_total == 0.0:
-        pay_summary = data.get("pay_summary", {})
-        current = pay_summary.get("current", {})
-        earnings_total = current.get("gross", 0.0) or 0.0
-
     if earnings_total == 0.0:
         return 0.0
 
