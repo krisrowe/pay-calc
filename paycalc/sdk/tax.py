@@ -12,7 +12,9 @@ import yaml
 
 def load_tax_rules(year: str) -> dict:
     """Load tax rules for a specific year from tax-rules/YYYY.yaml."""
-    config_file = Path(f"tax-rules/{year}.yaml")
+    # Use package-relative path so it works regardless of CWD
+    package_root = Path(__file__).parent.parent.parent  # sdk -> paycalc -> project root
+    config_file = package_root / "tax-rules" / f"{year}.yaml"
     if not config_file.exists():
         raise FileNotFoundError(f"Tax rules file not found for year {year}: {config_file}")
 
