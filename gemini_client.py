@@ -1,11 +1,12 @@
 
-"""Gemini CLI client for processing files with AI extraction."""
+"""Gemini CLI client for processing files and prompts with AI."""
 
 import subprocess
 import json
 import tempfile
 import pathlib
 import shutil
+import re
 from typing import Optional
 
 
@@ -28,6 +29,110 @@ EXTRACTION TASK:
 PROMPT_SUFFIX = """
 
 Remember: Return ONLY the JSON object. No other text."""
+
+
+def _run_gemini_cli(
+    prompt: str,
+    timeout: int = 120,
+    cwd: Optional[str] = None,
+) -> str:
+    """
+    Run Gemini CLI with a prompt and return raw output.
+
+    This is the core subprocess runner shared by process_file and process_prompt.
+
+    Args:
+        prompt: The prompt to send to Gemini.
+        timeout: Timeout in seconds (default 120).
+        cwd: Working directory for the subprocess (optional).
+
+    Returns:
+        The raw stdout from Gemini CLI.
+
+    Raises:
+        RuntimeError: If Gemini CLI fails or times out.
+    """
+    cmd = [
+        'gemini',
+        '--allowed-mcp-server-names', 'none',
+        '-o', 'text',
+        prompt
+    ]
+
+    try:
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=timeout,
+            cwd=cwd
+        )
+        return result.stdout.strip()
+
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"Gemini CLI timed out after {timeout}s")
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            f"Gemini CLI failed with exit code {e.returncode}.\n"
+            f"Stderr: {e.stderr}"
+        ) from e
+
+
+def process_prompt(
+    prompt: str,
+    timeout: int = 120,
+) -> str:
+    """
+    Process a simple text prompt using Gemini CLI.
+
+    Unlike process_file, this does not wrap the prompt or expect JSON output.
+    It returns the raw text response from Gemini.
+
+    Args:
+        prompt: The prompt to send to Gemini.
+        timeout: Timeout in seconds (default 120).
+
+    Returns:
+        The text response from Gemini.
+
+    Raises:
+        RuntimeError: If Gemini CLI fails or times out.
+    """
+    return _run_gemini_cli(prompt, timeout=timeout)
+
+
+def get_stock_quote(ticker: str, timeout: int = 30) -> float:
+    """
+    Get the last closing price for a stock ticker.
+
+    Uses Gemini to look up the most recent closing price.
+
+    Args:
+        ticker: Stock ticker symbol (e.g., "GOOG", "AAPL").
+        timeout: Timeout in seconds (default 30).
+
+    Returns:
+        The last closing price as a float.
+
+    Raises:
+        RuntimeError: If Gemini CLI fails or times out.
+        ValueError: If the response cannot be parsed as a number.
+    """
+    prompt = (
+        f"Tell me at what price did the stock {ticker.upper()} last close as a "
+        f"decimal point number with no dollar sign and no other text so that "
+        f"your response can be parsed as a decimal number"
+    )
+
+    response = _run_gemini_cli(prompt, timeout=timeout)
+
+    try:
+        return float(response.strip())
+    except ValueError:
+        raise ValueError(
+            f"Could not parse stock quote response as number: '{response}'"
+        )
 
 
 def process_file(
@@ -77,23 +182,7 @@ def process_file(
         full_prompt = wrapped_prompt.replace("{file_path}", safe_name)
 
         # Run Gemini from temp directory so file is in its workspace
-        cmd = [
-            'gemini',
-            '--allowed-mcp-server-names', 'none',
-            '-o', 'text',
-            full_prompt
-        ]
-
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=timeout,
-            cwd=temp_dir  # Run from temp dir so file is accessible
-        )
-
-        response_str = result.stdout.strip()
+        response_str = _run_gemini_cli(full_prompt, timeout=timeout, cwd=temp_dir)
 
         # Handle markdown code blocks in response
         if '```json' in response_str:
@@ -110,13 +199,6 @@ def process_file(
 
         return json.loads(response_str)
 
-    except subprocess.TimeoutExpired:
-        raise RuntimeError(f"Gemini CLI timed out after {timeout}s")
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            f"Gemini CLI failed with exit code {e.returncode}.\n"
-            f"Stderr: {e.stderr}"
-        ) from e
     except json.JSONDecodeError as e:
         raise RuntimeError(
             f"Failed to parse JSON from Gemini output: {e}\n"

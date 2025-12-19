@@ -704,6 +704,30 @@ def _print_projection_report(proj: dict, analysis_data: dict):
     click.echo("\n" + "=" * 60)
 
 
+@cli.command("stock-quote")
+@click.argument("ticker")
+@click.option("--last-closed", is_flag=True, required=True, help="Get the last closing price (required).")
+def stock_quote(ticker, last_closed):
+    """Get the last closing price for a stock ticker.
+
+    Uses AI to look up the most recent closing price. Requires --last-closed
+    flag (real-time quotes not supported).
+
+    Examples:
+      pay-calc stock-quote GOOG --last-closed
+      pay-calc stock-quote AAPL --last-closed
+    """
+    from gemini_client import get_stock_quote
+
+    try:
+        price = get_stock_quote(ticker)
+        click.echo(f"{price:.2f}")
+    except ValueError as e:
+        raise click.ClickException(str(e))
+    except RuntimeError as e:
+        raise click.ClickException(f"Failed to get quote: {e}")
+
+
 @cli.command("reset")
 @click.option("--force", is_flag=True, help="Skip confirmation prompt.")
 def reset(force: bool):

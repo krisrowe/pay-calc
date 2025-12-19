@@ -147,6 +147,27 @@ async def get_record(
         return {"error": str(e), "record": None}
 
 
+@mcp.tool()
+async def get_stock_quote(
+    ticker: str = Field(description="Stock ticker symbol (e.g., 'GOOG', 'AAPL')"),
+) -> dict[str, Any]:
+    """Get the last closing price for a stock ticker. Uses AI to look up the most recent closing price."""
+    try:
+        from gemini_client import get_stock_quote as fetch_quote
+
+        price = fetch_quote(ticker)
+        return {
+            "ticker": ticker.upper(),
+            "last_close": price,
+            "formatted": f"${price:.2f}",
+        }
+
+    except ValueError as e:
+        return {"error": str(e), "ticker": ticker.upper(), "last_close": None}
+    except RuntimeError as e:
+        return {"error": f"Failed to get quote: {e}", "ticker": ticker.upper(), "last_close": None}
+
+
 # --- Resources (optional, for browsing) ---
 
 @mcp.resource("paycalc://records/years")
