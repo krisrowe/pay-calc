@@ -279,6 +279,38 @@ async def generate_w2(
         return {"error": str(e), "ytd_w2": None}
 
 
+@mcp.tool()
+async def generate_tax_projection(
+    year: str = Field(description="Tax year (4 digits, e.g., '2025')"),
+    output_format: str = Field(default="json", description="Output format: 'json' (default) or 'csv'"),
+) -> dict[str, Any] | str:
+    """Calculate federal tax liability and refund/owed amount.
+
+    Loads W-2 data for both parties (him + her), applies MFJ tax brackets,
+    and calculates federal income tax, medicare taxes, and projected
+    refund or amount owed.
+
+    Returns structured JSON by default, or CSV string if output_format='csv'.
+
+    Requires W-2 or analysis data to exist for both parties.
+    """
+    try:
+        from paycalc.sdk.tax import generate_tax_projection as sdk_tax_projection
+
+        result = sdk_tax_projection(year, output_format=output_format)
+
+        if output_format == "csv":
+            return {"csv": result}
+
+        return result
+
+    except FileNotFoundError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"Error generating tax projection: {e}")
+        return {"error": str(e)}
+
+
 # --- Resources (optional, for browsing) ---
 
 @mcp.resource("paycalc://records/years")

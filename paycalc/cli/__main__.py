@@ -194,11 +194,93 @@ def w2_extract(year, cache, output_dir):
     click.echo("\nExtraction complete.")
 
 
+def _format_tax_projection_text(proj: dict) -> str:
+    """Format tax projection as ASCII tables for terminal display."""
+    lines = []
+
+    # Header
+    lines.append(f"TAX PROJECTION FOR {proj['year']}")
+    lines.append("=" * 60)
+    lines.append("")
+
+    # Income section
+    lines.append("INCOME")
+    lines.append("-" * 40)
+    lines.append(f"  His wages (W-2 Box 1):     ${proj['him_wages']:>12,.2f}")
+    lines.append(f"  Her wages (W-2 Box 1):     ${proj['her_wages']:>12,.2f}")
+    lines.append(f"  Combined gross income:     ${proj['combined_wages']:>12,.2f}")
+    lines.append(f"  Standard deduction (MFJ): -${proj['standard_deduction']:>12,.2f}")
+    lines.append(f"  Taxable income:            ${proj['final_taxable_income']:>12,.2f}")
+    lines.append("")
+
+    # Tax brackets
+    lines.append("FEDERAL INCOME TAX BRACKETS (MFJ)")
+    lines.append("-" * 60)
+    lines.append(f"  {'Bracket':<20} {'Rate':>8} {'Tax Assessed':>15}")
+    lines.append(f"  {'-'*20} {'-'*8} {'-'*15}")
+
+    previous_max = 0
+    for bracket in proj["tax_brackets"]:
+        rate = bracket["rate"]
+        if "up_to" in bracket:
+            bracket_max = bracket["up_to"]
+            income_in_bracket = min(proj["final_taxable_income"], bracket_max) - previous_max
+            income_in_bracket = max(0, income_in_bracket)
+            tax = income_in_bracket * rate
+            bracket_str = f"${previous_max:,.0f} - ${bracket_max:,.0f}"
+            previous_max = bracket_max
+        elif "over" in bracket:
+            income_in_bracket = max(0, proj["final_taxable_income"] - bracket["over"])
+            tax = income_in_bracket * rate
+            bracket_str = f"Over ${bracket['over']:,.0f}"
+        lines.append(f"  {bracket_str:<20} {rate:>7.0%} ${tax:>14,.2f}")
+
+    lines.append(f"  {'-'*20} {'-'*8} {'-'*15}")
+    lines.append(f"  {'Total Federal Tax':<20} {'':<8} ${proj['federal_income_tax_assessed']:>14,.2f}")
+    lines.append("")
+
+    # Medicare section
+    lines.append("MEDICARE TAXES")
+    lines.append("-" * 40)
+    lines.append(f"  Combined medicare wages:   ${proj['combined_medicare_wages']:>12,.2f}")
+    lines.append(f"  Medicare taxes withheld:   ${proj['combined_medicare_withheld']:>12,.2f}")
+    lines.append(f"  Medicare taxes assessed:  -${proj['total_medicare_taxes_assessed']:>12,.2f}")
+    medicare_label = "Medicare refund:" if proj["medicare_refund"] >= 0 else "Medicare owed:"
+    lines.append(f"  {medicare_label:<25} ${proj['medicare_refund']:>12,.2f}")
+    lines.append("")
+
+    # Withholding section
+    lines.append("WITHHOLDING")
+    lines.append("-" * 40)
+    lines.append(f"  His fed tax withheld:      ${proj['him_fed_withheld']:>12,.2f}")
+    lines.append(f"  Her fed tax withheld:      ${proj['her_fed_withheld']:>12,.2f}")
+    total_withheld = proj["him_fed_withheld"] + proj["her_fed_withheld"]
+    lines.append(f"  Total withheld:            ${total_withheld:>12,.2f}")
+    lines.append("")
+
+    # Final result
+    lines.append("TAX RETURN PROJECTION")
+    lines.append("-" * 40)
+    lines.append(f"  Federal income tax:       -${proj['federal_income_tax_assessed']:>12,.2f}")
+    lines.append(f"  Medicare adjustment:       ${proj['medicare_refund']:>12,.2f}")
+    lines.append(f"  Tentative tax:            -${proj['tentative_tax_per_return']:>12,.2f}")
+    lines.append(f"  Total withheld:            ${total_withheld:>12,.2f}")
+    lines.append("  " + "=" * 38)
+    if proj["final_refund"] >= 0:
+        lines.append(f"  REFUND:                    ${proj['final_refund']:>12,.2f}")
+    else:
+        lines.append(f"  OWED:                     -${abs(proj['final_refund']):>12,.2f}")
+
+    return "\n".join(lines)
+
+
 @cli.command("taxes")
 @click.argument("year")
-@click.option("--output", "-o", type=click.Path(), help="Output CSV path (default: XDG data dir)")
-@click.option("--data-dir", type=click.Path(exists=True), help="Directory containing W-2 or analysis JSON files (default: XDG data dir)")
-def taxes(year, output, data_dir):
+@click.option("--format", "output_format", type=click.Choice(["text", "json", "csv"]), default="text",
+              help="Output format (default: text)")
+@click.option("--data-dir", type=click.Path(exists=True),
+              help="Directory containing W-2 or analysis JSON files (default: XDG data dir)")
+def taxes(year, output_format, data_dir):
     """Calculate federal tax liability and refund/owed amount.
 
     Loads income data for both parties (him + her), applies tax brackets,
@@ -212,7 +294,13 @@ def taxes(year, output, data_dir):
 
     For mid-year projections, run 'analysis' for each party first.
 
-    Output is written to XDG data directory by default, or to --output path.
+    \b
+    Output formats:
+      --format=text  ASCII tables (default, for terminal viewing)
+      --format=json  JSON object (for programmatic use)
+      --format=csv   CSV format (for spreadsheet import)
+
+    Redirect output to file: pay-calc taxes 2025 --format=csv > taxes.csv
     """
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
@@ -220,12 +308,18 @@ def taxes(year, output, data_dir):
     from paycalc.sdk import generate_tax_projection, get_data_path
 
     data_path = Path(data_dir) if data_dir else get_data_path()
-    output_path = Path(output) if output else None
 
     try:
-        click.echo(f"Loading income data for {year}...")
-        result_path = generate_tax_projection(year, data_dir=data_path, output_path=output_path)
-        click.echo(f"\nSuccessfully generated tax calculation: {result_path}")
+        if output_format == "text":
+            # Get JSON, format as ASCII tables
+            projection = generate_tax_projection(year, data_dir=data_path, output_format="json")
+            click.echo(_format_tax_projection_text(projection))
+        elif output_format == "json":
+            projection = generate_tax_projection(year, data_dir=data_path, output_format="json")
+            click.echo(json.dumps(projection, indent=2))
+        else:  # csv
+            csv_output = generate_tax_projection(year, data_dir=data_path, output_format="csv")
+            click.echo(csv_output)
 
     except FileNotFoundError as e:
         raise click.ClickException(str(e))

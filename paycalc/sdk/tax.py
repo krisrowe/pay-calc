@@ -1,10 +1,11 @@
 """Tax projection calculations and output generation."""
 
 import csv
+import io
 import json
 from collections import defaultdict
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal, Optional, Union
 
 import yaml
 
@@ -173,6 +174,88 @@ def generate_projection(year: str, data_dir: Path = None, tax_rules: dict = None
     }
 
 
+def _write_projection_rows(writer, projection: dict) -> None:
+    """Write tax projection rows to a CSV writer.
+
+    Internal function used by both file and string CSV generation.
+    """
+    writer.writerow(["", "", "INCOME TAX BRACKETS (MFJ)", "", "", "HIM", ""])
+    writer.writerow(["", "", "Applied to income of", f'${projection["final_taxable_income"]:,.2f}', "", "Wages:", f'${projection["him_wages"]:,.2f}'])
+    writer.writerow(["", "Earnings Above", "Rate / Bracket", "Tax Assessed", "", "Fed Tax Withheld:", f'${projection["him_fed_withheld"]:,.2f}'])
+
+    previous_bracket_max = 0
+    for bracket in projection["tax_brackets"]:
+        rate = bracket["rate"]
+        row = ["", "", "", ""]
+
+        if "up_to" in bracket:
+            row[1] = f"${previous_bracket_max:,.2f}"
+            current_bracket_max = bracket["up_to"]
+            income_in_bracket = min(projection["final_taxable_income"], current_bracket_max) - previous_bracket_max
+            if income_in_bracket < 0:
+                income_in_bracket = 0
+            tax_assessed = income_in_bracket * rate
+            row[3] = f"${tax_assessed:,.2f}"
+            previous_bracket_max = current_bracket_max
+        elif "over" in bracket:
+            row[1] = f'${bracket["over"]:,.2f}'
+            if projection["final_taxable_income"] > bracket["over"]:
+                income_in_bracket = projection["final_taxable_income"] - bracket["over"]
+                tax_assessed = income_in_bracket * rate
+            else:
+                tax_assessed = 0
+            row[3] = f"${tax_assessed:,.2f}"
+
+        row[2] = f"{rate:.0%}"
+        writer.writerow(row)
+
+    writer.writerow(["", "", "Total Assessed", f'${projection["federal_income_tax_assessed"]:,.2f}', "", "", ""])
+    writer.writerow([])
+
+    writer.writerow(["", "", "", "", "", "HER", ""])
+    writer.writerow(["", "", "", "", "", "Wages:", f'${projection["her_wages"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Fed Tax Withheld:", f'${projection["her_fed_withheld"]:,.2f}'])
+    writer.writerow([])
+
+    writer.writerow(["", "", "", "", "", "TAXABLE INCOME", ""])
+    writer.writerow(["", "", "", "", "", "His wages per W-2", f'${projection["him_wages"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Her wages per W-2", f'${projection["her_wages"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Combined gross income", f'${projection["combined_wages"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Standard deduction", f'-${projection["standard_deduction"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Taxable income", f'${projection["final_taxable_income"]:,.2f}'])
+    writer.writerow([])
+
+    writer.writerow(["", "", "", "", "", "MEDICARE TAXES OVER OR UNDERPAID", ""])
+    writer.writerow(["", "", "", "", "", "Total medicare wages (his and hers)", f'${projection["combined_medicare_wages"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Total medicare taxes withheld", f'${projection["combined_medicare_withheld"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Total medicare taxes assessed", f'-${projection["total_medicare_taxes_assessed"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Refund on medicare taxes withheld (or amount owed if negative)", f'${projection["medicare_refund"]:,.2f}'])
+    writer.writerow([])
+
+    writer.writerow(["", "", "", "", "", "TAX RETURN / REFUND PROJECTION", ""])
+    writer.writerow(["", "", "", "", "", "Federal Income Tax", f'-${projection["federal_income_tax_assessed"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Additional Medicare Tax", f'${projection["medicare_refund"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Tentative tax per tax return", f'-${projection["tentative_tax_per_return"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "His income tax withheld", f'${projection["him_fed_withheld"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Her income tax withheld", f'${projection["her_fed_withheld"]:,.2f}'])
+    writer.writerow(["", "", "", "", "", "Refund (or owed, if negative)", f'${projection["final_refund"]:,.2f}'])
+
+
+def projection_to_csv_string(projection: dict) -> str:
+    """Convert tax projection to CSV string.
+
+    Args:
+        projection: Projection data from generate_projection()
+
+    Returns:
+        CSV formatted string
+    """
+    output = io.StringIO()
+    writer = csv.writer(output)
+    _write_projection_rows(writer, projection)
+    return output.getvalue()
+
+
 def write_projection_csv(projection: dict, output_path: Path) -> Path:
     """Write tax projection to CSV file.
 
@@ -185,79 +268,51 @@ def write_projection_csv(projection: dict, output_path: Path) -> Path:
     """
     with open(output_path, "w", newline="") as csvfile:
         writer = csv.writer(csvfile)
-
-        writer.writerow(["", "", "INCOME TAX BRACKETS (MFJ)", "", "", "HIM", ""])
-        writer.writerow(["", "", "Applied to income of", f'${projection["final_taxable_income"]:,.2f}', "", "Wages:", f'${projection["him_wages"]:,.2f}'])
-        writer.writerow(["", "Earnings Above", "Rate / Bracket", "Tax Assessed", "", "Fed Tax Withheld:", f'${projection["him_fed_withheld"]:,.2f}'])
-
-        previous_bracket_max = 0
-        for bracket in projection["tax_brackets"]:
-            rate = bracket["rate"]
-            row = ["", "", "", ""]
-
-            if "up_to" in bracket:
-                row[1] = f"${previous_bracket_max:,.2f}"
-                current_bracket_max = bracket["up_to"]
-                income_in_bracket = min(projection["final_taxable_income"], current_bracket_max) - previous_bracket_max
-                if income_in_bracket < 0:
-                    income_in_bracket = 0
-                tax_assessed = income_in_bracket * rate
-                row[3] = f"${tax_assessed:,.2f}"
-                previous_bracket_max = current_bracket_max
-            elif "over" in bracket:
-                row[1] = f'${bracket["over"]:,.2f}'
-                if projection["final_taxable_income"] > bracket["over"]:
-                    income_in_bracket = projection["final_taxable_income"] - bracket["over"]
-                    tax_assessed = income_in_bracket * rate
-                else:
-                    tax_assessed = 0
-                row[3] = f"${tax_assessed:,.2f}"
-
-            row[2] = f"{rate:.0%}"
-            writer.writerow(row)
-
-        writer.writerow(["", "", "Total Assessed", f'${projection["federal_income_tax_assessed"]:,.2f}', "", "", ""])
-        writer.writerow([])
-
-        writer.writerow(["", "", "", "", "", "HER", ""])
-        writer.writerow(["", "", "", "", "", "Wages:", f'${projection["her_wages"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Fed Tax Withheld:", f'${projection["her_fed_withheld"]:,.2f}'])
-        writer.writerow([])
-
-        writer.writerow(["", "", "", "", "", "TAXABLE INCOME", ""])
-        writer.writerow(["", "", "", "", "", "His wages per W-2", f'${projection["him_wages"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Her wages per W-2", f'${projection["her_wages"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Combined gross income", f'${projection["combined_wages"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Standard deduction", f'-${projection["standard_deduction"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Taxable income", f'${projection["final_taxable_income"]:,.2f}'])
-        writer.writerow([])
-
-        writer.writerow(["", "", "", "", "", "MEDICARE TAXES OVER OR UNDERPAID", ""])
-        writer.writerow(["", "", "", "", "", "Total medicare wages (his and hers)", f'${projection["combined_medicare_wages"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Total medicare taxes withheld", f'${projection["combined_medicare_withheld"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Total medicare taxes assessed", f'-${projection["total_medicare_taxes_assessed"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Refund on medicare taxes withheld (or amount owed if negative)", f'${projection["medicare_refund"]:,.2f}'])
-        writer.writerow([])
-
-        writer.writerow(["", "", "", "", "", "TAX RETURN / REFUND PROJECTION", ""])
-        writer.writerow(["", "", "", "", "", "Federal Income Tax", f'-${projection["federal_income_tax_assessed"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Additional Medicare Tax", f'${projection["medicare_refund"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Tentative tax per tax return", f'-${projection["tentative_tax_per_return"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "His income tax withheld", f'${projection["him_fed_withheld"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Her income tax withheld", f'${projection["her_fed_withheld"]:,.2f}'])
-        writer.writerow(["", "", "", "", "", "Refund (or owed, if negative)", f'${projection["final_refund"]:,.2f}'])
+        _write_projection_rows(writer, projection)
 
     return output_path
 
 
 def generate_tax_projection(
     year: str,
-    data_dir: Path = None,
-    output_path: Path = None,
-) -> Path:
-    """Generate tax projection and write to CSV.
+    data_dir: Optional[Path] = None,
+    output_format: Literal["json", "csv"] = "json",
+) -> Union[dict, str]:
+    """Generate tax projection data.
 
-    This is the main entry point for tax projection generation.
+    Main entry point for tax projection. Returns structured data (json)
+    or formatted CSV string.
+
+    Args:
+        year: Tax year (e.g., "2024")
+        data_dir: Directory containing W-2 data files. Defaults to XDG data path.
+        output_format: "json" returns dict (default), "csv" returns CSV string.
+
+    Returns:
+        dict (json format) or str (csv format)
+    """
+    from .config import get_data_path
+
+    if data_dir is None:
+        data_dir = get_data_path()
+
+    projection = generate_projection(year, data_dir)
+
+    if output_format == "csv":
+        return projection_to_csv_string(projection)
+
+    return projection
+
+
+def generate_tax_projection_file(
+    year: str,
+    data_dir: Optional[Path] = None,
+    output_path: Optional[Path] = None,
+) -> Path:
+    """Generate tax projection and write to CSV file.
+
+    Legacy function for file-based output. Use generate_tax_projection()
+    for programmatic access.
 
     Args:
         year: Tax year (e.g., "2024")
