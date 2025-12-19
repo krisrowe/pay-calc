@@ -53,63 +53,171 @@ def calculate_additional_medicare_tax(total_medicare_wages: float, threshold: fl
     return excess_medicare_wages * 0.009
 
 
-def load_party_w2_data(data_dir: Path, year: str, party: str) -> dict:
-    """Load and aggregate W-2 data for a party from the data directory.
+def load_party_w2_data(
+    data_dir: Path,
+    year: str,
+    party: str,
+    allow_projection: bool = False,
+    stock_price: Optional[float] = None,
+) -> dict:
+    """Load W-2 data for a party, generating from stubs if needed.
 
     Data sources (in order of preference):
-    1. W-2 JSON files (YYYY_party_w2_forms.json) - year-end
-    2. Analysis JSON files (YYYY_party_pay_all.json) - mid-year
-    """
-    w2_file = data_dir / f"{year}_{party}_w2_forms.json"
-    analysis_file = data_dir / f"{year}_{party}_pay_all.json"
+    1. Official W-2 records from records system
+    2. W-2 JSON files (YYYY_party_w2_forms.json) - from w2-extract
+    3. Generated W-2 from pay stubs via SDK (with optional projection)
 
-    # Try W-2 file first (year-end)
+    Args:
+        data_dir: Directory containing W-2/analysis data
+        year: Tax year (4 digits)
+        party: 'him' or 'her'
+        allow_projection: If True and stub data incomplete, include income projection
+        stock_price: Stock price for RSU valuation (required with allow_projection for RSU parties)
+
+    Returns:
+        dict with keys:
+        - data: W-2 box values (wages, withholding, etc.)
+        - source: "official_w2", "w2_extract", "generated_complete", or "generated_with_projection"
+        - source_detail: Additional info (file path, date range, etc.)
+        - projection_info: (if projected) details about what was projected
+    """
+    from .records import list_records
+    from .w2 import generate_w2_from_analysis, generate_w2_with_projection
+
+    result = {}
+
+    # 1. Check for official W-2 records (most authoritative)
+    try:
+        w2_records = list_records(year=year, party=party, type_filter="w2")
+        if w2_records:
+            aggregated_data = defaultdict(float)
+            employers = []
+            for record in w2_records:
+                data = record.get("data", {})
+                # Map W-2 record fields to standard W-2 box names
+                aggregated_data["wages_tips_other_comp"] += data.get("wages", 0)
+                aggregated_data["federal_income_tax_withheld"] += data.get("federal_tax_withheld", 0)
+                aggregated_data["social_security_wages"] += data.get("social_security_wages", 0)
+                aggregated_data["social_security_tax_withheld"] += data.get("social_security_tax", 0)
+                aggregated_data["medicare_wages_and_tips"] += data.get("medicare_wages", 0)
+                aggregated_data["medicare_tax_withheld"] += data.get("medicare_tax", 0)
+                # Try both employer field names
+                employer = data.get("employer_name") or record.get("employer")
+                if employer:
+                    employers.append(employer)
+
+            return {
+                "data": dict(aggregated_data),
+                "source": "official_w2",
+                "source_detail": f"{len(w2_records)} W-2(s): {', '.join(set(employers)) or 'unknown'}",
+            }
+    except Exception:
+        pass  # Fall through to other sources
+
+    # 2. Check for W-2 JSON file (from w2-extract command)
+    w2_file = data_dir / f"{year}_{party}_w2_forms.json"
     if w2_file.exists():
         with open(w2_file, "r") as f:
             w2_data = json.load(f)
 
         aggregated_data = defaultdict(float)
+        employers = []
         for form in w2_data.get("forms", []):
             for key, value in form.get("data", {}).items():
                 aggregated_data[key] += value
+            if form.get("employer"):
+                employers.append(form["employer"])
 
-        return dict(aggregated_data)
-
-    # Fall back to analysis file (mid-year)
-    if analysis_file.exists():
-        with open(analysis_file, "r") as f:
-            analysis_data = json.load(f)
-
-        # Extract YTD totals from analysis summary
-        summary = analysis_data.get("summary", {})
-        final_ytd = summary.get("final_ytd", {})
-
-        # Map analysis fields to W-2 equivalent fields
         return {
-            "wages_tips_other_comp": final_ytd.get("gross", 0),
-            "federal_income_tax_withheld": final_ytd.get("federal_withheld", 0),
-            "medicare_wages_and_tips": final_ytd.get("fit_taxable_wages", final_ytd.get("gross", 0)),
-            "medicare_tax_withheld": 0,  # Not tracked separately in analysis
+            "data": dict(aggregated_data),
+            "source": "w2_extract",
+            "source_detail": f"From {w2_file.name}: {', '.join(set(employers)) or 'unknown'}",
         }
+
+    # 3. Generate W-2 from pay stubs using SDK
+    try:
+        # First try to generate without projection to see if data is complete
+        try:
+            w2_result = generate_w2_from_analysis(
+                year=year,
+                party=party,
+                data_dir=data_dir,
+            )
+            if w2_result and w2_result.get("forms"):
+                form = w2_result["forms"][0]
+                date_range = w2_result.get("analysis_date_range", {})
+                return {
+                    "data": form["data"],
+                    "source": "generated_complete",
+                    "source_detail": f"Generated from stubs through {date_range.get('end', '?')} (year complete)",
+                }
+        except ValueError:
+            # Data incomplete - try with projection if allowed
+            if allow_projection:
+                # Use generate_w2_with_projection which handles partial year
+                w2_proj_result = generate_w2_with_projection(
+                    year=year,
+                    party=party,
+                    include_projection=True,
+                    stock_price=stock_price,
+                    final_stub_date="allow_incomplete",  # Special flag to allow incomplete
+                    data_dir=data_dir,
+                )
+
+                if w2_proj_result and "projected_w2" in w2_proj_result:
+                    date_range = w2_proj_result.get("date_range", {})
+                    proj_info = w2_proj_result.get("projection_info", {})
+                    add_w2 = w2_proj_result.get("projected_additional_w2", {})
+
+                    return {
+                        "data": w2_proj_result["projected_w2"],
+                        "source": "generated_with_projection",
+                        "source_detail": (
+                            f"YTD stubs through {date_range.get('end', '?')} "
+                            f"+ {proj_info.get('days_remaining', 0)} days projected"
+                        ),
+                        "projection_info": {
+                            "ytd_w2": w2_proj_result["ytd_w2"],
+                            "projected_additional_w2": add_w2,
+                            "days_remaining": proj_info.get("days_remaining", 0),
+                            "income_breakdown": proj_info.get("income_breakdown", {}),
+                            "warnings": proj_info.get("warnings", []),
+                            "stock_price_used": stock_price,
+                        },
+                    }
+            # Re-raise if no projection allowed or projection failed
+            raise
+
+    except Exception as e:
+        pass  # Fall through to error
 
     raise FileNotFoundError(
         f"No income data found for {party} ({year}).\n"
-        f"  Tried: {w2_file}\n"
-        f"  Tried: {analysis_file}\n"
+        f"  No official W-2 records found\n"
+        f"  No W-2 JSON file at: {w2_file}\n"
+        f"  Could not generate from stubs\n"
         f"Run 'pay-calc w2-extract {year}' or 'pay-calc analysis {year} {party}' first."
     )
 
 
-def generate_projection(year: str, data_dir: Path = None, tax_rules: dict = None) -> dict:
+def generate_projection(
+    year: str,
+    data_dir: Path = None,
+    tax_rules: dict = None,
+    allow_projection: bool = False,
+    stock_price: Optional[float] = None,
+) -> dict:
     """Generate tax projection data for a given year.
 
     Args:
         year: Tax year (e.g., "2024")
         data_dir: Directory containing W-2 data files. Defaults to XDG data path.
         tax_rules: Optional pre-loaded tax rules (loads from file if not provided)
+        allow_projection: If True, allow income projection for incomplete stub data
+        stock_price: Stock price for RSU valuation (used with allow_projection)
 
     Returns:
-        Dictionary with all projection data
+        Dictionary with all projection data including data_sources metadata
     """
     from .config import get_data_path
 
@@ -119,13 +227,25 @@ def generate_projection(year: str, data_dir: Path = None, tax_rules: dict = None
     if tax_rules is None:
         tax_rules = load_tax_rules(year)
 
-    him_data = load_party_w2_data(data_dir, year, "him")
-    her_data = load_party_w2_data(data_dir, year, "her")
+    # Load W-2 data for both parties (with source tracking)
+    him_result = load_party_w2_data(
+        data_dir, year, "him",
+        allow_projection=allow_projection,
+        stock_price=stock_price,
+    )
+    her_result = load_party_w2_data(
+        data_dir, year, "her",
+        allow_projection=allow_projection,
+        stock_price=stock_price,
+    )
 
-    him_wages = him_data["wages_tips_other_comp"]
-    her_wages = her_data["wages_tips_other_comp"]
-    him_fed_withheld = him_data["federal_income_tax_withheld"]
-    her_fed_withheld = her_data["federal_income_tax_withheld"]
+    him_data = him_result["data"]
+    her_data = her_result["data"]
+
+    him_wages = him_data.get("wages_tips_other_comp", 0)
+    her_wages = her_data.get("wages_tips_other_comp", 0)
+    him_fed_withheld = him_data.get("federal_income_tax_withheld", 0)
+    her_fed_withheld = her_data.get("federal_income_tax_withheld", 0)
     him_medicare_wages = him_data.get("medicare_wages_and_tips", him_wages)
     her_medicare_wages = her_data.get("medicare_wages_and_tips", her_wages)
     him_medicare_withheld = him_data.get("medicare_tax_withheld", 0)
@@ -156,6 +276,24 @@ def generate_projection(year: str, data_dir: Path = None, tax_rules: dict = None
     total_withheld = him_fed_withheld + her_fed_withheld
     final_refund = total_withheld - tentative_tax_per_return
 
+    # Build data sources with projection info if present
+    data_sources = {
+        "him": {
+            "source": him_result["source"],
+            "detail": him_result["source_detail"],
+        },
+        "her": {
+            "source": her_result["source"],
+            "detail": her_result["source_detail"],
+        },
+    }
+
+    # Include projection_info if either party used projected data
+    if him_result.get("projection_info"):
+        data_sources["him"]["projection_info"] = him_result["projection_info"]
+    if her_result.get("projection_info"):
+        data_sources["her"]["projection_info"] = her_result["projection_info"]
+
     return {
         "year": year,
         "him_wages": him_wages,
@@ -173,6 +311,7 @@ def generate_projection(year: str, data_dir: Path = None, tax_rules: dict = None
         "medicare_refund": medicare_refund,
         "tentative_tax_per_return": tentative_tax_per_return,
         "final_refund": final_refund,
+        "data_sources": data_sources,
     }
 
 
@@ -275,10 +414,56 @@ def write_projection_csv(projection: dict, output_path: Path) -> Path:
     return output_path
 
 
+def format_data_sources(data_sources: dict) -> str:
+    """Format data sources metadata for display.
+
+    Used by CLI for text output and stderr output for CSV/JSON.
+
+    Args:
+        data_sources: The data_sources dict from generate_projection()
+
+    Returns:
+        Multi-line string describing data sources
+    """
+    lines = []
+
+    for party_key in ["him", "her"]:
+        source_info = data_sources.get(party_key, {})
+        source = source_info.get("source", "unknown")
+        detail = source_info.get("detail", "")
+
+        # Format source type for display
+        source_labels = {
+            "official_w2": "Official W-2",
+            "w2_extract": "W-2 (extracted)",
+            "generated_complete": "Generated from stubs (year complete)",
+            "generated_with_projection": "Generated from stubs + PROJECTED",
+        }
+        source_label = source_labels.get(source, source)
+
+        party_label = "Him" if party_key == "him" else "Her"
+        lines.append(f"{party_label}: {source_label}")
+        if detail:
+            lines.append(f"      {detail}")
+
+        # Include projection breakdown if present
+        proj_info = source_info.get("projection_info")
+        if proj_info:
+            income = proj_info.get("income_breakdown", {})
+            lines.append(f"      Projected income: ${income.get('regular_pay', 0):,.2f} (regular) + ${income.get('stock_grants', 0):,.2f} (stock)")
+            if proj_info.get("warnings"):
+                for w in proj_info["warnings"]:
+                    lines.append(f"      Warning: {w}")
+
+    return "\n".join(lines)
+
+
 def generate_tax_projection(
     year: str,
     data_dir: Optional[Path] = None,
     output_format: Literal["json", "csv"] = "json",
+    allow_projection: bool = False,
+    stock_price: Optional[float] = None,
 ) -> Union[dict, str]:
     """Generate tax projection data.
 
@@ -289,16 +474,25 @@ def generate_tax_projection(
         year: Tax year (e.g., "2024")
         data_dir: Directory containing W-2 data files. Defaults to XDG data path.
         output_format: "json" returns dict (default), "csv" returns CSV string.
+        allow_projection: If True and stub data incomplete, include income projection
+        stock_price: Stock price for RSU valuation (used with allow_projection)
 
     Returns:
         dict (json format) or str (csv format)
+        - JSON includes data_sources with source, detail, and projection_info
+        - CSV is formatted for spreadsheet import
     """
     from .config import get_data_path
 
     if data_dir is None:
         data_dir = get_data_path()
 
-    projection = generate_projection(year, data_dir)
+    projection = generate_projection(
+        year,
+        data_dir,
+        allow_projection=allow_projection,
+        stock_price=stock_price,
+    )
 
     if output_format == "csv":
         return projection_to_csv_string(projection)

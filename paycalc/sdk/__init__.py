@@ -40,6 +40,7 @@ from .tax import (
     write_projection_csv,
     load_tax_rules,
     load_party_w2_data,
+    format_data_sources,
 )
 
 from .gaps import (
@@ -104,6 +105,7 @@ __all__ = [
     "write_projection_csv",
     "load_tax_rules",
     "load_party_w2_data",
+    "format_data_sources",
     # Gap detection
     "Gap",
     "GapAnalysis",

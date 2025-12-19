@@ -290,7 +290,13 @@ async def generate_tax_projection(
     and calculates federal income tax, medicare taxes, and projected
     refund or amount owed.
 
-    Returns structured JSON by default, or CSV string if output_format='csv'.
+    Data sources (in priority order):
+    1. Official W-2 records (from records import)
+    2. W-2 extract files (from w2-extract command)
+    3. Generated W-2 from pay stubs (via SDK)
+
+    Returns structured JSON with data_sources metadata showing where each
+    party's W-2 data came from. CSV format available for spreadsheet import.
 
     Requires W-2 or analysis data to exist for both parties.
     """

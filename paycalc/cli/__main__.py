@@ -271,6 +271,17 @@ def _format_tax_projection_text(proj: dict) -> str:
     else:
         lines.append(f"  OWED:                     -${abs(proj['final_refund']):>12,.2f}")
 
+    # Data sources section - use SDK helper for consistent formatting
+    data_sources = proj.get("data_sources", {})
+    if data_sources:
+        from paycalc.sdk.tax import format_data_sources
+        lines.append("")
+        lines.append("DATA SOURCES")
+        lines.append("-" * 60)
+        # Indent each line from the SDK helper
+        for line in format_data_sources(data_sources).split("\n"):
+            lines.append(f"  {line}")
+
     return "\n".join(lines)
 
 
@@ -306,20 +317,30 @@ def taxes(year, output_format, data_dir):
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
     from paycalc.sdk import generate_tax_projection, get_data_path
+    from paycalc.sdk.tax import format_data_sources
 
     data_path = Path(data_dir) if data_dir else get_data_path()
 
     try:
         if output_format == "text":
-            # Get JSON, format as ASCII tables
+            # Get JSON, format as ASCII tables (includes data sources in output)
             projection = generate_tax_projection(year, data_dir=data_path, output_format="json")
             click.echo(_format_tax_projection_text(projection))
         elif output_format == "json":
+            # JSON output already includes data_sources in the response object
             projection = generate_tax_projection(year, data_dir=data_path, output_format="json")
             click.echo(json.dumps(projection, indent=2))
         else:  # csv
-            csv_output = generate_tax_projection(year, data_dir=data_path, output_format="csv")
+            # Get JSON for data sources, convert to CSV for output
+            from paycalc.sdk.tax import projection_to_csv_string
+            projection = generate_tax_projection(year, data_dir=data_path, output_format="json")
+            csv_output = projection_to_csv_string(projection)
             click.echo(csv_output)
+            # Print data sources to stderr for visibility
+            data_sources = projection.get("data_sources", {})
+            if data_sources:
+                click.echo("\n--- Data Sources ---", err=True)
+                click.echo(format_data_sources(data_sources), err=True)
 
     except FileNotFoundError as e:
         raise click.ClickException(str(e))
