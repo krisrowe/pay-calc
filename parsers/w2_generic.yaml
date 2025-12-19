@@ -1,0 +1,145 @@
+# W-2 Tax Form parser - Generic format
+# Extracts standard W-2 box values from PDF text
+
+defaults:
+  flags: IGNORECASE
+
+qualifier:
+  description: "W-2 Wage and Tax Statement"
+  patterns:
+    - regex: 'W-2\s+Wage\s+and\s+Tax'
+      example_match: "W-2 Wage and Tax Statement"
+      note: "Standard W-2 header"
+    - regex: 'Form\s+W-?2'
+      example_match: "Form W-2"
+      note: "Form label"
+    - regex: 'Wages,?\s+tips,?\s+other\s+comp'
+      example_match: "Wages, tips, other compensation"
+      note: "Box 1 label"
+    - regex: 'Federal\s+income\s+tax\s+withheld'
+      example_match: "Federal income tax withheld"
+      note: "Box 2 label"
+  min_matches: 2
+
+type: w2
+
+# Extract employer name from W-2
+employer_extraction:
+  normalize: true
+  patterns:
+    - regex: 'Employer.?s?\s+name.*?([A-Za-z][A-Za-z0-9\s&,.\-]+?)(?=\s*\n|\s{2,}|Employer)'
+      flags: [IGNORECASE, DOTALL]
+      note: "Employer name field"
+    - regex: '^([A-Za-z][A-Za-z0-9\s&,.\-]+?)(?=\s*\n|\s{2,})'
+      flags: MULTILINE
+      note: "First line as employer name"
+
+fields:
+  # Box 1: Wages, tips, other compensation
+  wages_tips_other_comp:
+    description: "Box 1 - Wages, tips, other compensation"
+    patterns:
+      - regex: '(?:1|Wages)[^\d]*(\d[\d,]+\.\d{2})'
+        example_match: "1 Wages, tips, other compensation 125,000.00"
+        note: "Box 1 value"
+      - regex: 'Wages,?\s+tips.*?(\d[\d,]+\.\d{2})'
+        flags: DOTALL
+        example_match: "Wages, tips, other compensation $125,000.00"
+
+  # Box 2: Federal income tax withheld
+  federal_income_tax_withheld:
+    description: "Box 2 - Federal income tax withheld"
+    patterns:
+      - regex: '(?:2|Federal\s+income\s+tax)[^\d]*(\d[\d,]+\.\d{2})'
+        example_match: "2 Federal income tax withheld 25,000.00"
+        note: "Box 2 value"
+      - regex: 'Federal\s+income\s+tax\s+withheld.*?(\d[\d,]+\.\d{2})'
+        flags: DOTALL
+
+  # Box 3: Social security wages
+  social_security_wages:
+    description: "Box 3 - Social security wages"
+    patterns:
+      - regex: '(?:3|Social\s+security\s+wages)[^\d]*(\d[\d,]+\.\d{2})'
+        example_match: "3 Social security wages 147,000.00"
+        note: "Box 3 value"
+
+  # Box 4: Social security tax withheld
+  social_security_tax_withheld:
+    description: "Box 4 - Social security tax withheld"
+    patterns:
+      - regex: '(?:4|Social\s+security\s+tax)[^\d]*(\d[\d,]+\.\d{2})'
+        example_match: "4 Social security tax withheld 9,114.00"
+        note: "Box 4 value"
+
+  # Box 5: Medicare wages and tips
+  medicare_wages_and_tips:
+    description: "Box 5 - Medicare wages and tips"
+    patterns:
+      - regex: '(?:5|Medicare\s+wages)[^\d]*(\d[\d,]+\.\d{2})'
+        example_match: "5 Medicare wages and tips 125,000.00"
+        note: "Box 5 value"
+
+  # Box 6: Medicare tax withheld
+  medicare_tax_withheld:
+    description: "Box 6 - Medicare tax withheld"
+    patterns:
+      - regex: '(?:6|Medicare\s+tax\s+withheld)[^\d]*(\d[\d,]+\.\d{2})'
+        example_match: "6 Medicare tax withheld 1,812.50"
+        note: "Box 6 value"
+
+  # Optional boxes for completeness
+  allocated_tips:
+    description: "Box 8 - Allocated tips"
+    patterns:
+      - regex: '(?:8|Allocated\s+tips)[^\d]*(\d[\d,]+\.\d{2})'
+        note: "Box 8 value"
+
+  dependent_care_benefits:
+    description: "Box 10 - Dependent care benefits"
+    patterns:
+      - regex: '(?:10|Dependent\s+care)[^\d]*(\d[\d,]+\.\d{2})'
+        note: "Box 10 value"
+
+  nonqualified_plans:
+    description: "Box 11 - Nonqualified plans"
+    patterns:
+      - regex: '(?:11|Nonqualified)[^\d]*(\d[\d,]+\.\d{2})'
+        note: "Box 11 value"
+
+  # Box 12 codes (common ones)
+  box_12_codes:
+    description: "Box 12 - Various coded amounts"
+    patterns:
+      - regex: '12[a-d]?\s*([A-Z]{1,2})\s*\$?(\d[\d,]+\.\d{2})'
+        groups:
+          - name: code
+            index: 1
+          - name: amount
+            index: 2
+        note: "Box 12 code and amount (e.g., D for 401k)"
+
+validation:
+  rules:
+    - name: required_fields
+      description: "Essential W-2 fields must be present"
+      required:
+        - wages_tips_other_comp
+        - federal_income_tax_withheld
+      severity: error
+    - name: ss_wages_capped
+      description: "Social security wages should not exceed annual limit"
+      formula: "social_security_wages <= 168600"  # 2024 limit
+      severity: warning
+    - name: medicare_uncapped
+      description: "Medicare wages typically equals or exceeds SS wages"
+      formula: "medicare_wages_and_tips >= social_security_wages"
+      severity: warning
+
+date_formats:
+  output: "%Y"  # W-2 is annual, just year
+
+amount_parsing:
+  strip_chars: "$,"
+  handle_negative:
+    patterns: ["^-", "^\\(.*\\)$"]

@@ -1,0 +1,242 @@
+# Pay stub parser - Format B (2024)
+# Payroll system format with Check Number ID and flexible section markers
+
+# Global defaults
+defaults:
+  flags: IGNORECASE
+
+qualifier:
+  description: "Payroll format with Check/Stub Number and colon-separated fields"
+  patterns:
+    # Match on structural elements, not employer name
+    - regex: 'Check\s+Number[:\s]+\d+'
+      example_match: "Check Number: 12345"
+      note: "Check Number format"
+    - regex: 'Stub\s+Number[:\s]+\d+'
+      example_match: "Stub Number: 12345"
+      note: "Alternate ID format"
+    - regex: 'Pay\s+Date[:\s]+\d{1,2}[/-]\d{1,2}[/-]\d{4}'
+      example_match: "Pay Date: 01/15/2024"
+      note: "Colon-separated pay date"
+    - regex: '(Earnings|Current\s+Earnings).*?(Deductions|Taxes)'
+      example_match: "Current Earnings ... Deductions"
+      flags: [DOTALL]
+      note: "Earnings to Deductions section flow"
+  min_matches: 2
+
+type: stub
+
+# Extract employer name dynamically from document
+# Engine normalizes extracted text (collapses whitespace) to handle OCR spacing quirks
+# e.g., "A c m e  C o r p" → "Acme Corp"
+employer_extraction:
+  normalize: true  # collapse \s+ to single space in extracted value
+  patterns:
+    - regex: '^([A-Za-z][A-Za-z0-9\s&,.\-'']+?)(?=\s*\n|\s{2,}|Pay|Period|Employee)'
+      flags: MULTILINE
+      note: "Capture employer name up to field boundary"
+    - regex: 'Employer[:\s]+([A-Za-z][A-Za-z0-9\s&,.\-'']+?)(?=\s*\n|\s{2,})'
+      note: "Explicit employer label"
+
+fields:
+  pay_date:
+    description: "Date employee was paid"
+    patterns:
+      - regex: 'Pay\s+Date[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Pay Date: 01/15/2024"
+        note: "Primary pattern with colon"
+      - regex: 'Check\s+Date[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Check Date: 01/15/2024"
+        note: "Alternate label"
+      - regex: '(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "01/15/2024"
+        note: "Generic date fallback"
+
+  period_start:
+    description: "Pay period start date"
+    patterns:
+      - regex: 'Period\s+Start[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Period Start: 01/01/2024"
+      - regex: 'Pay\s+Period[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Pay Period: 01/01/2024"
+        note: "Alternate label"
+
+  period_end:
+    description: "Pay period end date"
+    patterns:
+      - regex: 'Period\s+End[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Period End: 01/15/2024"
+
+  document_id:
+    description: "Unique document/check identifier"
+    patterns:
+      - regex: 'Check\s+Number[:\s]+(\d+)'
+        example_match: "Check Number: 12345"
+      - regex: 'Document\s+Number[:\s]+(\d+)'
+        example_match: "Document Number: 12345"
+      - regex: 'Stub\s+Number[:\s]+(\d+)'
+        example_match: "Stub Number: 12345"
+
+  net_pay:
+    description: "Net pay amount (take-home)"
+    patterns:
+      - regex: 'Net\s+Pay[:\s]+\$?([\d,]+\.?\d*)'
+        example_match: "Net Pay: $1,850.00"
+      - regex: 'Net\s+Amount[:\s]+\$?([\d,]+\.?\d*)'
+        example_match: "Net Amount: $1,850.00"
+      - regex: 'Take\s+Home[:\s]+\$?([\d,]+\.?\d*)'
+        example_match: "Take Home: $1,850.00"
+        note: "Alternate label seen in some formats"
+
+sections:
+  earnings:
+    description: "Earnings breakdown"
+    start_patterns:
+      - regex: '(Earnings|Current\s+Earnings|Gross\s+Earnings)'
+    end_patterns:
+      - regex: '(Deductions|Taxes|Total)'
+    strip_headers:
+      - regex: '(Earnings|Current\s+Earnings|Gross\s+Earnings)\s+.*?(Rate|Hours|Current|YTD)\s*'
+    item_patterns:
+      # Pattern: Description, Rate, Hours, Current, YTD
+      - regex: '([A-Za-z\s/]+?)\s+\$?([\d,]+\.?\d*)\s+(\d+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+        groups:
+          - name: type
+            index: 1
+          - name: rate
+            index: 2
+          - name: hours
+            index: 3
+          - name: current
+            index: 4
+          - name: ytd
+            index: 5
+        example_match: "Regular $18.50 80.00 $1,480.00 $2,960.00"
+        note: "Full earnings line with rate/hours"
+    note: "Last 2 numeric values are always current and YTD"
+
+  taxes:
+    description: "Tax withholdings"
+    start_patterns:
+      - regex: '(Taxes|Withholdings|Deductions)'
+    end_patterns:
+      - regex: '(Net|Total|Summary)'
+    items:
+      federal_income_tax:
+        patterns:
+          - regex: 'Federal\s+Income\s+Tax[:\s]+\$?([\d,]+\.?\d*)[:\s]+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+            example_match: "Federal Income Tax: $148.00: $296.00"
+          - regex: 'FIT[:\s]+\$?([\d,]+\.?\d*)[:\s]+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+            example_match: "FIT: $148.00: $296.00"
+            note: "Abbreviated label"
+      social_security:
+        patterns:
+          - regex: 'Social\s+Security[:\s]+\$?([\d,]+\.?\d*)[:\s]+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+            example_match: "Social Security: $91.76: $183.52"
+          - regex: 'SS[:\s]+\$?([\d,]+\.?\d*)[:\s]+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+            example_match: "SS: $91.76: $183.52"
+            note: "Abbreviated label"
+      medicare:
+        patterns:
+          - regex: 'Medicare[:\s]+\$?([\d,]+\.?\d*)[:\s]+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+            example_match: "Medicare: $21.46: $42.92"
+          - regex: 'MED[:\s]+\$?([\d,]+\.?\d*)[:\s]+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+            example_match: "MED: $21.46: $42.92"
+            note: "Abbreviated label"
+
+  deductions:
+    description: "Voluntary and other deductions"
+    start_patterns:
+      - regex: '(Deductions|Voluntary\s+Deductions)'
+    end_patterns:
+      - regex: '(Taxes|Total|Net)'
+    item_patterns:
+      # Pattern: Description, Current, YTD (colon-separated)
+      - regex: '([A-Za-z\s/]+?)[:\s]+\$?([\d,]+\.?\d*)[:\s]+\$?([\d,]+\.?\d*)'
+        groups:
+          - name: type
+            index: 1
+          - name: current
+            index: 2
+          - name: ytd
+            index: 3
+        example_match: "Health Insurance: $125.00: $250.00"
+
+  pay_summary:
+    description: "Summary totals for current and YTD"
+    start_patterns:
+      - regex: '(Summary|Totals|Pay\s+Summary)'
+        flags: [DOTALL]
+    patterns:
+      # This format may vary - extract what's available
+      gross:
+        regex: 'Gross[:\s]+\$?([\d,]+\.?\d*)'
+        groups:
+          - name: value
+            index: 1
+        example_match: "Gross: $1,480.00"
+      net:
+        regex: 'Net[:\s]+\$?([\d,]+\.?\d*)'
+        groups:
+          - name: value
+            index: 1
+        example_match: "Net: $1,000.00"
+
+validation:
+  rules:
+    - name: net_pay_positive
+      description: "Net pay should be positive"
+      formula: "net_pay > 0"
+      severity: error
+    - name: ytd_gte_current
+      description: "YTD values should be >= current period values"
+      formula: "taxes.federal_income_tax.ytd_withheld >= taxes.federal_income_tax.current_withheld"
+      severity: warning
+    - name: required_fields
+      description: "Essential fields must be present"
+      required:
+        - pay_date
+        - net_pay
+      severity: error
+
+date_formats:
+  input:
+    - "%m/%d/%Y"
+    - "%Y-%m-%d"
+    - "%m-%d-%Y"
+  output: "%Y-%m-%d"
+
+amount_parsing:
+  strip_chars: "$,"
+  handle_negative:
+    patterns: ["^-", "^\\(.*\\)$"]

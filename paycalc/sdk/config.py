@@ -366,13 +366,21 @@ def get_data_path() -> Path:
     """Get the data directory path.
 
     Resolution order:
-    1. settings.json "data_dir" key (if set)
-    2. XDG_DATA_HOME/pay-calc/ or ~/.local/share/pay-calc/
+    1. PAY_CALC_DATA environment variable (if set)
+    2. settings.json "data_dir" key (if set)
+    3. XDG_DATA_HOME/pay-calc/ or ~/.local/share/pay-calc/
 
     Returns:
         Path to the data directory (created if doesn't exist)
     """
-    # 1. Check settings.json for custom data directory
+    # 1. Check environment variable
+    env_data_dir = os.environ.get("PAY_CALC_DATA")
+    if env_data_dir:
+        data_path = Path(env_data_dir).expanduser()
+        data_path.mkdir(parents=True, exist_ok=True)
+        return data_path
+
+    # 2. Check settings.json for custom data directory
     settings = load_settings()
     custom_data_dir = settings.get("data_dir")
     if custom_data_dir:
@@ -380,7 +388,7 @@ def get_data_path() -> Path:
         data_path.mkdir(parents=True, exist_ok=True)
         return data_path
 
-    # 2. Fall back to XDG data path
+    # 3. Fall back to XDG data path
     xdg_data_home = os.environ.get("XDG_DATA_HOME", Path.home() / ".local" / "share")
     data_path = Path(xdg_data_home) / APP_NAME
     data_path.mkdir(parents=True, exist_ok=True)

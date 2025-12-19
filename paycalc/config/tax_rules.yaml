@@ -1,0 +1,23 @@
+# Tax Rules Configuration
+# These values are used for RSU and income tax calculations
+
+2025:
+  # Social Security
+  ss_wage_base: 176100  # Maximum wages subject to SS tax
+  ss_rate: 0.062        # 6.2%
+
+  # Medicare
+  medicare_rate: 0.0145              # 1.45%
+  medicare_additional_rate: 0.009   # 0.9% additional
+  medicare_additional_threshold: 200000  # Threshold for additional Medicare
+
+  # Federal withholding
+  supplemental_rate: 0.22  # 22% flat rate for bonuses/RSUs/supplemental wages
+
+2024:
+  ss_wage_base: 168600
+  ss_rate: 0.062
+  medicare_rate: 0.0145
+  medicare_additional_rate: 0.009
+  medicare_additional_threshold: 200000
+  supplemental_rate: 0.22

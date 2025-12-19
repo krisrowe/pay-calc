@@ -1,0 +1,267 @@
+# Pay stub parser - Format A (2024)
+# Payroll system format with space-quirk OCR patterns
+
+# Global defaults
+defaults:
+  flags: IGNORECASE
+
+qualifier:
+  description: "Payroll format with 'Document' ID and 'Pay Summary' section"
+  patterns:
+    # Match on structural elements, not employer name
+    - regex: 'Document\s+\d+'
+      example_match: "Document 123456"
+      note: "Document ID format unique to this payroll system"
+    - regex: 'Pay\s+Summar\s*y\s+Gross'
+      example_match: "Pay Summary Gross FIT Taxable Wages Taxes"
+      note: "Pay Summary section header"
+    - regex: 'Earnings\s+Pay\s+T\s*ype\s+Hours'
+      example_match: "Earnings Pay Type Hours Pay Rate Current YTD"
+      note: "Earnings section with Hours column"
+  min_matches: 2
+
+type: stub
+
+# Extract employer name dynamically from document
+# Engine normalizes extracted text (collapses whitespace) to handle OCR spacing quirks
+# e.g., "A c m e  C o r p" → "Acme Corp"
+employer_extraction:
+  normalize: true  # collapse \s+ to single space in extracted value
+  patterns:
+    - regex: '^([A-Za-z][A-Za-z0-9\s&,.\-'']+?)(?=\s*\n|\s{2,}|Pay|Period|Employee)'
+      flags: MULTILINE
+      note: "Capture employer name up to field boundary"
+    - regex: 'Employer[:\s]+([A-Za-z][A-Za-z0-9\s&,.\-'']+?)(?=\s*\n|\s{2,})'
+      note: "Explicit employer label"
+
+fields:
+  pay_date:
+    description: "Date employee was paid"
+    patterns:
+      - regex: 'Pay\s*Date\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Pay Date 01/15/2024"
+        note: "Primary pattern - handles variable spacing"
+      - regex: 'Pay\s*Date[:\s]+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Pay Date: 01/15/2024"
+        note: "With colon separator"
+
+  period_start:
+    description: "Pay period start date"
+    patterns:
+      - regex: 'Period\s+Star\s*t\s+Date\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Period Star t Date 01/01/2024"
+        note: "Handles OCR space in 'Start'"
+      - regex: 'Period\s+Start\s+Date\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Period Start Date 01/01/2024"
+        note: "Clean version"
+
+  period_end:
+    description: "Pay period end date"
+    patterns:
+      - regex: 'Period\s+End\s+Date\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Period End Date 01/15/2024"
+
+  document_id:
+    description: "Unique document identifier"
+    patterns:
+      - regex: 'Document\s+(\d+)'
+        example_match: "Document 123456"
+
+  net_pay:
+    description: "Net pay amount (take-home)"
+    patterns:
+      - regex: 'Net\s+P\s*ay\s+\$?([\d,]+\.?\d*)'
+        example_match: "Net Pay $2,150.00"
+        example_no_match: "Net Amount $2,150.00"
+        note: "Handles OCR space in 'Pay'"
+
+sections:
+  earnings:
+    description: "Earnings breakdown (regular, bonus, etc.)"
+    start_patterns:
+      - regex: 'Earnings\s+Pay\s+T\s*ype'
+        example_match: "Earnings Pay Type Hours Pay Rate Current YTD"
+        note: "Handles OCR space in 'Type'"
+      - regex: 'Earnings\s+Pay\s+Type'
+    end_patterns:
+      - regex: 'Total\s+Hours'
+    # Header text to remove before extracting items
+    strip_headers:
+      - regex: 'Earnings\s+Pay\s+T\s*ype\s+Hours\s+Pay\s*Rate\s+Current\s+YTD\s*'
+    item_patterns:
+      # Pattern 1: Full line with hours, rate, current, YTD
+      - regex: '([A-Za-z][A-Za-z0-9\s/\-]*?)\s*(\d+\.\d+)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+        groups:
+          - name: type
+            index: 1
+          - name: hours
+            index: 2
+          - name: rate
+            index: 3
+          - name: current
+            index: 4
+          - name: ytd
+            index: 5
+        example_match: "Regular Pay 80.00 $28.85 $2,308.00 $4,616.00"
+        note: "Full earnings line with hours/rate"
+      # Pattern 2: Without YTD (continuation lines)
+      - regex: '([A-Za-z][A-Za-z0-9\s/\-]*?)\s+(\d+\.\d+)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)(?:\s|$)'
+        groups:
+          - name: type
+            index: 1
+          - name: hours
+            index: 2
+          - name: rate
+            index: 3
+          - name: current
+            index: 4
+        example_match: "Regular Pay 40.00 $28.85 $1,154.00"
+        note: "Continuation line without YTD"
+      # Pattern 3: Simple (just current and YTD, no hours/rate)
+      - regex: '([A-Za-z][A-Za-z0-9\s/\-]*?)\s+\$([\d,]+\.?\d*)\s+\$([\d,]+\.?\d*)'
+        groups:
+          - name: type
+            index: 1
+          - name: current
+            index: 2
+          - name: ytd
+            index: 3
+        example_match: "Bonus $100.00 $200.00"
+        note: "Simple line without hours/rate"
+    aggregation: sum_by_type
+    note: "Last 2 numeric values are always current and YTD"
+
+  taxes:
+    description: "Tax withholdings"
+    start_patterns:
+      - regex: 'Taxes\s+Tax\s+Based\s+On'
+    end_patterns:
+      - regex: 'Paid\s+Time\s+Off'
+    strip_headers:
+      - regex: 'Taxes\s+Tax\s+Based\s+On\s+Current\s+YTD\s*'
+    items:
+      federal_income_tax:
+        patterns:
+          - regex: 'Federal\s+Income\s+Tax\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: taxable_wages
+                index: 1
+              - name: current_withheld
+                index: 2
+              - name: ytd_withheld
+                index: 3
+            example_match: "Federal Income Tax $2,308.00 $230.80 $461.60"
+      social_security:
+        patterns:
+          - regex: 'Social\s+Security\s+Employee\s+Tax\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: taxable_wages
+                index: 1
+              - name: current_withheld
+                index: 2
+              - name: ytd_withheld
+                index: 3
+            example_match: "Social Security Employee Tax $2,308.00 $143.10 $286.20"
+      medicare:
+        patterns:
+          - regex: 'Employee\s+Medicare\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+            groups:
+              - name: taxable_wages
+                index: 1
+              - name: current_withheld
+                index: 2
+              - name: ytd_withheld
+                index: 3
+            example_match: "Employee Medicare $2,308.00 $33.47 $66.94"
+
+  deductions:
+    description: "Pre-tax and post-tax deductions"
+    start_patterns:
+      - regex: 'Deductions\s+Deduction'
+    end_patterns:
+      - regex: 'Taxes'
+    strip_headers:
+      - regex: 'Deductions?\s+Deduction\s+Employee\s+Current\s+Employee\s+YTD\s+Employer\s+Current\s+Employer\s+YTD\s*'
+    item_patterns:
+      # Pattern: Type, Employee Current, Employee YTD, Employer Current, Employer YTD
+      - regex: '([A-Za-z\s/]+?)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+        groups:
+          - name: type
+            index: 1
+          - name: employee_current
+            index: 2
+          - name: employee_ytd
+            index: 3
+          - name: employer_current
+            index: 4
+          - name: employer_ytd
+            index: 5
+        example_match: "401k Pre-Tax $115.40 $230.80 $57.70 $115.40"
+
+  pay_summary:
+    description: "Summary totals for current and YTD"
+    start_patterns:
+      - regex: 'Pay\s+Summar\s*y\s+Gross'
+        flags: [DOTALL]
+        note: "Handles OCR space in 'Summary'"
+      - regex: 'Pay\s+Summary\s+Gross'
+        flags: [DOTALL]
+    patterns:
+      current:
+        regex: 'Current\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+        groups:
+          - name: gross
+            index: 1
+          - name: fit_taxable_wages
+            index: 2
+          - name: taxes
+            index: 3
+          - name: deductions
+            index: 4
+          - name: net_pay
+            index: 5
+        example_match: "Current $2,308.00 $2,308.00 $407.37 $115.40 $1,800.00"
+      ytd:
+        regex: 'YTD\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+        groups:
+          - name: gross
+            index: 1
+          - name: fit_taxable_wages
+            index: 2
+          - name: taxes
+            index: 3
+          - name: deductions
+            index: 4
+          - name: net_pay
+            index: 5
+        example_match: "YTD $4,616.00 $4,616.00 $800.00 $230.80 $3,600.00"
+
+validation:
+  rules:
+    - name: net_pay_matches
+      description: "gross - taxes - deductions should approximate net_pay"
+      formula: "abs(pay_summary.current.gross - pay_summary.current.taxes - pay_summary.current.deductions - pay_summary.current.net_pay) < 1.0"
+      severity: warning
+    - name: ytd_gte_current
+      description: "YTD values should be >= current period values"
+      formula: "pay_summary.ytd.gross >= pay_summary.current.gross"
+      severity: warning
+    - name: required_fields
+      description: "Essential fields must be present"
+      required:
+        - pay_date
+        - net_pay
+        - document_id
+      severity: error
+
+date_formats:
+  input:
+    - "%m/%d/%Y"
+    - "%Y-%m-%d"
+    - "%m-%d-%Y"
+  output: "%Y-%m-%d"
+
+amount_parsing:
+  strip_chars: "$,"
+  handle_negative:
+    patterns: ["^-", "^\\(.*\\)$"]
