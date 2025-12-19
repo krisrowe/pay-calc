@@ -406,8 +406,8 @@ def get_party_processor_and_employer(party: str, pdf_text: str = "") -> Tuple[st
     companies = party_config.get("companies", [])
 
     if not companies:
-        # Fallback defaults
-        return "employer_a", "Employer A LLC"
+        # Fallback defaults - no employer-specific logic
+        return "generic", "Unknown Employer"
 
     # Try to match keywords in PDF text
     if pdf_text:

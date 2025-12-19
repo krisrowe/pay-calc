@@ -1,8 +1,8 @@
 """
 YAML-driven document parser engine.
 
-Replaces employer-specific Python processors (employer_a.py, employer_b.py) with
-data-driven YAML parser definitions.
+Replaces employer-specific Python processors with data-driven YAML parser
+definitions. Each employer's pay stub format is defined in a YAML file.
 
 The engine:
 1. Loads all YAML parser definitions from parsers/ directory

@@ -49,7 +49,7 @@ def identify_employer_and_party(text, filename, config):
     Returns (employer_name, party, processor_name)
     
     Text normalization removes spaces to handle PDF extraction variations
-    like "Employer A LL C" vs "Employer A LLC" or "US-D AL-ADD" vs "US-DAL-ADD".
+    like "Acme LL C" vs "Acme LLC" or "Net P ay" vs "Net Pay".
     """
     employers = config.get("employers", [])
     

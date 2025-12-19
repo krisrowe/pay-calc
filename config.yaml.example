@@ -17,28 +17,12 @@ parties:
   him:
     companies:
       - name: "Employer Name"
-        paystub_processor: "generic"
         keywords: ["Employer"]
 
   her:
     companies:
       - name: "Employer Name"
-        paystub_processor: "generic"
         keywords: ["Employer"]
-
-# Paystub Processor Definitions
-# Maps a processor name to its implementation details.
-# This section is used by paystub processing scripts.
-processors:
-  employer_a:
-    description: "Processor for Employer A pay stubs"
-    class: "Employer AProcessor"
-  employer_b:
-    description: "Processor for EB pay stubs"
-    class: "EBProcessor"
-  generic:
-    description: "Generic processor for simple formats"
-    class: "GenericProcessor"
 
 # Validation Configuration
 # Controls how pay stub validation handles discrepancies between
