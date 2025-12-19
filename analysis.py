@@ -1048,6 +1048,7 @@ def generate_summary(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any]:
         "fit_taxable_wages": 0.0,
         "taxes": 0.0,
         "net_pay": 0.0,
+        "federal_withheld": 0.0,
     }
     for segment in segments:
         if segment:
@@ -1057,6 +1058,12 @@ def generate_summary(stubs: List[Dict[str, Any]], year: str) -> Dict[str, Any]:
             combined_ytd["fit_taxable_wages"] += seg_ytd.get("fit_taxable_wages", 0)
             combined_ytd["taxes"] += seg_ytd.get("taxes", 0)
             combined_ytd["net_pay"] += seg_ytd.get("net_pay", 0)
+            # Extract federal income tax withheld from taxes structure
+            # Support both old (federal_income_tax.ytd_withheld) and new (federal_income.ytd) schemas
+            taxes = last_seg_stub.get("taxes", {})
+            fed_tax = taxes.get("federal_income") or taxes.get("federal_income_tax") or {}
+            fed_ytd = fed_tax.get("ytd") or fed_tax.get("ytd_withheld") or 0
+            combined_ytd["federal_withheld"] += fed_ytd
 
     return {
         "year": year,

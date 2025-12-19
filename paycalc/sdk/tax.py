@@ -84,7 +84,7 @@ def load_party_w2_data(data_dir: Path, year: str, party: str) -> dict:
         # Map analysis fields to W-2 equivalent fields
         return {
             "wages_tips_other_comp": final_ytd.get("gross", 0),
-            "federal_income_tax_withheld": final_ytd.get("taxes", 0),
+            "federal_income_tax_withheld": final_ytd.get("federal_withheld", 0),
             "medicare_wages_and_tips": final_ytd.get("fit_taxable_wages", final_ytd.get("gross", 0)),
             "medicare_tax_withheld": 0,  # Not tracked separately in analysis
         }

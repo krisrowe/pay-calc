@@ -414,11 +414,24 @@ class YAMLParser:
         return items
 
     def _extract_taxes_structured(self, text: str, taxes_def: Dict) -> Dict:
-        """Extract taxes with structured items (federal_income_tax, etc.)."""
+        """Extract taxes with structured items.
+
+        Output schema matches OCR format for consistency:
+            taxes.federal_income.{taxable_wages, current, ytd}
+            taxes.social_security.{taxable_wages, current, ytd}
+            taxes.medicare.{taxable_wages, current, ytd}
+        """
         taxes = {
-            "federal_income_tax": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
-            "social_security": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
-            "medicare": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
+            "federal_income": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
+            "social_security": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
+            "medicare": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
+        }
+
+        # Map YAML field names to normalized output names
+        yaml_to_normalized = {
+            "federal_income_tax": "federal_income",
+            "current_withheld": "current",
+            "ytd_withheld": "ytd",
         }
 
         # Extract section text first
@@ -440,13 +453,16 @@ class YAMLParser:
                     name = group_def.get("name")
                     idx = group_def.get("index", 1)
                     try:
-                        tax_data[name] = extract_amount(match.group(idx))
+                        # Normalize field names (current_withheld -> current, ytd_withheld -> ytd)
+                        normalized_name = yaml_to_normalized.get(name, name)
+                        tax_data[normalized_name] = extract_amount(match.group(idx))
                     except IndexError:
                         pass
 
-                # Map to standard tax structure
-                if tax_name in taxes:
-                    taxes[tax_name].update(tax_data)
+                # Map tax name (federal_income_tax -> federal_income) and update
+                normalized_tax_name = yaml_to_normalized.get(tax_name, tax_name)
+                if normalized_tax_name in taxes:
+                    taxes[normalized_tax_name].update(tax_data)
 
         return taxes
 
@@ -536,10 +552,11 @@ class YAMLParser:
         if taxes_def and "items" in taxes_def:
             taxes = self._extract_taxes_structured(text, taxes_def)
         else:
+            # Default/fallback uses normalized schema (matches OCR format)
             taxes = {
-                "federal_income_tax": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
-                "social_security": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
-                "medicare": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
+                "federal_income": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
+                "social_security": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
+                "medicare": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
             }
 
         # Extract deductions
