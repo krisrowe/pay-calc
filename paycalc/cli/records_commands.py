@@ -178,13 +178,14 @@ def records_cli():
 @click.argument("filters", nargs=-1)
 @click.option("--type", "type_filter", type=click.Choice(["stub", "w2"]),
               help="Filter by record type.")
+@click.option("--employer", help="Filter by employer (case-insensitive substring match).")
 @click.option("--show-discarded", is_flag=True,
               help="Also show discarded records.")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]),
               default="text", help="Output format.")
 @click.option("--verbose", "-v", is_flag=True,
               help="Show dedup fields (doc_id, medicare) for diffing between importers.")
-def records_list(filters: Tuple[str, ...], type_filter: Optional[str],
+def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer: Optional[str],
                  show_discarded: bool, output_format: str, verbose: bool):
     """List pay records.
 
@@ -197,6 +198,7 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str],
       pay-calc records list her          # All years for her
       pay-calc records list 2025 her     # Just 2025/her
       pay-calc records list --type stub  # Only stubs
+      pay-calc records list --employer "Employer A LLC"  # Filter by employer
       pay-calc records list -v           # Verbose with dedup fields
     """
     year, party = parse_year_party_filters(filters)
@@ -207,6 +209,15 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str],
         type_filter=type_filter,
         include_discarded=show_discarded
     )
+
+    # Filter by employer if specified
+    if employer:
+        employer_lower = employer.lower()
+        all_records = [
+            r for r in all_records
+            if employer_lower in (r.get("data", {}).get("employer") or "").lower()
+            or employer_lower in (r.get("data", {}).get("employer_name") or "").lower()
+        ]
 
     if output_format == "json":
         # Strip internal _path field
@@ -225,6 +236,8 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str],
             filter_desc.append(party)
         if type_filter:
             filter_desc.append(f"type={type_filter}")
+        if employer:
+            filter_desc.append(f"employer={employer}")
         desc = "/".join(filter_desc) if filter_desc else "any filters"
         click.echo(f"No records found for {desc}")
         click.echo(f"\nRun 'pay-calc records import' to import records.")

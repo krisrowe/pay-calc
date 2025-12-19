@@ -50,6 +50,12 @@ from .gaps import (
     MAX_INTERVAL_DAYS,
 )
 
+from .w2 import (
+    generate_w2_from_analysis,
+    save_w2_forms,
+    SS_WAGE_BASE,
+)
+
 __all__ = [
     # New config architecture
     "get_config_dir",
@@ -94,4 +100,8 @@ __all__ = [
     "detect_gaps",
     "check_first_stub_ytd",
     "MAX_INTERVAL_DAYS",
+    # W-2 generation
+    "generate_w2_from_analysis",
+    "save_w2_forms",
+    "SS_WAGE_BASE",
 ]

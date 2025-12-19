@@ -232,6 +232,81 @@ def taxes(year, output, data_dir):
         raise click.ClickException(f"Error generating tax calculation: {e}")
 
 
+@cli.command("w2-generate")
+@click.argument("year")
+@click.argument("party", type=click.Choice(["him", "her"]))
+@click.option("--final-stub-date", type=str, help="Date of final pay stub if not Dec 31 (YYYY-MM-DD).")
+@click.option("--output", "-o", type=click.Path(), help="Output JSON path (default: XDG data dir)")
+@click.option("--employer", type=str, help="Filter to specific employer (substring match).")
+def w2_generate(year, party, final_stub_date, output, employer):
+    """Generate W-2 JSON from pay stub analysis data.
+
+    Creates W-2 form data from analyzed pay stubs. Requires analysis
+    data to exist (run 'pay-calc analysis YEAR PARTY' first).
+
+    \b
+    If pay stubs don't cover the full year (through December), you must
+    either:
+      1. Provide --final-stub-date to confirm the data is complete
+      2. Wait until year-end stubs are imported
+
+    \b
+    Output format matches w2-extract output for use with 'taxes' command.
+
+    Examples:
+      pay-calc w2-generate 2025 him
+      pay-calc w2-generate 2025 him --employer "Employer A LLC"
+      pay-calc w2-generate 2025 him --final-stub-date 2025-12-19
+    """
+    from paycalc.sdk import generate_w2_from_analysis, save_w2_forms
+
+    if not year.isdigit() or len(year) != 4:
+        raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
+
+    try:
+        w2_data = generate_w2_from_analysis(
+            year=year,
+            party=party,
+            final_stub_date=final_stub_date,
+            employer_filter=employer,
+        )
+    except FileNotFoundError as e:
+        raise click.ClickException(str(e))
+    except ValueError as e:
+        # Convert ValueError to user-friendly message
+        end_date = str(e).split("through ")[1].split(".")[0] if "through" in str(e) else "unknown"
+        raise click.ClickException(
+            f"Analysis data only covers through {end_date}.\n"
+            f"Either:\n"
+            f"  1. Import more pay stubs and re-run analysis\n"
+            f"  2. Use --final-stub-date {end_date} to confirm this is the final stub"
+        )
+
+    # Save to file
+    output_path = Path(output) if output else None
+    saved_path = save_w2_forms(w2_data, output_path)
+
+    # Display results
+    date_range = w2_data.get("analysis_date_range", {})
+    form = w2_data["forms"][0]
+    w2_box = form["data"]
+
+    click.echo(f"Generated W-2 data from analysis:")
+    click.echo(f"  Source: {form['source_file']}")
+    click.echo(f"  Date range: {date_range.get('start')} to {date_range.get('end')}")
+    click.echo(f"  Employer(s): {form['employer']}")
+    click.echo()
+    click.echo("W-2 Box Values:")
+    click.echo(f"  Box 1 (Wages):           ${w2_box['wages_tips_other_comp']:>12,.2f}")
+    click.echo(f"  Box 2 (Federal WH):      ${w2_box['federal_income_tax_withheld']:>12,.2f}")
+    click.echo(f"  Box 3 (SS Wages):        ${w2_box['social_security_wages']:>12,.2f}")
+    click.echo(f"  Box 4 (SS Tax):          ${w2_box['social_security_tax_withheld']:>12,.2f}")
+    click.echo(f"  Box 5 (Medicare Wages):  ${w2_box['medicare_wages_and_tips']:>12,.2f}")
+    click.echo(f"  Box 6 (Medicare Tax):    ${w2_box['medicare_tax_withheld']:>12,.2f}")
+    click.echo()
+    click.echo(f"Output: {saved_path}")
+
+
 @cli.command("analysis")
 @click.argument("year")
 @click.argument("party", type=click.Choice(["him", "her"]))
