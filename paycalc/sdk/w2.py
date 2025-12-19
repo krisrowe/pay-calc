@@ -201,32 +201,50 @@ def generate_w2_with_projection(
 
                 if proj and proj.get("days_remaining", 0) > 0:
                     additional = proj.get("projected_additional", {})
-                    projected_total = proj.get("projected_total", {})
 
-                    result["projected_additional"] = {
-                        "days_remaining": proj.get("days_remaining"),
-                        "income": {
-                            "regular_pay": additional.get("regular_pay", 0),
-                            "stock_grants": additional.get("stock_grants", 0),
-                            "total_gross": additional.get("total_gross", 0),
-                        },
-                        "withholding": {
-                            "federal": additional.get("federal_withheld", 0),
-                            "social_security": additional.get("ss_withheld", 0),
-                            "medicare": additional.get("medicare_withheld", 0),
-                            "total": additional.get("total_taxes", 0),
-                        },
-                        "stock_price_used": stock_price,
-                        "warnings": proj.get("stock_grant_info", {}).get("warnings", []),
+                    # Additional gross wages
+                    additional_gross = additional.get("total_gross", 0)
+
+                    # SS wages for additional: only taxable amount up to wage base
+                    # If ytd_w2 is already at cap, additional SS wages = 0
+                    ss_wage_base = SS_WAGE_BASE.get(year, 176100)
+                    ytd_ss_wages = ytd_w2.get("social_security_wages", 0)
+                    remaining_ss_cap = max(0, ss_wage_base - ytd_ss_wages)
+                    additional_ss_wages = round(min(additional_gross, remaining_ss_cap), 2)
+
+                    # Medicare wages for additional = all additional gross
+                    additional_medicare_wages = round(additional_gross, 2)
+
+                    # projected_additional_w2: same W-2 format as ytd_w2
+                    result["projected_additional_w2"] = {
+                        "wages_tips_other_comp": round(additional.get("total_gross", 0), 2),
+                        "federal_income_tax_withheld": round(additional.get("federal_withheld", 0), 2),
+                        "social_security_wages": additional_ss_wages,
+                        "social_security_tax_withheld": round(additional.get("ss_withheld", 0), 2),
+                        "medicare_wages_and_tips": additional_medicare_wages,
+                        "medicare_tax_withheld": round(additional.get("medicare_withheld", 0), 2),
                     }
 
+                    # projected_w2: simple sum of ytd_w2 + projected_additional_w2
+                    add_w2 = result["projected_additional_w2"]
                     result["projected_w2"] = {
-                        "wages_tips_other_comp": projected_total.get("gross", 0),
-                        "federal_income_tax_withheld": projected_total.get("federal_withheld", 0),
-                        "social_security_wages": projected_total.get("ss_wages", 0),
-                        "social_security_tax_withheld": projected_total.get("ss_withheld", 0),
-                        "medicare_wages_and_tips": projected_total.get("medicare_wages", 0),
-                        "medicare_tax_withheld": projected_total.get("medicare_withheld", 0),
+                        "wages_tips_other_comp": round(ytd_w2["wages_tips_other_comp"] + add_w2["wages_tips_other_comp"], 2),
+                        "federal_income_tax_withheld": round(ytd_w2["federal_income_tax_withheld"] + add_w2["federal_income_tax_withheld"], 2),
+                        "social_security_wages": round(ytd_w2["social_security_wages"] + add_w2["social_security_wages"], 2),
+                        "social_security_tax_withheld": round(ytd_w2["social_security_tax_withheld"] + add_w2["social_security_tax_withheld"], 2),
+                        "medicare_wages_and_tips": round(ytd_w2["medicare_wages_and_tips"] + add_w2["medicare_wages_and_tips"], 2),
+                        "medicare_tax_withheld": round(ytd_w2["medicare_tax_withheld"] + add_w2["medicare_tax_withheld"], 2),
+                    }
+
+                    # Include projection metadata separately
+                    result["projection_info"] = {
+                        "days_remaining": proj.get("days_remaining"),
+                        "stock_price_used": stock_price,
+                        "income_breakdown": {
+                            "regular_pay": additional.get("regular_pay", 0),
+                            "stock_grants": additional.get("stock_grants", 0),
+                        },
+                        "warnings": proj.get("stock_grant_info", {}).get("warnings", []),
                     }
 
     return result
