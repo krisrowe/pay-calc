@@ -56,6 +56,8 @@ from .w2 import (
     SS_WAGE_BASE,
 )
 
+from . import records
+
 __all__ = [
     # New config architecture
     "get_config_dir",
@@ -104,4 +106,6 @@ __all__ = [
     "generate_w2_from_analysis",
     "save_w2_forms",
     "SS_WAGE_BASE",
+    # Records module
+    "records",
 ]

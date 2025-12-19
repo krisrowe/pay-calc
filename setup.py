@@ -14,12 +14,19 @@ setup(
         'PyYAML>=6.0',
         'click>=8.0',
     ],
+    extras_require={
+        'mcp': [
+            'mcp[cli]>=1.0.0',
+            'pydantic>=2.0.0',
+        ],
+    },
     entry_points={
         'console_scripts': [
             'pay-calc=paycalc.cli.__main__:main',
+            'pay-calc-mcp=paycalc.mcp.server:run_server',
         ],
     },
     author='Personal',
     description='Personal pay and tax projection tools.',
-    python_requires='>=3.8',
+    python_requires='>=3.10',
 )
