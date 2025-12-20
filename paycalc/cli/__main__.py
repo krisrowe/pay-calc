@@ -350,142 +350,71 @@ def taxes(year, output_format, data_dir):
 
 @cli.command("w2-generate")
 @click.argument("year")
-@click.argument("party", type=click.Choice(["him", "her"]))
-@click.option("--final-stub-date", type=str, help="Date of final pay stub if not Dec 31 (YYYY-MM-DD).")
-@click.option("--output", "-o", type=click.Path(), help="Output JSON path (default: XDG data dir)")
-@click.option("--employer", type=str, help="Filter to specific employer (substring match).")
-@click.option("--include-projection", is_flag=True, help="Include projected income to year-end.")
-@click.option("--price", type=float, help="Stock price for RSU projection (required with --include-projection if RSUs enabled).")
-@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", help="Output format (default: text).")
-def w2_generate(year, party, final_stub_date, output, employer, include_projection, price, output_format):
-    """Generate W-2 JSON from pay stub analysis data.
+@click.option("--party", type=click.Choice(["him", "her"]), help="Party for validation (optional)")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", help="Output format (default: text)")
+def w2_generate(year, party, output_format):
+    """Convert a pay stub to W-2 format.
 
-    Creates W-2 form data from analyzed pay stubs. Requires analysis
-    data to exist (run 'pay-calc analysis YEAR PARTY' first).
+    Takes a stub (piped JSON) and converts it to W-2 box values.
+    Does not care if the stub is real or projected.
 
     \b
-    If pay stubs don't cover the full year (through December), you must
-    either:
-      1. Provide --final-stub-date to confirm the data is complete
-      2. Wait until year-end stubs are imported
+    Input modes:
+    1. Piped JSON: pay-calc projection 2025 him --format json | jq '.stub' | pay-calc w2-generate 2025
+    2. Piped from file: cat stub.json | pay-calc w2-generate 2025
 
     \b
-    With --include-projection, shows three sections:
-      1. YTD W-2 (from latest stub)
-      2. Projected additional income by type
-      3. Combined W-2 (YTD + projected)
-
-    \b
-    Output format matches w2-extract output for use with 'taxes' command.
-
     Examples:
-      pay-calc w2-generate 2025 him
-      pay-calc w2-generate 2025 him --employer "Employer A LLC"
-      pay-calc w2-generate 2025 him --final-stub-date 2025-12-19
-      pay-calc w2-generate 2025 him --include-projection --price 175.50
+      # From projection:
+      pay-calc projection 2025 him --format json | jq '.stub' | pay-calc w2-generate 2025
+
+      # From a stub file:
+      cat final_stub.json | pay-calc w2-generate 2025 --party him
     """
-    from paycalc.sdk import generate_w2_from_analysis, save_w2_forms
-    from paycalc.sdk.w2 import generate_w2_with_projection
+    from paycalc.sdk.w2 import stub_to_w2
 
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
-    try:
-        # Use SDK function that handles all 3 sections
-        result = generate_w2_with_projection(
-            year=year,
-            party=party,
-            include_projection=include_projection,
-            stock_price=price,
-            final_stub_date=final_stub_date,
-            employer_filter=employer,
-        )
-    except FileNotFoundError as e:
-        raise click.ClickException(str(e))
-    except ValueError as e:
-        # Convert ValueError to user-friendly message
-        end_date = str(e).split("through ")[1].split(".")[0] if "through" in str(e) else "unknown"
+    # Read stub from stdin
+    if sys.stdin.isatty():
         raise click.ClickException(
-            f"Analysis data only covers through {end_date}.\n"
-            f"Either:\n"
-            f"  1. Import more pay stubs and re-run analysis\n"
-            f"  2. Use --final-stub-date {end_date} to confirm this is the final stub"
+            "No stub data provided. Pipe a stub JSON to this command.\n"
+            "Example: pay-calc projection 2025 him --format json | jq '.stub' | pay-calc w2-generate 2025"
         )
 
-    # Save YTD W-2 to file
-    w2_for_save = {
-        "year": year,
-        "party": party,
-        "generated_from": "analysis",
-        "analysis_date_range": result["date_range"],
-        "forms": [{
-            "employer": result["employer"],
-            "source_type": "analysis",
-            "source_file": result["source_file"],
-            "data": result["ytd_w2"],
-        }],
-    }
-    output_path = Path(output) if output else None
-    saved_path = save_w2_forms(w2_for_save, output_path)
+    try:
+        stub = json.load(sys.stdin)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Invalid JSON from stdin: {e}")
 
-    # Output based on format
+    # Validate it looks like a stub
+    if "pay_summary" not in stub:
+        raise click.ClickException("Input JSON doesn't look like a stub (missing 'pay_summary')")
+
+    try:
+        result = stub_to_w2(stub, year, party=party)
+    except ValueError as e:
+        raise click.ClickException(str(e))
+
     if output_format == "json":
         click.echo(json.dumps(result, indent=2))
         return
 
-    # Text format: display ASCII tables
-    date_range = result["date_range"]
-    click.echo("=" * 60)
-    click.echo("SECTION 1: YTD W-2 (from latest stub)")
-    click.echo("=" * 60)
-    click.echo(f"  Source: {result['source_file']}")
-    click.echo(f"  Date range: {date_range.get('start')} to {date_range.get('end')}")
-    click.echo(f"  Employer(s): {result['employer']}")
-    click.echo()
-    _print_w2_boxes(result["ytd_w2"])
+    # Text format
+    w2 = result["w2"]
+    click.echo("=" * 50)
+    click.echo(f"W-2 for {year} - {result['employer']}")
+    click.echo("=" * 50)
+    _print_w2_boxes(w2)
 
-    if include_projection and "projected_additional" in result:
-        additional = result["projected_additional"]
-
-        # Section 2: Projected Additional Income & Withholding
+    validation = result.get("validation", {})
+    warnings = validation.get("warnings", [])
+    if warnings:
         click.echo()
-        click.echo("=" * 60)
-        click.echo(f"SECTION 2: Projected Additional ({additional['days_remaining']} days remaining)")
-        click.echo("=" * 60)
-        click.echo()
-        click.echo("  Income:")
-        click.echo(f"    Regular Pay:      ${additional['income']['regular_pay']:>12,.2f}")
-        click.echo(f"    Stock Vesting:    ${additional['income']['stock_grants']:>12,.2f}")
-        click.echo(f"    ─────────────────────────────────")
-        click.echo(f"    Total Gross:      ${additional['income']['total_gross']:>12,.2f}")
-        click.echo()
-        click.echo("  Withholding:")
-        click.echo(f"    Federal:          ${additional['withholding']['federal']:>12,.2f}")
-        click.echo(f"    Social Security:  ${additional['withholding']['social_security']:>12,.2f}")
-        click.echo(f"    Medicare:         ${additional['withholding']['medicare']:>12,.2f}")
-        click.echo(f"    ─────────────────────────────────")
-        click.echo(f"    Total Taxes:      ${additional['withholding']['total']:>12,.2f}")
-
-        warnings = additional.get("warnings", [])
-        if warnings:
-            click.echo()
-            click.echo("  Warnings:")
-            for w in warnings:
-                click.echo(f"    - {w}")
-
-        # Section 3: Projected W-2
-        click.echo()
-        click.echo("=" * 60)
-        click.echo("SECTION 3: Projected W-2 (YTD + Projected)")
-        click.echo("=" * 60)
-        _print_w2_boxes(result["projected_w2"])
-
-    elif include_projection:
-        click.echo()
-        click.echo("No additional projection - year appears complete.")
-
-    click.echo()
-    click.echo(f"Output: {saved_path}")
+        click.echo("Warnings:")
+        for w in warnings:
+            click.echo(f"  - {w}")
 
 
 def _print_w2_boxes(w2_box: dict):
@@ -646,28 +575,26 @@ def analysis(year, party, through_date, output_format):
 @cli.command("projection")
 @click.argument("year")
 @click.argument("party", type=click.Choice(["him", "her"]))
-@click.option("--input", "-i", "input_file", type=click.Path(exists=True), help="Input JSON from analysis (default: XDG data dir)")
-@click.option("--json", "output_json", is_flag=True, help="Output as JSON instead of formatted text")
+@click.option("--employer", type=str, help="Filter to specific employer (finds latest stub for employer)")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text", help="Output format (default: text)")
 @click.option("--price", type=float, help="Stock price for RSU value projection")
-def projection(year, party, input_file, output_json, price):
+def projection(year, party, employer, output_format, price):
     """Project year-end totals from partial year pay data.
 
-    Reads pay stub data from analysis output and projects year-end
-    totals based on observed pay patterns (regular pay cadence, stock
-    vesting schedule).
+    Reads pay stub data and projects year-end totals based on observed
+    pay patterns (regular pay cadence, stock vesting schedule).
 
     \b
-    Prerequisite: Run analysis first to generate the input file.
-        pay-calc analysis <year> <party>
+    Input modes:
+    1. Piped JSON: echo '{"stubs": [...]}' | pay-calc projection 2025 him
+    2. Employer lookup: pay-calc projection 2025 him --employer "Employer A"
+    3. Default: Uses analysis file from 'pay-calc analysis YEAR PARTY'
 
     \b
-    Input:  YYYY_party_pay_all.json (from analysis)
-    Output: Year-end projection report
+    Output includes a 'stub' property containing the projected Y/E stub
+    in standard stub format. Extract with: --format json | jq '.stub'
 
     Use this for mid-year tax planning when full W-2 data is not yet available.
-
-    YEAR should be a 4-digit year (e.g., 2025).
-    PARTY is 'him' or 'her'.
     """
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
@@ -675,35 +602,67 @@ def projection(year, party, input_file, output_json, price):
     from paycalc.sdk import get_data_path
     from paycalc.sdk.income_projection import generate_projection
 
-    # Determine input file path
-    if input_file:
-        input_path = Path(input_file)
+    analysis_data = None
+    stubs = []
+
+    # Check for piped input - peek at stdin buffer to see if there's actual content
+    has_stdin = False
+    if not sys.stdin.isatty():
+        # Try to peek at stdin buffer
+        try:
+            first_char = sys.stdin.buffer.peek(1)
+            has_stdin = bool(first_char)
+        except Exception:
+            has_stdin = False
+
+    if has_stdin:
+        try:
+            piped_data = json.load(sys.stdin)
+            # Could be a single stub or analysis data with stubs array
+            if "stubs" in piped_data:
+                stubs = piped_data["stubs"]
+                analysis_data = piped_data
+            elif "pay_summary" in piped_data:
+                # Single stub piped in
+                stubs = [piped_data]
+                analysis_data = {"stubs": stubs}
+            else:
+                raise click.ClickException("Piped JSON must have 'stubs' array or be a single stub with 'pay_summary'")
+        except json.JSONDecodeError as e:
+            raise click.ClickException(f"Invalid JSON from stdin: {e}")
     else:
+        # No piped input - load from analysis file
         input_path = get_data_path() / f"{year}_{party}_pay_all.json"
 
-    # Check if input file exists with clear guidance
-    if not input_path.exists():
-        click.echo(f"Error: Input file not found: {input_path}", err=True)
-        click.echo("", err=True)
-        click.echo("Run analysis first to generate the required input:", err=True)
-        click.echo(f"    pay-calc analysis {year} {party}", err=True)
-        click.echo("", err=True)
-        click.echo("Then run projection again:", err=True)
-        click.echo(f"    pay-calc projection {year} {party}", err=True)
-        raise SystemExit(1)
+        if not input_path.exists():
+            click.echo(f"Error: Analysis file not found: {input_path}", err=True)
+            click.echo("", err=True)
+            click.echo("Run analysis first to generate the required input:", err=True)
+            click.echo(f"    pay-calc analysis {year} {party}", err=True)
+            click.echo("", err=True)
+            click.echo("Or pipe in stub data:", err=True)
+            click.echo(f"    cat stub.json | pay-calc projection {year} {party}", err=True)
+            raise SystemExit(1)
 
-    # Load analysis data
-    with open(input_path) as f:
-        analysis_data = json.load(f)
+        with open(input_path) as f:
+            analysis_data = json.load(f)
 
-    stubs = analysis_data.get("stubs", [])
+        stubs = analysis_data.get("stubs", [])
+
     if not stubs:
-        raise click.ClickException(f"No pay stub data found in {input_path}")
+        raise click.ClickException("No pay stub data found")
+
+    # Filter by employer if specified
+    if employer:
+        employer_lower = employer.lower()
+        stubs = [s for s in stubs if employer_lower in s.get("employer", "").lower()]
+        if not stubs:
+            raise click.ClickException(f"No stubs found for employer matching '{employer}'")
 
     # Generate projection using SDK (pass party to enable RSU SDK if configured)
     proj = generate_projection(stubs, year, party=party, stock_price=price)
 
-    if output_json:
+    if output_format == "json":
         click.echo(json.dumps(proj, indent=2))
         return
 
@@ -728,7 +687,18 @@ def _print_projection_report(proj: dict, analysis_data: dict):
 
     actual = proj.get("actual", {})
     additional = proj.get("projected_additional", {})
-    total = proj.get("projected_total", {})
+    # Extract totals from stub property
+    stub = proj.get("stub", {})
+    stub_ytd = stub.get("pay_summary", {}).get("ytd", {})
+    stub_taxes = stub.get("taxes", {})
+    total = {
+        "gross": stub_ytd.get("gross", 0),
+        "taxes_withheld": (
+            stub_taxes.get("federal_income_tax", {}).get("ytd_withheld", 0) +
+            stub_taxes.get("social_security", {}).get("ytd_withheld", 0) +
+            stub_taxes.get("medicare", {}).get("ytd_withheld", 0)
+        ),
+    }
 
     # Get 401k totals
     total_401k = contrib_401k.get("total", 0)

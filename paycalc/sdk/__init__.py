@@ -55,6 +55,9 @@ from .w2 import (
     generate_w2_from_analysis,
     generate_w2_with_projection,
     save_w2_forms,
+    stub_to_w2,
+    validate_stub_for_w2,
+    StubValidationResult,
     SS_WAGE_BASE,
 )
 

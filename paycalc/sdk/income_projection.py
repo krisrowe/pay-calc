@@ -185,7 +185,12 @@ def generate_projection(
         stock_price: Optional stock price for RSU value calculation
 
     Returns:
-        Projection dict with actual, projected_additional, projected_total
+        Projection dict with:
+        - actual: YTD values from real stubs
+        - projected_additional: breakdown of what we're adding
+        - regular_pay_info: pay pattern analysis
+        - stock_grant_info: RSU schedule analysis
+        - stub: projected Y/E stub in standard stub schema format
     """
     if not stubs:
         return {}
@@ -389,6 +394,56 @@ def generate_projection(
     projected_additional_taxes = proj_federal + proj_ss + proj_medicare
     projected_total_taxes = actual_taxes + projected_additional_taxes
 
+    # Determine employer from stubs
+    employers = set()
+    for stub in stubs:
+        emp = stub.get("employer", "")
+        if emp:
+            employers.add(emp)
+    employer_name = ", ".join(sorted(employers)) if employers else "Unknown"
+
+    # Projected Y/E stub in standard stub schema format
+    # Can be extracted with jq '.stub' and piped to stub_to_w2() or records show
+    projected_gross_total = round(projected_gross, 2)
+    projected_fit_taxable = round(actual_fit_taxable + total_projection, 2)
+    projected_fed_withheld = round(actual_federal + proj_federal, 2)
+    projected_ss_wages = round(min(actual_ss_wages + total_projection, SS_WAGE_BASE), 2)
+    projected_ss_withheld = round(actual_ss_tax + proj_ss, 2)
+    projected_medicare_wages = round(actual_medicare_wages + total_projection, 2)
+    projected_medicare_withheld = round(actual_medicare_tax + proj_medicare, 2)
+
+    stub = {
+        "pay_date": f"{year}-12-31",
+        "employer": employer_name,
+        "pay_summary": {
+            "ytd": {
+                "gross": projected_gross_total,
+                "fit_taxable_wages": projected_fit_taxable,
+            },
+            "current": {
+                "gross": round(total_projection, 2),
+                "net_pay": round(total_projection - projected_additional_taxes, 2),
+            },
+        },
+        "taxes": {
+            "federal_income_tax": {
+                "ytd_withheld": projected_fed_withheld,
+                "current_withheld": round(proj_federal, 2),
+            },
+            "social_security": {
+                "ytd_withheld": projected_ss_withheld,
+                "current_withheld": round(proj_ss, 2),
+                "ytd_wages": projected_ss_wages,
+            },
+            "medicare": {
+                "ytd_withheld": projected_medicare_withheld,
+                "current_withheld": round(proj_medicare, 2),
+                "ytd_wages": projected_medicare_wages,
+            },
+        },
+        "_projection": True,
+    }
+
     return {
         "as_of_date": last_date_str,
         "days_remaining": days_remaining,
@@ -400,7 +455,7 @@ def generate_projection(
             "ss_withheld": actual_ss_tax,
             "medicare_wages": actual_medicare_wages,
             "medicare_withheld": actual_medicare_tax,
-            "total_taxes_withheld": actual_taxes
+            "total_taxes_withheld": actual_taxes,
         },
         "projected_additional": {
             "regular_pay": regular_projection,
@@ -409,19 +464,11 @@ def generate_projection(
             "federal_withheld": proj_federal,
             "ss_withheld": proj_ss,
             "medicare_withheld": proj_medicare,
-            "total_taxes": projected_additional_taxes
-        },
-        "projected_total": {
-            "gross": projected_gross,
-            "federal_withheld": actual_federal + proj_federal,
-            "ss_wages": min(actual_ss_wages + total_projection, SS_WAGE_BASE),
-            "ss_withheld": actual_ss_tax + proj_ss,
-            "medicare_wages": actual_medicare_wages + total_projection,
-            "medicare_withheld": actual_medicare_tax + proj_medicare,
-            "total_taxes_withheld": projected_total_taxes
+            "total_taxes": projected_additional_taxes,
         },
         "regular_pay_info": regular_info,
-        "stock_grant_info": stock_info
+        "stock_grant_info": stock_info,
+        "stub": stub,
     }
 
 

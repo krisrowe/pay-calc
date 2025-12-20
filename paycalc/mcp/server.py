@@ -221,6 +221,10 @@ async def generate_income_projection(
         if not proj:
             return {"message": "No projection needed - year appears complete", "projection": None}
 
+        # Extract total from stub property
+        stub = proj.get("stub", {})
+        stub_gross = stub.get("pay_summary", {}).get("ytd", {}).get("gross", 0)
+
         return {
             "projection": proj,
             "summary": {
@@ -228,7 +232,7 @@ async def generate_income_projection(
                 "days_remaining": proj.get("days_remaining"),
                 "actual_gross": proj.get("actual", {}).get("gross"),
                 "projected_additional": proj.get("projected_additional", {}).get("total_gross"),
-                "projected_total_gross": proj.get("projected_total", {}).get("gross"),
+                "projected_total_gross": stub_gross,
                 "stock_price_used": stock_price,
             },
         }

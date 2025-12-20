@@ -1,11 +1,12 @@
 """W-2 generation from pay stub analysis data."""
 
 import json
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
-from .config import get_data_path
+from .config import get_data_path, load_profile
 
 
 # Social Security wage base limits by year
@@ -14,6 +15,218 @@ SS_WAGE_BASE = {
     "2025": 176100,
     "2026": 178800,  # Projected
 }
+
+
+@dataclass
+class StubValidationResult:
+    """Result of validating a stub for W-2 conversion."""
+
+    valid: bool
+    errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+
+def validate_stub_for_w2(
+    stub: dict[str, Any],
+    party: Optional[str] = None,
+) -> StubValidationResult:
+    """Validate that a stub has required fields for W-2 conversion.
+
+    Required fields:
+    - YTD gross wages
+    - Federal income tax withheld
+    - Social Security tax withheld
+    - Medicare tax withheld
+
+    Warnings (not errors):
+    - Missing 401k deduction (unusual)
+    - No RSU income when RSUs enabled for party
+
+    Args:
+        stub: Pay stub dict with pay_summary and taxes sections
+        party: Optional party name to check RSU configuration
+
+    Returns:
+        StubValidationResult with valid flag, errors, and warnings
+    """
+    errors = []
+    warnings = []
+
+    pay_summary = stub.get("pay_summary", {})
+    ytd = pay_summary.get("ytd", {})
+    taxes = stub.get("taxes", {})
+
+    # Required: YTD gross
+    ytd_gross = ytd.get("gross", 0)
+    if not ytd_gross or ytd_gross <= 0:
+        errors.append("Missing or zero YTD gross wages")
+
+    # Required: Federal income tax withheld
+    fed_tax = taxes.get("federal_income_tax", {})
+    fed_withheld = fed_tax.get("ytd_withheld", 0)
+    if fed_withheld is None:
+        errors.append("Missing federal income tax withheld")
+
+    # Required: Social Security tax withheld
+    ss_tax = taxes.get("social_security", {})
+    ss_withheld = ss_tax.get("ytd_withheld", 0)
+    if ss_withheld is None:
+        errors.append("Missing Social Security tax withheld")
+
+    # Required: Medicare tax withheld
+    medicare_tax = taxes.get("medicare", {})
+    medicare_withheld = medicare_tax.get("ytd_withheld", 0)
+    if medicare_withheld is None:
+        errors.append("Missing Medicare tax withheld")
+
+    # Warning: No 401k deduction (unusual but not error)
+    deductions = stub.get("deductions", {})
+    pretax_401k = deductions.get("401k_pretax", 0)
+    if not pretax_401k and ytd_gross and ytd_gross > 50000:
+        warnings.append("No 401k deduction found (unusual for high earners)")
+
+    # Warning: RSUs enabled but no RSU income visible
+    if party:
+        try:
+            profile = load_profile()
+            parties = profile.get("parties", {})
+            party_config = parties.get(party, {})
+
+            # Check if any company has RSUs configured
+            rsus_configured = False
+            for company in party_config.get("companies", []):
+                future_exp = company.get("future_expectations", {})
+                if future_exp.get("rsus"):
+                    rsus_configured = True
+                    break
+
+            if rsus_configured:
+                # Check for RSU-related earnings in stub
+                earnings = stub.get("earnings", {})
+                has_rsu_income = any(
+                    "rsu" in k.lower() or "stock" in k.lower()
+                    for k in earnings.keys()
+                )
+                # Also check current gross for stock-type stubs
+                pay_type = stub.get("_pay_type", "")
+                if not has_rsu_income and pay_type != "stock_grant":
+                    # Check YTD for any RSU income accumulated
+                    ytd_breakdown = stub.get("ytd_breakdown", {})
+                    ytd_earnings = ytd_breakdown.get("earnings", {})
+                    has_ytd_rsu = any(
+                        "rsu" in k.lower() or "stock" in k.lower()
+                        for k in ytd_earnings.keys()
+                    )
+                    if not has_ytd_rsu:
+                        warnings.append(
+                            "RSUs configured for party but no RSU income found in stub"
+                        )
+        except Exception:
+            pass  # Profile load failed, skip RSU check
+
+    return StubValidationResult(
+        valid=len(errors) == 0,
+        errors=errors,
+        warnings=warnings,
+    )
+
+
+def stub_to_w2(
+    stub: dict[str, Any],
+    year: str,
+    party: Optional[str] = None,
+    employer: Optional[str] = None,
+    validate: bool = True,
+) -> dict[str, Any]:
+    """Convert a final pay stub to W-2 format.
+
+    Takes a stub dict directly as input and extracts W-2 box values.
+    This is the core conversion function - no file lookups, no projections.
+
+    Args:
+        stub: Pay stub dict with pay_summary and taxes sections
+        year: Tax year (4 digits)
+        party: Optional party name for validation (RSU checks)
+        employer: Optional employer name override
+        validate: Whether to validate stub fields (default True)
+
+    Returns:
+        dict with:
+        - w2: W-2 box values
+        - validation: StubValidationResult (if validate=True)
+        - source: metadata about the source stub
+
+    Raises:
+        ValueError: If validation fails with errors (when validate=True)
+    """
+    # Validate if requested
+    validation = None
+    if validate:
+        validation = validate_stub_for_w2(stub, party=party)
+        if not validation.valid:
+            raise ValueError(
+                f"Stub validation failed: {'; '.join(validation.errors)}"
+            )
+
+    # Extract values from stub
+    pay_summary = stub.get("pay_summary", {})
+    ytd = pay_summary.get("ytd", {})
+    taxes = stub.get("taxes", {})
+
+    # Box 1: Wages, tips, other compensation (FIT taxable wages)
+    ytd_gross = ytd.get("gross", 0)
+    fit_taxable = ytd.get("fit_taxable_wages", ytd_gross)
+
+    # Box 2: Federal income tax withheld
+    fed_withheld = taxes.get("federal_income_tax", {}).get("ytd_withheld", 0)
+
+    # Box 3: Social Security wages (capped at SS wage base)
+    ss_wage_base = SS_WAGE_BASE.get(year, 176100)
+    ss_wages = min(ytd_gross, ss_wage_base)
+
+    # Box 4: Social Security tax withheld
+    ss_withheld = taxes.get("social_security", {}).get("ytd_withheld", 0)
+
+    # Box 5: Medicare wages and tips
+    medicare_wages = ytd_gross
+
+    # Box 6: Medicare tax withheld
+    medicare_withheld = taxes.get("medicare", {}).get("ytd_withheld", 0)
+
+    # Build W-2 data
+    w2_data = {
+        "wages_tips_other_comp": round(fit_taxable, 2),
+        "federal_income_tax_withheld": round(fed_withheld, 2),
+        "social_security_wages": round(ss_wages, 2),
+        "social_security_tax_withheld": round(ss_withheld, 2),
+        "medicare_wages_and_tips": round(medicare_wages, 2),
+        "medicare_tax_withheld": round(medicare_withheld, 2),
+    }
+
+    # Determine employer from stub if not provided
+    if not employer:
+        employer = stub.get("employer", "Unknown")
+
+    result = {
+        "year": year,
+        "party": party,
+        "employer": employer,
+        "w2": w2_data,
+        "source": {
+            "type": "stub",
+            "pay_date": stub.get("pay_date"),
+            "ytd_gross": ytd_gross,
+        },
+    }
+
+    if validation:
+        result["validation"] = {
+            "valid": validation.valid,
+            "errors": validation.errors,
+            "warnings": validation.warnings,
+        }
+
+    return result
 
 
 def generate_w2_from_analysis(
