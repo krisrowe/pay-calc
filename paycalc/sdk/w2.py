@@ -179,34 +179,57 @@ def stub_to_w2(
     pay_summary = stub.get("pay_summary", {})
     ytd = pay_summary.get("ytd", {})
     taxes = stub.get("taxes", {})
+    deductions = stub.get("deductions", [])
 
     # Box 1: Wages, tips, other compensation (FIT taxable wages)
+    # FIT taxable = gross - pretax deductions (401k, FSA, HSA, etc.)
     ytd_gross = ytd.get("gross", 0)
-    fit_taxable = ytd.get("fit_taxable_wages", ytd_gross)
+
+    # Check if fit_taxable_wages is explicitly provided
+    fit_taxable_explicit = ytd.get("fit_taxable_wages")
+    if fit_taxable_explicit is not None:
+        fit_taxable = fit_taxable_explicit
+    else:
+        # Calculate from gross minus pretax deductions
+        pretax_total = 0
+        if isinstance(deductions, list):
+            for ded in deductions:
+                ded_type = ded.get("type", "").lower()
+                # Pretax deductions: 401k, FSA, HSA, retirement plans
+                if any(t in ded_type for t in ["401", "403", "fsa", "hsa", "tsp", "retirement"]):
+                    pretax_total += ded.get("ytd_amount", 0)
+        fit_taxable = ytd_gross - pretax_total
 
     # Box 2: Federal income tax withheld
     # Handle both schemas: federal_income_tax.ytd_withheld OR federal_income.ytd
     fed_tax = taxes.get("federal_income_tax", {}) or taxes.get("federal_income", {})
     fed_withheld = fed_tax.get("ytd_withheld", 0) or fed_tax.get("ytd", 0)
 
-    # Box 3: Social Security wages (capped at SS wage base)
+    # Calculate FICA-exempt deductions (reduce SS and Medicare wages)
+    # These are Section 125 cafeteria plan benefits exempt from FICA:
+    # - FSA (Flexible Spending Accounts - medical and dependent care)
+    # - Health insurance premiums (dental, medical, vision)
+    fica_exempt_total = 0
+    if isinstance(deductions, list):
+        for ded in deductions:
+            ded_type = ded.get("type", "").lower()
+            # FSA (dependent care, medical FSA)
+            if "fsa" in ded_type:
+                fica_exempt_total += ded.get("ytd_amount", 0)
+            # Health insurance premiums
+            elif any(t in ded_type for t in ["dental", "medical", "vision"]):
+                fica_exempt_total += ded.get("ytd_amount", 0)
+
+    # Box 3: Social Security wages (gross minus FICA-exempt, capped at SS wage base)
     ss_wage_base = SS_WAGE_BASE.get(year, 176100)
-    ss_wages = min(ytd_gross, ss_wage_base)
+    ss_wages = min(ytd_gross - fica_exempt_total, ss_wage_base)
 
     # Box 4: Social Security tax withheld
     ss_tax = taxes.get("social_security", {})
     ss_withheld = ss_tax.get("ytd_withheld", 0) or ss_tax.get("ytd", 0)
 
-    # Box 5: Medicare wages and tips
-    # Subtract pretax health insurance (dental, medical, vision) from gross
-    health_insurance_ytd = 0
-    deductions = stub.get("deductions", [])
-    if isinstance(deductions, list):
-        for ded in deductions:
-            ded_type = ded.get("type", "").lower()
-            if any(t in ded_type for t in ["dental", "medical", "vision"]):
-                health_insurance_ytd += ded.get("ytd_amount", 0)
-    medicare_wages = ytd_gross - health_insurance_ytd
+    # Box 5: Medicare wages and tips (gross minus FICA-exempt)
+    medicare_wages = ytd_gross - fica_exempt_total
 
     # Box 6: Medicare tax withheld
     medicare_tax = taxes.get("medicare", {})
@@ -248,122 +271,236 @@ def stub_to_w2(
     return result
 
 
-def generate_w2_from_analysis(
+def _normalize_employer(name: str) -> str:
+    """Normalize employer name for matching.
+
+    Removes trailing LLC/Inc suffixes and normalizes case/whitespace.
+    """
+    import re
+    # Remove trailing ", LLC" or " LLC" etc.
+    normalized = re.sub(r'[,\s]+(LLC|Inc|Corp|Corporation)\.?$', '', name, flags=re.IGNORECASE)
+    # Normalize whitespace and case
+    normalized = ' '.join(normalized.split()).upper()
+    # Normalize & vs and
+    normalized = normalized.replace(' AND ', ' & ')
+    return normalized
+
+
+def generate_w2(
     year: str,
     party: str,
-    final_stub_date: Optional[str] = None,
-    employer_filter: Optional[str] = None,
-    data_dir: Optional[Path] = None,
+    allow_projection: bool = False,
+    stock_price: Optional[float] = None,
 ) -> dict:
-    """Generate W-2 data from pay stub analysis.
+    """Generate W-2 data for a party, per-employer.
+
+    For each employer:
+    1. Check for official W-2 record → use it
+    2. Else get latest stub → generate W-2 from it
+    3. If stub incomplete (not December) → project if allowed
 
     Args:
         year: Tax year (4 digits)
         party: 'him' or 'her'
-        final_stub_date: If provided, bypasses year-end coverage check
-        employer_filter: Optional employer name filter (substring match)
-        data_dir: Override data directory
+        allow_projection: If True, project to year-end when stub data incomplete
+        stock_price: Stock price for RSU valuation (used with projection)
 
     Returns:
-        dict with W-2 form data ready for output
+        dict with:
+        - w2: aggregated W-2 box values (sum of all employers)
+        - employers: list of per-employer results with source info
+        - sources: summary of data sources used
 
     Raises:
-        FileNotFoundError: If analysis data doesn't exist
-        ValueError: If data doesn't cover full year and no final_stub_date
+        FileNotFoundError: If no W-2 or stub data found
+        ValueError: If incomplete year and allow_projection=False
     """
-    data_path = data_dir or get_data_path()
+    from collections import defaultdict
+    from .records import list_records
 
-    # Load analysis data
-    analysis_file = data_path / f"{year}_{party}_pay_all.json"
-    if not analysis_file.exists():
+    # Get all W-2 records and stubs
+    w2_records = list_records(year=year, party=party, type_filter="w2")
+    stub_records = list_records(year=year, party=party, type_filter="stub")
+
+    if not w2_records and not stub_records:
         raise FileNotFoundError(
-            f"Analysis data not found: {analysis_file}\n"
-            f"Run 'pay-calc analysis {year} {party}' first."
+            f"No W-2 or stub records found for {party} ({year}).\n"
+            f"Import pay stubs with 'pay-calc records import'."
         )
 
-    with open(analysis_file) as f:
-        analysis_data = json.load(f)
+    # Group stubs by normalized employer name
+    stubs_by_employer = defaultdict(list)
+    employer_display_names = {}  # normalized -> display name
+    for stub in stub_records:
+        employer = stub.get("data", {}).get("employer", "Unknown")
+        normalized = _normalize_employer(employer)
+        stubs_by_employer[normalized].append(stub)
+        employer_display_names[normalized] = employer  # keep original for display
 
-    summary = analysis_data.get("summary", {})
-    ytd = analysis_data.get("ytd_breakdown", {})
-    date_range = summary.get("date_range", {})
+    # Track which employers have official W-2s (by normalized name)
+    w2s_by_employer = defaultdict(list)
+    for w2 in w2_records:
+        data = w2.get("data", {})
+        employer = data.get("employer_name") or w2.get("employer", "Unknown")
+        normalized = _normalize_employer(employer)
+        w2s_by_employer[normalized].append(w2)
+        employer_display_names[normalized] = employer  # keep original for display
 
-    # Check year coverage
-    end_date_str = date_range.get("end", "")
-    if end_date_str:
-        end_date = datetime.strptime(end_date_str, "%Y-%m-%d")
-        end_month = end_date.month
+    # All employers from both sources (normalized)
+    all_employers = set(stubs_by_employer.keys()) | set(w2s_by_employer.keys())
 
-        # If not December, require final_stub_date confirmation
-        if end_month != 12 and not final_stub_date:
-            raise ValueError(
-                f"Analysis data only covers through {end_date_str}. "
-                f"Provide final_stub_date to confirm this is complete."
+    # Find the most recent employer (based on latest pay stub date across all stubs)
+    # Only the current employer should be projected; past employers use their final stub
+    most_recent_employer = None
+    most_recent_date = ""
+    for employer, emp_stubs in stubs_by_employer.items():
+        for stub in emp_stubs:
+            pay_date = stub.get("data", {}).get("pay_date", "")
+            if pay_date > most_recent_date:
+                most_recent_date = pay_date
+                most_recent_employer = employer
+
+    # Process each employer
+    employer_results = []
+    aggregated_w2 = defaultdict(float)
+    sources_used = []
+    projection_warnings = []
+
+    for employer_key in sorted(all_employers):
+        display_name = employer_display_names.get(employer_key, employer_key)
+
+        # Check for official W-2 first (already grouped by normalized name)
+        employer_w2s = w2s_by_employer.get(employer_key, [])
+
+        if employer_w2s:
+            # Use official W-2
+            emp_data = defaultdict(float)
+            for w2 in employer_w2s:
+                data = w2.get("data", {})
+                emp_data["wages_tips_other_comp"] += data.get("wages", 0)
+                emp_data["federal_income_tax_withheld"] += data.get("federal_tax_withheld", 0)
+                emp_data["social_security_wages"] += data.get("social_security_wages", 0)
+                emp_data["social_security_tax_withheld"] += data.get("social_security_tax", 0)
+                emp_data["medicare_wages_and_tips"] += data.get("medicare_wages", 0)
+                emp_data["medicare_tax_withheld"] += data.get("medicare_tax", 0)
+
+            employer_results.append({
+                "employer": display_name,
+                "source": "official_w2",
+                "source_detail": f"{len(employer_w2s)} W-2(s)",
+                "w2": dict(emp_data),
+            })
+            sources_used.append(f"{display_name}: official W-2")
+
+            # Add to aggregate
+            for k, v in emp_data.items():
+                aggregated_w2[k] += v
+
+            continue
+
+        # No official W-2 - generate from stubs
+        employer_stubs = stubs_by_employer.get(employer_key, [])
+        if not employer_stubs:
+            continue
+
+        # Sort stubs by pay_date
+        def get_pay_date(record):
+            return record.get("data", {}).get("pay_date", "")
+
+        stubs_sorted = sorted(employer_stubs, key=get_pay_date)
+        latest_stub_record = stubs_sorted[-1]
+        latest_stub = latest_stub_record.get("data", {})
+        stub_id = latest_stub_record.get("id", "unknown")
+        pay_date_str = latest_stub.get("pay_date", "")
+
+        # Check if year complete (December stub) OR this is a past employer (not the most recent)
+        is_current_employer = (employer_key == most_recent_employer)
+        year_complete = False
+        if pay_date_str:
+            pay_date = datetime.strptime(pay_date_str, "%Y-%m-%d")
+            year_complete = pay_date.month == 12
+
+        # Past employers: use final stub as-is (no projection needed)
+        # Current employer with December stub: use it
+        if year_complete or not is_current_employer:
+            # Generate from stub
+            w2_result = stub_to_w2(
+                stub=latest_stub,
+                year=year,
+                party=party,
+                validate=True,
             )
 
-    # Extract W-2 box values from analysis
-    earnings = ytd.get("earnings", {})
-    taxes = ytd.get("taxes", {})
+            source_note = "final" if not is_current_employer else "stub"
+            employer_results.append({
+                "employer": display_name,
+                "source": source_note,
+                "source_detail": f"Stub {stub_id} ({pay_date_str})",
+                "w2": w2_result["w2"],
+            })
+            sources_used.append(f"{display_name}: {source_note} {pay_date_str}")
 
-    # Box 1: Wages, tips, other compensation (FIT taxable wages)
-    total_gross = summary.get("final_ytd", {}).get("gross", 0)
-    pretax_401k = earnings.get("401k Pre-Tax", 0)
-    fit_taxable = summary.get("final_ytd", {}).get("fit_taxable_wages", total_gross - pretax_401k)
+            for k, v in w2_result["w2"].items():
+                aggregated_w2[k] += v
 
-    # Box 2: Federal income tax withheld
-    federal_withheld = taxes.get("Federal Income Tax", 0)
+        elif allow_projection:
+            # Project to year-end
+            from .income_projection import generate_projection
+            from datetime import date
 
-    # Box 3: Social Security wages (capped at SS wage base)
-    ss_wage_base = SS_WAGE_BASE.get(year, 176100)
-    medicare_wages = summary.get("final_ytd", {}).get("gross", 0)
-    ss_wages = min(medicare_wages, ss_wage_base)
+            # Extract stub data for projection
+            employer_stub_data = [s.get("data", {}) for s in employer_stubs]
 
-    # Box 4: Social Security tax withheld
-    ss_tax = taxes.get("Social Security", 0)
+            projection = generate_projection(
+                stubs=employer_stub_data,
+                year=year,
+                party=party,
+                stock_price=stock_price,
+            )
 
-    # Box 5: Medicare wages and tips
-    medicare_wages_tips = medicare_wages
+            projected_stub = projection.get("stub", latest_stub)
 
-    # Box 6: Medicare tax withheld
-    medicare_tax = taxes.get("Medicare", 0)
+            w2_result = stub_to_w2(
+                stub=projected_stub,
+                year=year,
+                party=party,
+                validate=False,
+            )
 
-    # Build W-2 form data
-    w2_data = {
-        "wages_tips_other_comp": round(fit_taxable, 2),
-        "federal_income_tax_withheld": round(federal_withheld, 2),
-        "social_security_wages": round(ss_wages, 2),
-        "social_security_tax_withheld": round(ss_tax, 2),
-        "medicare_wages_and_tips": round(medicare_wages_tips, 2),
-        "medicare_tax_withheld": round(medicare_tax, 2),
-    }
+            # Calculate days remaining
+            latest_date = datetime.strptime(pay_date_str, "%Y-%m-%d").date()
+            year_end = date(int(year), 12, 31)
+            days_remaining = (year_end - latest_date).days
 
-    # Determine employer(s) from stubs
-    stubs = analysis_data.get("stubs", [])
-    employers = set()
-    for stub in stubs:
-        emp = stub.get("employer", "")
-        if employer_filter and employer_filter.lower() not in emp.lower():
-            continue
-        employers.add(emp)
+            employer_results.append({
+                "employer": display_name,
+                "source": "projection",
+                "source_detail": f"Stub {stub_id} ({pay_date_str}) + {days_remaining} days",
+                "w2": w2_result["w2"],
+                "projection_info": {
+                    "ytd_stub_date": pay_date_str,
+                    "days_remaining": days_remaining,
+                },
+            })
+            sources_used.append(f"{display_name}: projected from {pay_date_str}")
 
-    employer_name = ", ".join(sorted(employers)) if employers else "Unknown"
-    if employer_filter:
-        employer_name = employer_filter
+            # Collect warnings
+            projection_warnings.extend(projection.get("config_warnings", []))
 
-    # Build output structure
-    form = {
-        "employer": employer_name,
-        "source_type": "analysis",
-        "source_file": str(analysis_file.name),
-        "data": w2_data,
-    }
+            for k, v in w2_result["w2"].items():
+                aggregated_w2[k] += v
+
+        else:
+            raise ValueError(
+                f"Latest stub for {display_name} is from {pay_date_str} (not December). "
+                f"Set allow_projection=True to project to year-end."
+            )
 
     return {
-        "year": year,
-        "party": party,
-        "generated_from": "analysis",
-        "analysis_date_range": date_range,
-        "forms": [form],
+        "w2": dict(aggregated_w2),
+        "employers": employer_results,
+        "sources": sources_used,
+        "projection_warnings": projection_warnings if projection_warnings else None,
     }
 
 
