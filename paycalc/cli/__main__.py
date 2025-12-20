@@ -783,6 +783,13 @@ def _print_projection_report(proj: dict, analysis_data: dict):
             click.echo(f"    Avg per vest: ${stock_info.get('avg_vesting', 0):,.2f}")
             click.echo(f"    Remaining vests: {stock_info.get('remaining_vests', 0)}")
 
+    # Display config warnings (raise ignored, missing bonus, etc.)
+    config_warnings = proj.get("config_warnings", [])
+    if config_warnings:
+        click.echo(f"\n  Configuration Warnings:")
+        for w in config_warnings:
+            click.echo(f"    - {w}")
+
     click.echo("\n" + "=" * 60)
 
 

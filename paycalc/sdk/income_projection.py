@@ -40,6 +40,56 @@ def is_rsus_enabled(party: str) -> bool:
         return False
 
 
+def get_future_expectations(party: str) -> Dict[str, Any]:
+    """Get future_expectations config for a party from profile.
+
+    Returns combined future_expectations from all companies for the party.
+
+    Returns:
+        Dict with keys: rsus, bonuses, raise (if configured)
+    """
+    result = {
+        "rsus": None,
+        "bonuses": [],
+        "raises": [],
+    }
+
+    try:
+        profile = load_profile()
+        parties = profile.get("parties", {})
+        party_config = parties.get(party, {})
+
+        for company in party_config.get("companies", []):
+            future_exp = company.get("future_expectations", {})
+            company_name = company.get("name", "Unknown")
+
+            # RSUs - take first one found
+            if future_exp.get("rsus") and not result["rsus"]:
+                result["rsus"] = {
+                    "company": company_name,
+                    **future_exp["rsus"],
+                }
+
+            # Bonuses - accumulate all
+            for bonus in future_exp.get("bonuses", []):
+                result["bonuses"].append({
+                    "company": company_name,
+                    **bonus,
+                })
+
+            # Raises - accumulate all
+            if future_exp.get("raise"):
+                result["raises"].append({
+                    "company": company_name,
+                    **future_exp["raise"],
+                })
+
+    except Exception:
+        pass
+
+    return result
+
+
 def get_rsu_projection(
     year: str,
     price: Optional[float] = None,
@@ -444,6 +494,50 @@ def generate_projection(
         "_projection": True,
     }
 
+    # Build warnings from future_expectations config
+    config_warnings = []
+    future_exp = get_future_expectations(party) if party else {}
+
+    # Warn about configured raises (not factored in)
+    for raise_cfg in future_exp.get("raises", []):
+        raise_date = raise_cfg.get("date", "")
+        raise_pct = raise_cfg.get("percent", 0)
+        company = raise_cfg.get("company", "")
+        config_warnings.append(
+            f"Raise configured ({raise_pct}% on {raise_date} for {company}) - not factored into projection"
+        )
+
+    # Check for configured bonuses not seen in stubs
+    for bonus_cfg in future_exp.get("bonuses", []):
+        bonus_date = bonus_cfg.get("date", "")  # MM-DD format
+        bonus_amount = bonus_cfg.get("amount", 0)
+        company = bonus_cfg.get("company", "")
+
+        # Check if bonus date has passed in current year
+        if bonus_date and "-" in bonus_date:
+            try:
+                month, day = bonus_date.split("-")
+                bonus_full_date = f"{year}-{month}-{day}"
+
+                # Check if we have a stub on or after bonus date with bonus-like payment
+                bonus_seen = False
+                for s in stubs:
+                    stub_date = s.get("pay_date", "")
+                    if stub_date >= bonus_full_date:
+                        # Check if this stub or prior has bonus income
+                        # (bonus would show as large "other" income)
+                        pay_type = s.get("_pay_type", "")
+                        if pay_type in ("bonus", "other"):
+                            bonus_seen = True
+                            break
+
+                if not bonus_seen and last_date_str >= bonus_full_date:
+                    config_warnings.append(
+                        f"Bonus expected ({bonus_date} for {company}, ${bonus_amount:,.0f}) - not detected in stubs"
+                    )
+            except (ValueError, TypeError):
+                pass
+
     return {
         "as_of_date": last_date_str,
         "days_remaining": days_remaining,
@@ -469,6 +563,7 @@ def generate_projection(
         "regular_pay_info": regular_info,
         "stock_grant_info": stock_info,
         "stub": stub,
+        "config_warnings": config_warnings,
     }
 
 
