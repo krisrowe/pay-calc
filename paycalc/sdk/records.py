@@ -1154,6 +1154,8 @@ def import_from_folder(
             for file_info in processable:
                 name = file_info.get("name", "")
                 file_id = file_info.get("id", "")
+                # For shortcuts, use target_id to download the actual file
+                download_id = file_info.get("target_id") or file_id
 
                 emit("file", {"name": name})
                 stats["files"].append(name)
@@ -1161,7 +1163,7 @@ def import_from_folder(
                 local_path = tmp_path / name
                 try:
                     subprocess.run(
-                        ["gwsa", "drive", "download", file_id, str(local_path)],
+                        ["gwsa", "drive", "download", download_id, str(local_path)],
                         capture_output=True, text=True, check=True
                     )
                 except subprocess.CalledProcessError as e:
@@ -1169,7 +1171,7 @@ def import_from_folder(
                     stats["errors"] += 1
                     continue
 
-                # Import the downloaded file
+                # Import the downloaded file (use shortcut ID for tracking, not target)
                 file_result = _import_single_file(
                     local_path, year, party, record_type,
                     drive_file_id=file_id
@@ -2184,6 +2186,8 @@ def import_from_folder_auto(
             for file_info in processable:
                 name = file_info.get("name", "")
                 file_id = file_info.get("id", "")
+                # For shortcuts, use target_id to download the actual file
+                download_id = file_info.get("target_id") or file_id
 
                 # Check if already processed BEFORE downloading (efficiency)
                 # For folder imports: skip ANY file we've seen before (imported, discarded, or unrelated)
@@ -2230,7 +2234,7 @@ def import_from_folder_auto(
                 local_path = tmp_path / name
                 try:
                     subprocess.run(
-                        ["gwsa", "drive", "download", file_id, str(local_path)],
+                        ["gwsa", "drive", "download", download_id, str(local_path)],
                         capture_output=True, text=True, check=True
                     )
                 except subprocess.CalledProcessError as e:

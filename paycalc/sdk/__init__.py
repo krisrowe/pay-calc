@@ -57,7 +57,9 @@ from .w2 import (
     save_w2_forms,
     stub_to_w2,
     validate_stub_for_w2,
+    validate_w2_tolerance,
     StubValidationResult,
+    W2ToleranceError,
     SS_WAGE_BASE,
 )
 
@@ -119,6 +121,11 @@ __all__ = [
     "generate_w2",
     "generate_w2_with_projection",
     "save_w2_forms",
+    "stub_to_w2",
+    "validate_stub_for_w2",
+    "validate_w2_tolerance",
+    "StubValidationResult",
+    "W2ToleranceError",
     "SS_WAGE_BASE",
     # Income projection
     "generate_income_projection_from_stubs",

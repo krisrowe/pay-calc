@@ -1,0 +1,446 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "$id": "form_1040.json",
+  "title": "Form 1040 - U.S. Individual Income Tax Return",
+  "description": "Captures Form 1040 plus schedules needed for tax calculation validation",
+  "type": "object",
+  "required": ["tax_year", "filing_status", "income", "tax_and_credits", "payments", "refund_or_owed"],
+  "additionalProperties": false,
+  "properties": {
+    "tax_year": {
+      "type": "integer",
+      "minimum": 2020,
+      "maximum": 2030
+    },
+    "filing_status": {
+      "type": "string",
+      "enum": ["single", "mfj", "mfs", "hoh", "qss"]
+    },
+    "dependents": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "name": { "type": "string" },
+          "ssn_last4": { "type": "string", "pattern": "^[0-9]{4}$" },
+          "relationship": { "type": "string" },
+          "child_tax_credit": { "type": "boolean" },
+          "credit_for_other_dependents": { "type": "boolean" }
+        },
+        "additionalProperties": false
+      }
+    },
+    "income": {
+      "type": "object",
+      "description": "Form 1040 lines 1-9",
+      "additionalProperties": false,
+      "properties": {
+        "line_1a_wages": { "type": "number" },
+        "line_1b_household_employee_wages": { "type": "number" },
+        "line_1c_tip_income": { "type": "number" },
+        "line_1d_medicaid_waiver": { "type": "number" },
+        "line_1e_dependent_care_benefits": { "type": "number" },
+        "line_1f_adoption_benefits": { "type": "number" },
+        "line_1g_form_8919_wages": { "type": "number" },
+        "line_1h_other_w2_income": { "type": "number" },
+        "line_1i_nontaxable_combat_pay": { "type": "number" },
+        "line_1z_total_wages": { "type": "number" },
+        "line_2a_tax_exempt_interest": { "type": "number" },
+        "line_2b_taxable_interest": { "type": "number" },
+        "line_3a_qualified_dividends": { "type": "number" },
+        "line_3b_ordinary_dividends": { "type": "number" },
+        "line_4a_ira_distributions": { "type": "number" },
+        "line_4b_taxable_ira": { "type": "number" },
+        "line_5a_pensions_annuities": { "type": "number" },
+        "line_5b_taxable_pensions": { "type": "number" },
+        "line_6a_social_security": { "type": "number" },
+        "line_6b_taxable_social_security": { "type": "number" },
+        "line_6c_lump_sum_election": { "type": "boolean" },
+        "line_7_capital_gain_loss": { "type": "number" },
+        "line_8_schedule_1_income": { "type": "number" },
+        "line_9_total_income": { "type": "number" }
+      }
+    },
+    "adjustments": {
+      "type": "object",
+      "description": "Form 1040 lines 10-11 (from Schedule 1 Part II)",
+      "additionalProperties": false,
+      "properties": {
+        "line_10_schedule_1_adjustments": { "type": "number" },
+        "line_11_agi": { "type": "number" }
+      }
+    },
+    "deductions": {
+      "type": "object",
+      "description": "Form 1040 lines 12-15",
+      "additionalProperties": false,
+      "properties": {
+        "line_12a_standard_deduction": { "type": "number" },
+        "line_12b_charitable_nonitemizers": { "type": "number" },
+        "line_12c_total_deduction": { "type": "number" },
+        "itemized": { "type": "boolean" },
+        "line_13_qbi_deduction": { "type": "number" },
+        "line_14_sum_deductions": { "type": "number" },
+        "line_15_taxable_income": { "type": "number" }
+      }
+    },
+    "tax_and_credits": {
+      "type": "object",
+      "description": "Form 1040 lines 16-24",
+      "additionalProperties": false,
+      "properties": {
+        "line_16_tax": { "type": "number" },
+        "line_16_method": {
+          "type": "string",
+          "enum": ["tax_table", "qualified_dividends_worksheet", "schedule_d", "form_8615", "other"]
+        },
+        "line_17_schedule_2_line_3": { "type": "number" },
+        "line_18_total_before_credits": { "type": "number" },
+        "line_19_child_tax_credit": { "type": "number" },
+        "line_20_schedule_3_line_8": { "type": "number" },
+        "line_21_credits_subtotal": { "type": "number" },
+        "line_22_tax_minus_credits": { "type": "number" },
+        "line_23_schedule_2_line_21": { "type": "number" },
+        "line_24_total_tax": { "type": "number" }
+      }
+    },
+    "payments": {
+      "type": "object",
+      "description": "Form 1040 lines 25-33",
+      "additionalProperties": false,
+      "properties": {
+        "line_25a_w2_withholding": { "type": "number" },
+        "line_25b_1099_withholding": { "type": "number" },
+        "line_25c_other_withholding": { "type": "number" },
+        "line_25d_total_withholding": { "type": "number" },
+        "line_26_estimated_payments": { "type": "number" },
+        "line_27_eic": { "type": "number" },
+        "line_28_additional_child_credit": { "type": "number" },
+        "line_29_american_opportunity_credit": { "type": "number" },
+        "line_30_reserved": { "type": "number" },
+        "line_31_schedule_3_line_15": { "type": "number" },
+        "line_32_other_payments": { "type": "number" },
+        "line_33_total_payments": { "type": "number" }
+      }
+    },
+    "refund_or_owed": {
+      "type": "object",
+      "description": "Form 1040 lines 34-38",
+      "additionalProperties": false,
+      "properties": {
+        "line_34_overpaid": { "type": "number" },
+        "line_35a_refund_amount": { "type": "number" },
+        "line_36_applied_to_next_year": { "type": "number" },
+        "line_37_amount_owed": { "type": "number" },
+        "line_38_penalty": { "type": "number" }
+      }
+    },
+    "schedule_1": {
+      "type": "object",
+      "description": "Schedule 1 - Additional Income and Adjustments",
+      "additionalProperties": false,
+      "properties": {
+        "part_1_additional_income": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "line_1_taxable_refunds": { "type": "number" },
+            "line_2a_alimony_received": { "type": "number" },
+            "line_3_business_income": { "type": "number" },
+            "line_4_other_gains": { "type": "number" },
+            "line_5_rental_income": { "type": "number" },
+            "line_6_farm_income": { "type": "number" },
+            "line_7_unemployment": { "type": "number" },
+            "line_8a_net_operating_loss": { "type": "number" },
+            "line_8b_gambling_income": { "type": "number" },
+            "line_8c_cancellation_of_debt": { "type": "number" },
+            "line_8d_foreign_income": { "type": "number" },
+            "line_8e_taxable_hsa_distribution": { "type": "number" },
+            "line_8f_alaska_permanent_fund": { "type": "number" },
+            "line_8g_jury_duty_repaid": { "type": "number" },
+            "line_8h_prizes_awards": { "type": "number" },
+            "line_8i_ssa_tier_1": { "type": "number" },
+            "line_8j_medicaid_waiver": { "type": "number" },
+            "line_8k_pension_income": { "type": "number" },
+            "line_8l_ssa_tier_2": { "type": "number" },
+            "line_8m_scholarship_income": { "type": "number" },
+            "line_8n_olympic_medal": { "type": "number" },
+            "line_8o_section_461l": { "type": "number" },
+            "line_8p_taxable_distributions": { "type": "number" },
+            "line_8q_able_distributions": { "type": "number" },
+            "line_8r_digital_assets": { "type": "number" },
+            "line_8z_other_income": { "type": "number" },
+            "line_9_subtotal": { "type": "number" },
+            "line_10_total_additional_income": { "type": "number" }
+          }
+        },
+        "part_2_adjustments": {
+          "type": "object",
+          "additionalProperties": false,
+          "properties": {
+            "line_11_educator_expenses": { "type": "number" },
+            "line_12_business_expenses": { "type": "number" },
+            "line_13_hsa_deduction": { "type": "number" },
+            "line_14_moving_expenses": { "type": "number" },
+            "line_15_self_employment_tax": { "type": "number" },
+            "line_16_sep_simple": { "type": "number" },
+            "line_17_self_employed_health": { "type": "number" },
+            "line_18_penalty_early_withdrawal": { "type": "number" },
+            "line_19a_alimony_paid": { "type": "number" },
+            "line_20_ira_deduction": { "type": "number" },
+            "line_21_student_loan_interest": { "type": "number" },
+            "line_22_reserved": { "type": "number" },
+            "line_23_archer_msa": { "type": "number" },
+            "line_24a_jury_duty": { "type": "number" },
+            "line_24b_deductible_expenses": { "type": "number" },
+            "line_24c_nontaxable_olympics": { "type": "number" },
+            "line_24d_reforestation": { "type": "number" },
+            "line_24e_repayment_supplemental": { "type": "number" },
+            "line_24f_contributions_408p": { "type": "number" },
+            "line_24g_attorney_fees": { "type": "number" },
+            "line_24h_housing_deduction": { "type": "number" },
+            "line_24i_section_461l_adjustment": { "type": "number" },
+            "line_24j_qprt_contribution": { "type": "number" },
+            "line_24k_charitable_contribution": { "type": "number" },
+            "line_24z_other_adjustments": { "type": "number" },
+            "line_25_subtotal": { "type": "number" },
+            "line_26_total_adjustments": { "type": "number" }
+          }
+        }
+      }
+    },
+    "schedule_2": {
+      "type": "object",
+      "description": "Schedule 2 - Additional Taxes",
+      "additionalProperties": false,
+      "properties": {
+        "part_1": {
+          "type": "object",
+          "description": "Tax",
+          "additionalProperties": false,
+          "properties": {
+            "line_1_amt": { "type": "number" },
+            "line_2_excess_advance_premium": { "type": "number" },
+            "line_3_total": { "type": "number" }
+          }
+        },
+        "part_2": {
+          "type": "object",
+          "description": "Other Taxes",
+          "additionalProperties": false,
+          "properties": {
+            "line_4_self_employment_tax": { "type": "number" },
+            "line_5_social_security_medicare_unreported": { "type": "number" },
+            "line_6_additional_medicare_tax": { "type": "number" },
+            "line_7_net_investment_income_tax": { "type": "number" },
+            "line_8_household_employment_tax": { "type": "number" },
+            "line_9_first_time_homebuyer_repayment": { "type": "number" },
+            "line_10_additional_retirement_tax": { "type": "number" },
+            "line_11_section_453a3_interest": { "type": "number" },
+            "line_12_section_453l_interest": { "type": "number" },
+            "line_13_recapture_low_income_housing": { "type": "number" },
+            "line_14_golden_parachute": { "type": "number" },
+            "line_15_section_457a": { "type": "number" },
+            "line_16_section_529_tax": { "type": "number" },
+            "line_17a_recapture_other_credits": { "type": "number" },
+            "line_17b_recapture_federal_mortgage": { "type": "number" },
+            "line_17c_recapture_adoption_credit": { "type": "number" },
+            "line_17d_recapture_dc_homebuyer": { "type": "number" },
+            "line_17e_recapture_indian_employment": { "type": "number" },
+            "line_17f_recapture_new_markets": { "type": "number" },
+            "line_17g_recapture_credit_employer_plans": { "type": "number" },
+            "line_17h_recapture_biodiesel": { "type": "number" },
+            "line_17i_recapture_carbon_oxide": { "type": "number" },
+            "line_17j_recapture_ev_credit": { "type": "number" },
+            "line_17k_recapture_ev_credit_2": { "type": "number" },
+            "line_17z_other_recapture": { "type": "number" },
+            "line_18_other_taxes": { "type": "number" },
+            "line_19_interest_deferral_tax": { "type": "number" },
+            "line_20_interest_installment": { "type": "number" },
+            "line_21_total": { "type": "number" }
+          }
+        }
+      }
+    },
+    "schedule_3": {
+      "type": "object",
+      "description": "Schedule 3 - Additional Credits and Payments",
+      "additionalProperties": false,
+      "properties": {
+        "part_1": {
+          "type": "object",
+          "description": "Nonrefundable Credits",
+          "additionalProperties": false,
+          "properties": {
+            "line_1_foreign_tax_credit": { "type": "number" },
+            "line_2_child_care_credit": { "type": "number" },
+            "line_3_education_credits": { "type": "number" },
+            "line_4_retirement_savings_credit": { "type": "number" },
+            "line_5_energy_credits": { "type": "number" },
+            "line_6a_ev_credit": { "type": "number" },
+            "line_6b_ev_credit_business": { "type": "number" },
+            "line_6c_plug_in_credit": { "type": "number" },
+            "line_6d_prior_ev_credit": { "type": "number" },
+            "line_6e_ev_refueling": { "type": "number" },
+            "line_6f_prior_plug_in": { "type": "number" },
+            "line_6z_other_form_credits": { "type": "number" },
+            "line_7_other_nonrefundable": { "type": "number" },
+            "line_8_total": { "type": "number" }
+          }
+        },
+        "part_2": {
+          "type": "object",
+          "description": "Other Payments and Refundable Credits",
+          "additionalProperties": false,
+          "properties": {
+            "line_9_net_premium_tax_credit": { "type": "number" },
+            "line_10_extension_payment": { "type": "number" },
+            "line_11_excess_social_security": { "type": "number" },
+            "line_12_federal_fuel_credit": { "type": "number" },
+            "line_13a_form_2439": { "type": "number" },
+            "line_13b_form_7202": { "type": "number" },
+            "line_13c_health_coverage_credit": { "type": "number" },
+            "line_13d_credit_repayment": { "type": "number" },
+            "line_13e_deferred_compensation": { "type": "number" },
+            "line_13f_clean_vehicle_credit": { "type": "number" },
+            "line_13g_qualified_commercial_vehicle": { "type": "number" },
+            "line_13h_form_1040c": { "type": "number" },
+            "line_13z_other_payments": { "type": "number" },
+            "line_14_other_refundable": { "type": "number" },
+            "line_15_total": { "type": "number" }
+          }
+        }
+      }
+    },
+    "schedule_summaries": {
+      "type": "object",
+      "description": "Bottom-line values from supporting schedules (flow to 1040/Sch 1-3)",
+      "additionalProperties": false,
+      "properties": {
+        "schedule_d": {
+          "type": "object",
+          "description": "Capital Gains and Losses - flows to 1040 line 7",
+          "additionalProperties": false,
+          "properties": {
+            "short_term_gain_loss": { "type": "number" },
+            "long_term_gain_loss": { "type": "number" },
+            "net_gain_loss": { "type": "number" }
+          }
+        },
+        "schedule_e": {
+          "type": "object",
+          "description": "Rental/Royalty Income - flows to Schedule 1 line 5",
+          "additionalProperties": false,
+          "properties": {
+            "rental_income_loss": { "type": "number" },
+            "partnership_s_corp": { "type": "number" },
+            "estate_trust": { "type": "number" },
+            "remic": { "type": "number" },
+            "farm_rental": { "type": "number" },
+            "total": { "type": "number" }
+          }
+        },
+        "form_2441": {
+          "type": "object",
+          "description": "Child and Dependent Care Expenses",
+          "additionalProperties": false,
+          "properties": {
+            "qualified_expenses": { "type": "number" },
+            "credit_amount": { "type": "number" }
+          }
+        },
+        "form_8889": {
+          "type": "object",
+          "description": "Health Savings Accounts",
+          "additionalProperties": false,
+          "properties": {
+            "contributions": { "type": "number" },
+            "deduction": { "type": "number" },
+            "distributions": { "type": "number" },
+            "taxable_distributions": { "type": "number" },
+            "additional_tax": { "type": "number" }
+          }
+        },
+        "form_8959": {
+          "type": "object",
+          "description": "Additional Medicare Tax",
+          "additionalProperties": false,
+          "properties": {
+            "wages_subject_to_amt": { "type": "number" },
+            "threshold": { "type": "number" },
+            "excess_wages": { "type": "number" },
+            "additional_tax": { "type": "number" },
+            "withholding": { "type": "number" }
+          }
+        },
+        "form_8960": {
+          "type": "object",
+          "description": "Net Investment Income Tax",
+          "additionalProperties": false,
+          "properties": {
+            "investment_income": { "type": "number" },
+            "magi": { "type": "number" },
+            "threshold": { "type": "number" },
+            "excess_magi": { "type": "number" },
+            "niit_base": { "type": "number" },
+            "niit": { "type": "number" }
+          }
+        },
+        "form_8995": {
+          "type": "object",
+          "description": "Qualified Business Income Deduction",
+          "additionalProperties": false,
+          "properties": {
+            "qualified_business_income": { "type": "number" },
+            "qbi_deduction": { "type": "number" }
+          }
+        }
+      }
+    },
+    "w2_summary": {
+      "type": "object",
+      "description": "Aggregated W-2 data for both parties",
+      "additionalProperties": false,
+      "properties": {
+        "total_wages": { "type": "number" },
+        "total_federal_withheld": { "type": "number" },
+        "total_social_security_wages": { "type": "number" },
+        "total_social_security_withheld": { "type": "number" },
+        "total_medicare_wages": { "type": "number" },
+        "total_medicare_withheld": { "type": "number" },
+        "by_party": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "object",
+            "properties": {
+              "wages": { "type": "number" },
+              "federal_withheld": { "type": "number" },
+              "social_security_wages": { "type": "number" },
+              "social_security_withheld": { "type": "number" },
+              "medicare_wages": { "type": "number" },
+              "medicare_withheld": { "type": "number" }
+            }
+          }
+        }
+      }
+    },
+    "metadata": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "source": {
+          "type": "string",
+          "description": "e.g., 'turbotax', 'irs_efile', 'manual'"
+        },
+        "filed_date": {
+          "type": "string",
+          "format": "date"
+        },
+        "imported_at": {
+          "type": "string",
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

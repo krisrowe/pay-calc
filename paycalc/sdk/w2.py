@@ -26,6 +26,112 @@ class StubValidationResult:
     warnings: list[str] = field(default_factory=list)
 
 
+class W2ToleranceError(Exception):
+    """Raised when generated W-2 exceeds tolerance vs prior year."""
+    pass
+
+
+def validate_w2_tolerance(
+    w2_data: dict[str, Any],
+    year: str,
+    party: str,
+) -> list[str]:
+    """Validate generated W-2 against prior year tolerances.
+
+    Compares generated W-2 values to prior year's official W-2 (if available).
+    Supports two tolerance types:
+    - wages: percent change in W-2 Box 1 (e.g., 0.25 = 25%)
+    - effective_tax_rate: absolute change in fed_withheld/wages rate
+      (e.g., 0.03 = 3 percentage points)
+
+    Args:
+        w2_data: Generated W-2 box values (wages, federal_tax_withheld, etc.)
+        year: Tax year being generated
+        party: 'him' or 'her'
+
+    Returns:
+        List of violation messages (empty if all within tolerance)
+
+    Raises:
+        W2ToleranceError: If any field exceeds configured tolerance
+    """
+    from .records import list_records
+
+    # Load tolerances from profile
+    profile = load_profile()
+    tolerances_config = profile.get("w2_tolerances", {})
+    party_tolerances = tolerances_config.get(party, {})
+    year_tolerances = party_tolerances.get(year, {})
+
+    if not year_tolerances:
+        return []  # No tolerances configured for this party/year
+
+    # Get prior year's official W-2
+    prior_year = str(int(year) - 1)
+    prior_w2_records = list_records(year=prior_year, party=party, type_filter="w2")
+
+    if not prior_w2_records:
+        return []  # No prior year W-2 to compare against
+
+    # Aggregate prior year W-2 values
+    prior_w2 = {
+        "wages": 0.0,
+        "federal_tax_withheld": 0.0,
+    }
+    for record in prior_w2_records:
+        data = record.get("data", {})
+        for field in prior_w2:
+            prior_w2[field] += data.get(field, 0)
+
+    violations = []
+
+    # Check wages tolerance (percent change)
+    if "wages" in year_tolerances:
+        max_change = year_tolerances["wages"]
+        current_wages = w2_data.get("wages", 0)
+        prior_wages = prior_w2.get("wages", 0)
+
+        if prior_wages > 0:
+            pct_change = abs(current_wages - prior_wages) / prior_wages
+            if pct_change > max_change:
+                direction = "increase" if current_wages > prior_wages else "decrease"
+                violations.append(
+                    f"wages: {pct_change:.1%} {direction} vs {prior_year} "
+                    f"(${prior_wages:,.0f} → ${current_wages:,.0f}), "
+                    f"exceeds {max_change:.0%} tolerance"
+                )
+
+    # Check effective tax rate tolerance (absolute change in rate)
+    if "effective_tax_rate" in year_tolerances:
+        max_rate_change = year_tolerances["effective_tax_rate"]
+
+        current_wages = w2_data.get("wages", 0)
+        current_fed = w2_data.get("federal_tax_withheld", 0)
+        prior_wages = prior_w2.get("wages", 0)
+        prior_fed = prior_w2.get("federal_tax_withheld", 0)
+
+        if current_wages > 0 and prior_wages > 0:
+            current_rate = current_fed / current_wages
+            prior_rate = prior_fed / prior_wages
+            rate_change = abs(current_rate - prior_rate)
+
+            if rate_change > max_rate_change:
+                direction = "increase" if current_rate > prior_rate else "decrease"
+                violations.append(
+                    f"effective_tax_rate: {rate_change:.1%} {direction} vs {prior_year} "
+                    f"({prior_rate:.1%} → {current_rate:.1%}), "
+                    f"exceeds {max_rate_change:.0%} tolerance"
+                )
+
+    if violations:
+        raise W2ToleranceError(
+            f"W-2 for {party} ({year}) exceeds tolerance vs {prior_year}:\n"
+            + "\n".join(f"  - {v}" for v in violations)
+        )
+
+    return violations
+
+
 def validate_stub_for_w2(
     stub: dict[str, Any],
     party: Optional[str] = None,
@@ -512,6 +618,15 @@ def generate_w2(
                 f"Latest stub for {display_name} is from {pay_date_str} (not December). "
                 f"Set allow_projection=True to project to year-end."
             )
+
+    # Validate tolerance if any data came from stubs (not official W-2s)
+    # This catches data errors before actual W-2 is available
+    has_stub_source = any(
+        e.get("source") in ("stub", "final", "projection")
+        for e in employer_results
+    )
+    if has_stub_source and party:
+        validate_w2_tolerance(dict(aggregated_w2), year, party)
 
     return {
         "w2": dict(aggregated_w2),
