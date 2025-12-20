@@ -291,7 +291,9 @@ def _format_tax_projection_text(proj: dict) -> str:
               help="Output format (default: text)")
 @click.option("--data-dir", type=click.Path(exists=True),
               help="Directory containing W-2 or analysis JSON files (default: XDG data dir)")
-def taxes(year, output_format, data_dir):
+@click.option("--allow-projection", is_flag=True,
+              help="Allow income projection for employers with incomplete stub data")
+def taxes(year, output_format, data_dir, allow_projection):
     """Calculate federal tax liability and refund/owed amount.
 
     Loads income data for both parties (him + her), applies tax brackets,
@@ -299,11 +301,10 @@ def taxes(year, output_format, data_dir):
     refund or amount owed.
 
     \b
-    Data sources (in order of preference):
-    1. W-2 JSON files (YYYY_party_w2_forms.json) - for year-end
-    2. Analysis JSON files (YYYY_party_full.json) - mid-year fallback
-
-    For mid-year projections, run 'analysis' for each party first.
+    Data sources (per employer, in order of preference):
+    1. Official W-2 records (imported W-2 forms)
+    2. Latest stub from records (if December, year complete)
+    3. Projection from latest stub (if --allow-projection)
 
     \b
     Output formats:
@@ -324,16 +325,25 @@ def taxes(year, output_format, data_dir):
     try:
         if output_format == "text":
             # Get JSON, format as ASCII tables (includes data sources in output)
-            projection = generate_tax_projection(year, data_dir=data_path, output_format="json")
+            projection = generate_tax_projection(
+                year, data_dir=data_path, output_format="json",
+                allow_projection=allow_projection
+            )
             click.echo(_format_tax_projection_text(projection))
         elif output_format == "json":
             # JSON output already includes data_sources in the response object
-            projection = generate_tax_projection(year, data_dir=data_path, output_format="json")
+            projection = generate_tax_projection(
+                year, data_dir=data_path, output_format="json",
+                allow_projection=allow_projection
+            )
             click.echo(json.dumps(projection, indent=2))
         else:  # csv
             # Get JSON for data sources, convert to CSV for output
             from paycalc.sdk.tax import projection_to_csv_string
-            projection = generate_tax_projection(year, data_dir=data_path, output_format="json")
+            projection = generate_tax_projection(
+                year, data_dir=data_path, output_format="json",
+                allow_projection=allow_projection
+            )
             csv_output = projection_to_csv_string(projection)
             click.echo(csv_output)
             # Print data sources to stderr for visibility

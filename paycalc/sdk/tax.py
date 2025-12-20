@@ -62,13 +62,13 @@ def load_party_w2_data(
 ) -> dict:
     """Load W-2 data for a party, generating from stubs if needed.
 
-    Data sources (in order of preference):
-    1. Official W-2 records from records system
-    2. W-2 JSON files (YYYY_party_w2_forms.json) - from w2-extract
-    3. Generated W-2 from pay stubs via SDK (with optional projection)
+    Uses generate_w2() which handles per-employer logic:
+    1. Official W-2 records (most authoritative)
+    2. Latest stub from records (if December, year complete)
+    3. Projection from latest stub (if allow_projection and not December)
 
     Args:
-        data_dir: Directory containing W-2/analysis data
+        data_dir: Directory containing W-2/analysis data (unused, kept for compatibility)
         year: Tax year (4 digits)
         party: 'him' or 'her'
         allow_projection: If True and stub data incomplete, include income projection
@@ -77,127 +77,25 @@ def load_party_w2_data(
     Returns:
         dict with keys:
         - data: W-2 box values (wages, withholding, etc.)
-        - source: "official_w2", "w2_extract", "generated_complete", or "generated_with_projection"
-        - source_detail: Additional info (file path, date range, etc.)
-        - projection_info: (if projected) details about what was projected
+        - sources: list of per-employer source descriptions
+        - employers: list of per-employer W-2 details
+        - projection_warnings: any warnings from projection
     """
-    from .records import list_records
-    from .w2 import generate_w2_from_analysis, generate_w2_with_projection
+    from .w2 import generate_w2
 
-    result = {}
-
-    # 1. Check for official W-2 records (most authoritative)
-    try:
-        w2_records = list_records(year=year, party=party, type_filter="w2")
-        if w2_records:
-            aggregated_data = defaultdict(float)
-            employers = []
-            for record in w2_records:
-                data = record.get("data", {})
-                # Map W-2 record fields to standard W-2 box names
-                aggregated_data["wages_tips_other_comp"] += data.get("wages", 0)
-                aggregated_data["federal_income_tax_withheld"] += data.get("federal_tax_withheld", 0)
-                aggregated_data["social_security_wages"] += data.get("social_security_wages", 0)
-                aggregated_data["social_security_tax_withheld"] += data.get("social_security_tax", 0)
-                aggregated_data["medicare_wages_and_tips"] += data.get("medicare_wages", 0)
-                aggregated_data["medicare_tax_withheld"] += data.get("medicare_tax", 0)
-                # Try both employer field names
-                employer = data.get("employer_name") or record.get("employer")
-                if employer:
-                    employers.append(employer)
-
-            return {
-                "data": dict(aggregated_data),
-                "source": "official_w2",
-                "source_detail": f"{len(w2_records)} W-2(s): {', '.join(set(employers)) or 'unknown'}",
-            }
-    except Exception:
-        pass  # Fall through to other sources
-
-    # 2. Check for W-2 JSON file (from w2-extract command)
-    w2_file = data_dir / f"{year}_{party}_w2_forms.json"
-    if w2_file.exists():
-        with open(w2_file, "r") as f:
-            w2_data = json.load(f)
-
-        aggregated_data = defaultdict(float)
-        employers = []
-        for form in w2_data.get("forms", []):
-            for key, value in form.get("data", {}).items():
-                aggregated_data[key] += value
-            if form.get("employer"):
-                employers.append(form["employer"])
-
-        return {
-            "data": dict(aggregated_data),
-            "source": "w2_extract",
-            "source_detail": f"From {w2_file.name}: {', '.join(set(employers)) or 'unknown'}",
-        }
-
-    # 3. Generate W-2 from pay stubs using SDK
-    try:
-        # First try to generate without projection to see if data is complete
-        try:
-            w2_result = generate_w2_from_analysis(
-                year=year,
-                party=party,
-                data_dir=data_dir,
-            )
-            if w2_result and w2_result.get("forms"):
-                form = w2_result["forms"][0]
-                date_range = w2_result.get("analysis_date_range", {})
-                return {
-                    "data": form["data"],
-                    "source": "generated_complete",
-                    "source_detail": f"Generated from stubs through {date_range.get('end', '?')} (year complete)",
-                }
-        except ValueError:
-            # Data incomplete - try with projection if allowed
-            if allow_projection:
-                # Use generate_w2_with_projection which handles partial year
-                w2_proj_result = generate_w2_with_projection(
-                    year=year,
-                    party=party,
-                    include_projection=True,
-                    stock_price=stock_price,
-                    final_stub_date="allow_incomplete",  # Special flag to allow incomplete
-                    data_dir=data_dir,
-                )
-
-                if w2_proj_result and "projected_w2" in w2_proj_result:
-                    date_range = w2_proj_result.get("date_range", {})
-                    proj_info = w2_proj_result.get("projection_info", {})
-                    add_w2 = w2_proj_result.get("projected_additional_w2", {})
-
-                    return {
-                        "data": w2_proj_result["projected_w2"],
-                        "source": "generated_with_projection",
-                        "source_detail": (
-                            f"YTD stubs through {date_range.get('end', '?')} "
-                            f"+ {proj_info.get('days_remaining', 0)} days projected"
-                        ),
-                        "projection_info": {
-                            "ytd_w2": w2_proj_result["ytd_w2"],
-                            "projected_additional_w2": add_w2,
-                            "days_remaining": proj_info.get("days_remaining", 0),
-                            "income_breakdown": proj_info.get("income_breakdown", {}),
-                            "warnings": proj_info.get("warnings", []),
-                            "stock_price_used": stock_price,
-                        },
-                    }
-            # Re-raise if no projection allowed or projection failed
-            raise
-
-    except Exception as e:
-        pass  # Fall through to error
-
-    raise FileNotFoundError(
-        f"No income data found for {party} ({year}).\n"
-        f"  No official W-2 records found\n"
-        f"  No W-2 JSON file at: {w2_file}\n"
-        f"  Could not generate from stubs\n"
-        f"Run 'pay-calc w2-extract {year}' or 'pay-calc analysis {year} {party}' first."
+    result = generate_w2(
+        year=year,
+        party=party,
+        allow_projection=allow_projection,
+        stock_price=stock_price,
     )
+
+    return {
+        "data": result["w2"],
+        "sources": result["sources"],
+        "employers": result["employers"],
+        "projection_warnings": result.get("projection_warnings"),
+    }
 
 
 def generate_projection(
@@ -276,23 +174,23 @@ def generate_projection(
     total_withheld = him_fed_withheld + her_fed_withheld
     final_refund = total_withheld - tentative_tax_per_return
 
-    # Build data sources with projection info if present
+    # Build data sources with per-employer details
     data_sources = {
         "him": {
-            "source": him_result["source"],
-            "detail": him_result["source_detail"],
+            "sources": him_result["sources"],
+            "employers": him_result["employers"],
         },
         "her": {
-            "source": her_result["source"],
-            "detail": her_result["source_detail"],
+            "sources": her_result["sources"],
+            "employers": her_result["employers"],
         },
     }
 
-    # Include projection_info if either party used projected data
-    if him_result.get("projection_info"):
-        data_sources["him"]["projection_info"] = him_result["projection_info"]
-    if her_result.get("projection_info"):
-        data_sources["her"]["projection_info"] = her_result["projection_info"]
+    # Include projection warnings if present
+    if him_result.get("projection_warnings"):
+        data_sources["him"]["projection_warnings"] = him_result["projection_warnings"]
+    if her_result.get("projection_warnings"):
+        data_sources["her"]["projection_warnings"] = her_result["projection_warnings"]
 
     return {
         "year": year,
@@ -428,32 +326,25 @@ def format_data_sources(data_sources: dict) -> str:
     lines = []
 
     for party_key in ["him", "her"]:
-        source_info = data_sources.get(party_key, {})
-        source = source_info.get("source", "unknown")
-        detail = source_info.get("detail", "")
-
-        # Format source type for display
-        source_labels = {
-            "official_w2": "Official W-2",
-            "w2_extract": "W-2 (extracted)",
-            "generated_complete": "Generated from stubs (year complete)",
-            "generated_with_projection": "Generated from stubs + PROJECTED",
-        }
-        source_label = source_labels.get(source, source)
-
+        party_info = data_sources.get(party_key, {})
         party_label = "Him" if party_key == "him" else "Her"
-        lines.append(f"{party_label}: {source_label}")
-        if detail:
-            lines.append(f"      {detail}")
 
-        # Include projection breakdown if present
-        proj_info = source_info.get("projection_info")
-        if proj_info:
-            income = proj_info.get("income_breakdown", {})
-            lines.append(f"      Projected income: ${income.get('regular_pay', 0):,.2f} (regular) + ${income.get('stock_grants', 0):,.2f} (stock)")
-            if proj_info.get("warnings"):
-                for w in proj_info["warnings"]:
-                    lines.append(f"      Warning: {w}")
+        # Show per-employer sources
+        sources = party_info.get("sources", [])
+        employers = party_info.get("employers", [])
+
+        if sources:
+            lines.append(f"{party_label}:")
+            for source_desc in sources:
+                lines.append(f"  - {source_desc}")
+
+            # Show projection warnings if present
+            proj_warnings = party_info.get("projection_warnings", [])
+            if proj_warnings:
+                for w in proj_warnings:
+                    lines.append(f"  ⚠ {w}")
+        else:
+            lines.append(f"{party_label}: no data")
 
     return "\n".join(lines)
 

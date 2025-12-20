@@ -52,7 +52,7 @@ from .gaps import (
 )
 
 from .w2 import (
-    generate_w2_from_analysis,
+    generate_w2,
     generate_w2_with_projection,
     save_w2_forms,
     stub_to_w2,
@@ -116,7 +116,7 @@ __all__ = [
     "check_first_stub_ytd",
     "MAX_INTERVAL_DAYS",
     # W-2 generation
-    "generate_w2_from_analysis",
+    "generate_w2",
     "generate_w2_with_projection",
     "save_w2_forms",
     "SS_WAGE_BASE",
