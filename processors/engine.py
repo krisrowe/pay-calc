@@ -416,23 +416,19 @@ class YAMLParser:
     def _extract_taxes_structured(self, text: str, taxes_def: Dict) -> Dict:
         """Extract taxes with structured items.
 
-        Output schema matches OCR format for consistency:
-            taxes.federal_income.{taxable_wages, current, ytd}
-            taxes.social_security.{taxable_wages, current, ytd}
-            taxes.medicare.{taxable_wages, current, ytd}
+        Output schema (canonical format, validated by JSON schema):
+            taxes.federal_income_tax.{taxable_wages, current_withheld, ytd_withheld}
+            taxes.social_security.{taxable_wages, current_withheld, ytd_withheld}
+            taxes.medicare.{taxable_wages, current_withheld, ytd_withheld}
         """
         taxes = {
-            "federal_income": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
-            "social_security": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
-            "medicare": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
+            "federal_income_tax": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
+            "social_security": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
+            "medicare": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
         }
 
-        # Map YAML field names to normalized output names
-        yaml_to_normalized = {
-            "federal_income_tax": "federal_income",
-            "current_withheld": "current",
-            "ytd_withheld": "ytd",
-        }
+        # No field name mapping needed - YAML parsers use canonical names
+        yaml_to_normalized = {}
 
         # Extract section text first
         section_text = self._extract_section(text, taxes_def, "taxes")
@@ -552,11 +548,11 @@ class YAMLParser:
         if taxes_def and "items" in taxes_def:
             taxes = self._extract_taxes_structured(text, taxes_def)
         else:
-            # Default/fallback uses normalized schema (matches OCR format)
+            # Default/fallback uses canonical schema (validated by JSON schema)
             taxes = {
-                "federal_income": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
-                "social_security": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
-                "medicare": {"taxable_wages": 0.0, "current": 0.0, "ytd": 0.0},
+                "federal_income_tax": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
+                "social_security": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
+                "medicare": {"taxable_wages": 0.0, "current_withheld": 0.0, "ytd_withheld": 0.0},
             }
 
         # Extract deductions

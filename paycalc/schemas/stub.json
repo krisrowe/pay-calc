@@ -1,0 +1,117 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pay-calc/schemas/stub.json",
+  "title": "Pay Stub Record",
+  "description": "Canonical schema for pay stub records. Enforces consistent field names across all extraction methods.",
+  "type": "object",
+  "required": ["pay_date", "employer", "taxes"],
+  "additionalProperties": true,
+  "properties": {
+    "pay_date": {
+      "type": "string",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}$",
+      "description": "Pay date in YYYY-MM-DD format"
+    },
+    "employer": {
+      "type": "string",
+      "minLength": 1
+    },
+    "net_pay": {
+      "type": ["number", "null"]
+    },
+    "document_id": {
+      "type": ["string", "null"]
+    },
+    "period": {
+      "type": "object",
+      "properties": {
+        "start": { "type": ["string", "null"] },
+        "end": { "type": ["string", "null"] }
+      }
+    },
+    "pay_summary": {
+      "type": "object",
+      "properties": {
+        "current": {
+          "type": "object",
+          "properties": {
+            "gross": { "type": ["number", "null"] },
+            "taxes": { "type": ["number", "null"] },
+            "deductions": { "type": ["number", "null"] },
+            "net_pay": { "type": ["number", "null"] },
+            "fit_taxable_wages": { "type": ["number", "null"] }
+          }
+        },
+        "ytd": {
+          "type": "object",
+          "properties": {
+            "gross": { "type": ["number", "null"] },
+            "taxes": { "type": ["number", "null"] },
+            "deductions": { "type": ["number", "null"] },
+            "net_pay": { "type": ["number", "null"] },
+            "fit_taxable_wages": { "type": ["number", "null"] }
+          }
+        }
+      }
+    },
+    "taxes": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["federal_income_tax"],
+      "properties": {
+        "federal_income_tax": { "$ref": "#/$defs/tax_entry" },
+        "social_security": { "$ref": "#/$defs/tax_entry" },
+        "medicare": { "$ref": "#/$defs/tax_entry" },
+        "state": { "$ref": "#/$defs/tax_entry" }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["federal_income"] },
+          { "required": ["federal"] }
+        ]
+      }
+    },
+    "earnings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string" },
+          "current_amount": { "type": ["number", "null"] },
+          "ytd_amount": { "type": ["number", "null"] }
+        }
+      }
+    },
+    "deductions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "required": ["type"],
+        "properties": {
+          "type": { "type": "string" },
+          "current_amount": { "type": ["number", "null"] },
+          "ytd_amount": { "type": ["number", "null"] },
+          "employer_match_ytd": { "type": ["number", "null"] }
+        }
+      }
+    }
+  },
+  "$defs": {
+    "tax_entry": {
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "properties": {
+        "taxable_wages": { "type": ["number", "null"] },
+        "current_withheld": { "type": ["number", "null"] },
+        "ytd_withheld": { "type": ["number", "null"] }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["current"] },
+          { "required": ["ytd"] }
+        ]
+      }
+    }
+  }
+}

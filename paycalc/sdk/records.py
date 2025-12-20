@@ -169,8 +169,8 @@ def normalize_stub_data(data: Dict[str, Any]) -> Dict[str, Any]:
     fed_tax = taxes.get("federal_income_tax", {}) or taxes.get("federal_income", {}) or taxes.get("federal", {})
     normalized["federal_tax"] = fed_tax.get("current_withheld") or fed_tax.get("current") or 0
 
-    # State
-    state_tax = taxes.get("state_income_tax", {}) or taxes.get("state", {})
+    # State (handle None explicitly set in JSON)
+    state_tax = taxes.get("state_income_tax") or taxes.get("state") or {}
     normalized["state_tax"] = state_tax.get("current_withheld") or state_tax.get("current") or 0
 
     # Social Security
@@ -674,11 +674,19 @@ def add_record(meta: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Path:
 
     Raises:
         ValueError: If required metadata is missing
+        ValidationError: If data fails JSON schema validation
     """
     record_type = meta.get("type")
     valid_types = ("stub", "w2", "discarded", "unrelated")
     if record_type not in valid_types:
         raise ValueError(f"meta.type must be one of {valid_types}, got: {record_type}")
+
+    # JSON Schema validation - enforces canonical field names before write
+    if record_type in ("stub", "w2") and data is not None:
+        from paycalc.schemas import validate_record_schema
+        schema_errors, schema_warnings = validate_record_schema(record_type, data)
+        if schema_errors:
+            raise ValidationError(schema_errors)
 
     # Ensure imported_at is set
     if "imported_at" not in meta:
@@ -997,10 +1005,10 @@ PAYSTUB_OCR_PROMPT = """Extract pay stub data into this JSON structure:
     "ytd": {"gross": 0.00, "taxes": 0.00}
   },
   "taxes": {
-    "federal_income": {"taxable_wages": 0.00, "current": 0.00, "ytd": 0.00},
-    "social_security": {"taxable_wages": 0.00, "current": 0.00, "ytd": 0.00},
-    "medicare": {"taxable_wages": 0.00, "current": 0.00, "ytd": 0.00},
-    "state": {"taxable_wages": 0.00, "current": 0.00, "ytd": 0.00}
+    "federal_income_tax": {"taxable_wages": 0.00, "current_withheld": 0.00, "ytd_withheld": 0.00},
+    "social_security": {"taxable_wages": 0.00, "current_withheld": 0.00, "ytd_withheld": 0.00},
+    "medicare": {"taxable_wages": 0.00, "current_withheld": 0.00, "ytd_withheld": 0.00},
+    "state": {"taxable_wages": 0.00, "current_withheld": 0.00, "ytd_withheld": 0.00}
   },
   "deductions": [
     {"type": "description", "current_amount": 0.00, "ytd_amount": 0.00}
@@ -1050,7 +1058,7 @@ def process_pdf_to_json(pdf_path: Path, record_type: RecordType, party: str) -> 
         # If no text, need OCR
         if not pdf_text.strip():
             try:
-                from gemini_client import process_file
+                from paycalc.gemini_client import process_file
                 data = process_file(PAYSTUB_OCR_PROMPT, str(pdf_path))
                 data["_source_file"] = pdf_path.name
                 data["_ocr"] = True
@@ -2004,7 +2012,7 @@ def _extract_pdf_ocr(pdf_path: Path) -> Optional[Dict[str, Any]]:
     logger.debug(f"_extract_pdf_ocr starting for {pdf_path.name}")
 
     try:
-        from gemini_client import process_file
+        from paycalc.gemini_client import process_file
         logger.debug("calling gemini_client.process_file...")
 
         # Unified prompt for type detection + extraction
@@ -2031,10 +2039,10 @@ For PAY STUB:
     {"type": "description", "current_amount": 0.00, "ytd_amount": 0.00}
   ],
   "taxes": {
-    "federal_income": {"current": 0.00, "ytd": 0.00},
-    "social_security": {"current": 0.00, "ytd": 0.00},
-    "medicare": {"current": 0.00, "ytd": 0.00},
-    "state": {"current": 0.00, "ytd": 0.00}
+    "federal_income_tax": {"taxable_wages": 0.00, "current_withheld": 0.00, "ytd_withheld": 0.00},
+    "social_security": {"taxable_wages": 0.00, "current_withheld": 0.00, "ytd_withheld": 0.00},
+    "medicare": {"taxable_wages": 0.00, "current_withheld": 0.00, "ytd_withheld": 0.00},
+    "state": {"taxable_wages": 0.00, "current_withheld": 0.00, "ytd_withheld": 0.00}
   },
   "deductions": [
     {"type": "description", "current_amount": 0.00, "ytd_amount": 0.00}
