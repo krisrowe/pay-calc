@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pay-calc/schemas/w2.json",
+  "title": "W-2 Record",
+  "description": "Canonical schema for W-2 records. No surprises allowed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["tax_year", "employer_name", "wages", "federal_tax_withheld", "social_security_wages", "social_security_tax", "medicare_wages", "medicare_tax"],
+  "properties": {
+    "tax_year": {
+      "type": "integer",
+      "minimum": 2020,
+      "maximum": 2030,
+      "description": "Tax year (4 digits)"
+    },
+    "employer_name": {
+      "type": "string",
+      "minLength": 1
+    },
+    "employer_ein": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9]{2}-[0-9]{7}$",
+      "description": "Employer EIN in XX-XXXXXXX format"
+    },
+    "wages": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Box 1: Wages, tips, other compensation"
+    },
+    "federal_tax_withheld": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Box 2: Federal income tax withheld"
+    },
+    "social_security_wages": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Box 3: Social security wages"
+    },
+    "social_security_tax": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Box 4: Social security tax withheld"
+    },
+    "medicare_wages": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Box 5: Medicare wages and tips"
+    },
+    "medicare_tax": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Box 6: Medicare tax withheld"
+    },
+    "state": {
+      "type": ["string", "null"],
+      "pattern": "^[A-Z]{2}$",
+      "description": "Box 15: State (2-letter code)"
+    },
+    "state_wages": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Box 16: State wages"
+    },
+    "state_tax_withheld": {
+      "type": ["number", "null"],
+      "minimum": 0,
+      "description": "Box 17: State income tax"
+    }
+  }
+}

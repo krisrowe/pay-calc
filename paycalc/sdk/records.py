@@ -1275,9 +1275,8 @@ def detect_record_type_from_data(data: Dict[str, Any]) -> Optional[RecordType]:
     if "data" in data and isinstance(data["data"], dict):
         check_data = data["data"]
 
-    # W-2 indicators
+    # W-2 indicators (short names only - canonical schema)
     w2_fields = ["tax_year", "wages", "federal_tax_withheld",
-                 "wages_tips_other_comp", "federal_income_tax_withheld",
                  "social_security_wages", "medicare_wages"]
 
     w2_matches = sum(1 for f in w2_fields if f in check_data or f in data)

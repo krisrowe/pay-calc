@@ -236,15 +236,21 @@ def stub_to_w2(
     medicare_tax = taxes.get("medicare", {})
     medicare_withheld = medicare_tax.get("ytd_withheld", 0) or medicare_tax.get("ytd", 0)
 
-    # Build W-2 data
+    # Build W-2 data (short names matching stored W-2 record schema)
     w2_data = {
-        "wages_tips_other_comp": round(fit_taxable, 2),
-        "federal_income_tax_withheld": round(fed_withheld, 2),
+        "wages": round(fit_taxable, 2),
+        "federal_tax_withheld": round(fed_withheld, 2),
         "social_security_wages": round(ss_wages, 2),
-        "social_security_tax_withheld": round(ss_withheld, 2),
-        "medicare_wages_and_tips": round(medicare_wages, 2),
-        "medicare_tax_withheld": round(medicare_withheld, 2),
+        "social_security_tax": round(ss_withheld, 2),
+        "medicare_wages": round(medicare_wages, 2),
+        "medicare_tax": round(medicare_withheld, 2),
     }
+
+    # Validate W-2 box values against schema
+    from paycalc.schemas import validate_w2_boxes
+    box_errors, box_warnings = validate_w2_boxes(w2_data)
+    if box_errors:
+        raise ValueError(f"Generated W-2 failed schema validation: {'; '.join(box_errors)}")
 
     # Determine employer from stub if not provided
     if not employer:
@@ -374,16 +380,16 @@ def generate_w2(
         employer_w2s = w2s_by_employer.get(employer_key, [])
 
         if employer_w2s:
-            # Use official W-2
+            # Use official W-2 (short names matching schema)
             emp_data = defaultdict(float)
             for w2 in employer_w2s:
                 data = w2.get("data", {})
-                emp_data["wages_tips_other_comp"] += data.get("wages", 0)
-                emp_data["federal_income_tax_withheld"] += data.get("federal_tax_withheld", 0)
+                emp_data["wages"] += data.get("wages", 0)
+                emp_data["federal_tax_withheld"] += data.get("federal_tax_withheld", 0)
                 emp_data["social_security_wages"] += data.get("social_security_wages", 0)
-                emp_data["social_security_tax_withheld"] += data.get("social_security_tax", 0)
-                emp_data["medicare_wages_and_tips"] += data.get("medicare_wages", 0)
-                emp_data["medicare_tax_withheld"] += data.get("medicare_tax", 0)
+                emp_data["social_security_tax"] += data.get("social_security_tax", 0)
+                emp_data["medicare_wages"] += data.get("medicare_wages", 0)
+                emp_data["medicare_tax"] += data.get("medicare_tax", 0)
 
             employer_results.append({
                 "employer": display_name,
@@ -594,25 +600,25 @@ def generate_w2_with_projection(
                     # Medicare wages for additional = all additional gross
                     additional_medicare_wages = round(additional_gross, 2)
 
-                    # projected_additional_w2: same W-2 format as ytd_w2
+                    # projected_additional_w2: same W-2 format as ytd_w2 (short names)
                     result["projected_additional_w2"] = {
-                        "wages_tips_other_comp": round(additional.get("total_gross", 0), 2),
-                        "federal_income_tax_withheld": round(additional.get("federal_withheld", 0), 2),
+                        "wages": round(additional.get("total_gross", 0), 2),
+                        "federal_tax_withheld": round(additional.get("federal_withheld", 0), 2),
                         "social_security_wages": additional_ss_wages,
-                        "social_security_tax_withheld": round(additional.get("ss_withheld", 0), 2),
-                        "medicare_wages_and_tips": additional_medicare_wages,
-                        "medicare_tax_withheld": round(additional.get("medicare_withheld", 0), 2),
+                        "social_security_tax": round(additional.get("ss_withheld", 0), 2),
+                        "medicare_wages": additional_medicare_wages,
+                        "medicare_tax": round(additional.get("medicare_withheld", 0), 2),
                     }
 
                     # projected_w2: simple sum of ytd_w2 + projected_additional_w2
                     add_w2 = result["projected_additional_w2"]
                     result["projected_w2"] = {
-                        "wages_tips_other_comp": round(ytd_w2["wages_tips_other_comp"] + add_w2["wages_tips_other_comp"], 2),
-                        "federal_income_tax_withheld": round(ytd_w2["federal_income_tax_withheld"] + add_w2["federal_income_tax_withheld"], 2),
+                        "wages": round(ytd_w2["wages"] + add_w2["wages"], 2),
+                        "federal_tax_withheld": round(ytd_w2["federal_tax_withheld"] + add_w2["federal_tax_withheld"], 2),
                         "social_security_wages": round(ytd_w2["social_security_wages"] + add_w2["social_security_wages"], 2),
-                        "social_security_tax_withheld": round(ytd_w2["social_security_tax_withheld"] + add_w2["social_security_tax_withheld"], 2),
-                        "medicare_wages_and_tips": round(ytd_w2["medicare_wages_and_tips"] + add_w2["medicare_wages_and_tips"], 2),
-                        "medicare_tax_withheld": round(ytd_w2["medicare_tax_withheld"] + add_w2["medicare_tax_withheld"], 2),
+                        "social_security_tax": round(ytd_w2["social_security_tax"] + add_w2["social_security_tax"], 2),
+                        "medicare_wages": round(ytd_w2["medicare_wages"] + add_w2["medicare_wages"], 2),
+                        "medicare_tax": round(ytd_w2["medicare_tax"] + add_w2["medicare_tax"], 2),
                     }
 
                     # Include projection metadata separately

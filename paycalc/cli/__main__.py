@@ -430,12 +430,12 @@ def w2_generate(year, party, output_format):
 def _print_w2_boxes(w2_box: dict):
     """Print W-2 box values."""
     click.echo("W-2 Box Values:")
-    click.echo(f"  Box 1 (Wages):           ${w2_box['wages_tips_other_comp']:>12,.2f}")
-    click.echo(f"  Box 2 (Federal WH):      ${w2_box['federal_income_tax_withheld']:>12,.2f}")
+    click.echo(f"  Box 1 (Wages):           ${w2_box['wages']:>12,.2f}")
+    click.echo(f"  Box 2 (Federal WH):      ${w2_box['federal_tax_withheld']:>12,.2f}")
     click.echo(f"  Box 3 (SS Wages):        ${w2_box['social_security_wages']:>12,.2f}")
-    click.echo(f"  Box 4 (SS Tax):          ${w2_box['social_security_tax_withheld']:>12,.2f}")
-    click.echo(f"  Box 5 (Medicare Wages):  ${w2_box['medicare_wages_and_tips']:>12,.2f}")
-    click.echo(f"  Box 6 (Medicare Tax):    ${w2_box['medicare_tax_withheld']:>12,.2f}")
+    click.echo(f"  Box 4 (SS Tax):          ${w2_box['social_security_tax']:>12,.2f}")
+    click.echo(f"  Box 5 (Medicare Wages):  ${w2_box['medicare_wages']:>12,.2f}")
+    click.echo(f"  Box 6 (Medicare Tax):    ${w2_box['medicare_tax']:>12,.2f}")
 
 
 @cli.command("analysis")

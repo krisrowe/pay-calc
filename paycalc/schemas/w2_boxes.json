@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://pay-calc/schemas/w2_boxes.json",
+  "title": "W-2 Box Values",
+  "description": "Schema for computed W-2 box values used in tax calculations. No surprises allowed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["wages", "federal_tax_withheld", "social_security_wages", "social_security_tax", "medicare_wages", "medicare_tax"],
+  "properties": {
+    "wages": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Box 1: Wages, tips, other compensation (FIT taxable)"
+    },
+    "federal_tax_withheld": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Box 2: Federal income tax withheld"
+    },
+    "social_security_wages": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Box 3: Social security wages"
+    },
+    "social_security_tax": {
+      "type": "number",
+      "minimum": 0,
+      "description": "Box 4: Social security tax withheld"
+    },
+    "medicare_wages": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Box 5: Medicare wages and tips"
+    },
+    "medicare_tax": {
+      "type": "number",
+      "exclusiveMinimum": 0,
+      "description": "Box 6: Medicare tax withheld"
+    }
+  }
+}

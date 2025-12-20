@@ -140,14 +140,14 @@ def generate_projection(
     him_data = him_result["data"]
     her_data = her_result["data"]
 
-    him_wages = him_data.get("wages_tips_other_comp", 0)
-    her_wages = her_data.get("wages_tips_other_comp", 0)
-    him_fed_withheld = him_data.get("federal_income_tax_withheld", 0)
-    her_fed_withheld = her_data.get("federal_income_tax_withheld", 0)
-    him_medicare_wages = him_data.get("medicare_wages_and_tips", him_wages)
-    her_medicare_wages = her_data.get("medicare_wages_and_tips", her_wages)
-    him_medicare_withheld = him_data.get("medicare_tax_withheld", 0)
-    her_medicare_withheld = her_data.get("medicare_tax_withheld", 0)
+    him_wages = him_data.get("wages", 0)
+    her_wages = her_data.get("wages", 0)
+    him_fed_withheld = him_data.get("federal_tax_withheld", 0)
+    her_fed_withheld = her_data.get("federal_tax_withheld", 0)
+    him_medicare_wages = him_data.get("medicare_wages", him_wages)
+    her_medicare_wages = her_data.get("medicare_wages", her_wages)
+    him_medicare_withheld = him_data.get("medicare_tax", 0)
+    her_medicare_withheld = her_data.get("medicare_tax", 0)
 
     combined_wages = him_wages + her_wages
     combined_medicare_wages = him_medicare_wages + her_medicare_wages

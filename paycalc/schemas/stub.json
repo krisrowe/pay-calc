@@ -4,8 +4,8 @@
   "title": "Pay Stub Record",
   "description": "Canonical schema for pay stub records. Enforces consistent field names across all extraction methods.",
   "type": "object",
-  "required": ["pay_date", "employer", "taxes"],
-  "additionalProperties": true,
+  "required": ["pay_date", "employer", "taxes", "pay_summary"],
+  "additionalProperties": false,
   "properties": {
     "pay_date": {
       "type": "string",
@@ -22,8 +22,12 @@
     "document_id": {
       "type": ["string", "null"]
     },
+    "file_name": {
+      "type": ["string", "null"]
+    },
     "period": {
       "type": "object",
+      "additionalProperties": false,
       "properties": {
         "start": { "type": ["string", "null"] },
         "end": { "type": ["string", "null"] }
@@ -31,9 +35,12 @@
     },
     "pay_summary": {
       "type": "object",
+      "additionalProperties": false,
+      "required": ["ytd"],
       "properties": {
         "current": {
           "type": "object",
+          "additionalProperties": false,
           "properties": {
             "gross": { "type": ["number", "null"] },
             "taxes": { "type": ["number", "null"] },
@@ -44,8 +51,10 @@
         },
         "ytd": {
           "type": "object",
+          "additionalProperties": false,
+          "required": ["gross"],
           "properties": {
-            "gross": { "type": ["number", "null"] },
+            "gross": { "type": "number", "exclusiveMinimum": 0, "description": "YTD gross must be positive for W-2 generation" },
             "taxes": { "type": ["number", "null"] },
             "deductions": { "type": ["number", "null"] },
             "net_pay": { "type": ["number", "null"] },
@@ -57,11 +66,11 @@
     "taxes": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["federal_income_tax"],
+      "required": ["federal_income_tax", "social_security", "medicare"],
       "properties": {
-        "federal_income_tax": { "$ref": "#/$defs/tax_entry" },
-        "social_security": { "$ref": "#/$defs/tax_entry" },
-        "medicare": { "$ref": "#/$defs/tax_entry" },
+        "federal_income_tax": { "$ref": "#/$defs/tax_entry_required" },
+        "social_security": { "$ref": "#/$defs/tax_entry_required" },
+        "medicare": { "$ref": "#/$defs/tax_entry_required" },
         "state": { "$ref": "#/$defs/tax_entry" }
       },
       "not": {
@@ -75,6 +84,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["type"],
         "properties": {
           "type": { "type": "string" },
@@ -87,6 +97,7 @@
       "type": "array",
       "items": {
         "type": "object",
+        "additionalProperties": false,
         "required": ["type"],
         "properties": {
           "type": { "type": "string" },
@@ -105,6 +116,22 @@
         "taxable_wages": { "type": ["number", "null"] },
         "current_withheld": { "type": ["number", "null"] },
         "ytd_withheld": { "type": ["number", "null"] }
+      },
+      "not": {
+        "anyOf": [
+          { "required": ["current"] },
+          { "required": ["ytd"] }
+        ]
+      }
+    },
+    "tax_entry_required": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ytd_withheld"],
+      "properties": {
+        "taxable_wages": { "type": ["number", "null"] },
+        "current_withheld": { "type": ["number", "null"] },
+        "ytd_withheld": { "type": "number", "exclusiveMinimum": 0, "description": "YTD withholding must be positive for W-2 generation" }
       },
       "not": {
         "anyOf": [
