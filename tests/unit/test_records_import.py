@@ -703,3 +703,51 @@ class TestImportEfficiency:
                 f"Expected 0 downloads, got {drive.download_calls}"
             assert stats2["imported"] == 0
             assert stats2["skipped"] == 2  # Both files skipped at file-level
+
+    def test_targeted_reimport_overwrites_existing_record(self, isolated_config):
+        """Targeted reimport should overwrite existing record, not skip.
+
+        Setup: Import file with gross=5000
+        Action: Reimport same file with gross=6000
+        Assert before: 1 record with gross=5000
+        Assert after: 1 record with gross=6000
+
+        Fails if: skip (content unchanged) OR duplicate (2 records)
+        Passes only if: overwrite (1 record, new content)
+        """
+        from paycalc.sdk import records
+
+        drive = DriveMock()
+        drive.set_folder(FOLDER_ID, [{"id": FILE_A_ID, "name": "stub.pdf"}])
+        ocr = MockOCR()
+
+        with patch("subprocess.run", drive.subprocess_run), \
+             patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
+             patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
+             patch("gemini_client.process_file", ocr.process_file):
+
+            # Initial import - gross=5000
+            records.import_from_folder_auto(FOLDER_ID)
+
+            # Assert before: 1 record with gross=5000
+            recs_before = records.find_all_by_drive_id(FILE_A_ID)
+            assert len(recs_before) == 1, f"Expected 1 record, got {len(recs_before)}"
+            gross_before = recs_before[0]["data"]["pay_summary"]["gross"]
+            assert gross_before == 5000, f"Expected gross=5000, got {gross_before}"
+
+            # Change file content to gross=6000
+            drive.reset()
+            ocr.reset()
+            FILE_STUB_DATA["file_a_updated"] = [make_stub_data("2025-01-15", "Acme Corp", 6000, 6000)]
+            drive.set_file_data(FILE_A_ID, "file_a_updated")
+
+            # Targeted reimport
+            records.import_from_drive_file(FILE_A_ID)
+
+            # Assert after: 1 record with gross=6000
+            recs_after = records.find_all_by_drive_id(FILE_A_ID)
+            assert len(recs_after) == 1, \
+                f"Expected 1 record (overwrite), got {len(recs_after)} (duplicate created)"
+            gross_after = recs_after[0]["data"]["pay_summary"]["gross"]
+            assert gross_after == 6000, \
+                f"Expected gross=6000 (overwritten), got {gross_after} (skipped or wrong content)"

@@ -431,7 +431,8 @@ def validate_record(
 def validate_and_add_record(
     meta: Dict[str, Any],
     data: Optional[Dict[str, Any]],
-    skip_validation: bool = False
+    skip_validation: bool = False,
+    skip_duplicate_check: bool = False
 ) -> tuple:
     """Validate a record and add it if valid.
 
@@ -441,6 +442,7 @@ def validate_and_add_record(
         meta: Record metadata
         data: Record data
         skip_validation: Skip validation (use with caution)
+        skip_duplicate_check: Skip duplicate detection (for overwrites)
 
     Returns:
         Tuple of (path, warnings) where path is the saved file path
@@ -454,7 +456,7 @@ def validate_and_add_record(
     warnings = []
 
     if not skip_validation and record_type != "discarded":
-        errors, warnings = validate_record(record_type, data, meta, check_duplicate=True)
+        errors, warnings = validate_record(record_type, data, meta, check_duplicate=not skip_duplicate_check)
         if errors:
             raise ValidationError(errors)
 
@@ -1008,10 +1010,11 @@ PAYSTUB_OCR_PROMPT = """Extract pay stub data into this JSON structure:
   ]
 }
 
+IMPORTANT: Only extract values DIRECTLY VISIBLE in the document. DO NOT calculate or derive values.
+Use null for any value not explicitly shown in the document.
+
 Include all deductions (401k, health insurance, etc.) and all earnings types found.
 Include non-cash taxable fringe benefits (EEGTL, group term life, imputed income) in the earnings array.
-For taxable_wages: use value shown on stub, or 0.00 if not shown.
-pay_summary.current.taxes should be the sum of all tax withholdings.
 """
 
 
@@ -1349,7 +1352,6 @@ def extract_employer_from_data(data: Dict[str, Any], record_type: RecordType) ->
 
 def import_file_auto(
     file_path: Path,
-    force: bool = False,
     drive_file_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """Import a single file with auto-detection of type, year, and party.
@@ -1359,9 +1361,10 @@ def import_file_auto(
     - Year from pay_date (stubs) or tax_year (W-2s)
     - Party by matching employer to profile config keywords
 
+    If a record with the same drive_file_id exists, it is overwritten.
+
     Args:
         file_path: Path to PDF or JSON file
-        force: If True, re-process previously discarded files
         drive_file_id: Optional Drive file ID for tracking
 
     Returns:
@@ -1384,22 +1387,15 @@ def import_file_auto(
         "path": None,
     }
 
-    # Check if already processed
+    # Delete existing record if same file ID (overwrite)
+    is_overwrite = False
     if drive_file_id:
         existing = find_by_drive_id(drive_file_id)
         if existing:
-            existing_type = existing.get("meta", {}).get("type")
-            if existing_type in ("discarded", "unrelated"):
-                if not force:
-                    result["status"] = "skipped"
-                    result["reason"] = "previously skipped"
-                    return result
-                # With --force, continue to re-process
-            else:
-                result["status"] = "skipped"
-                result["reason"] = "already imported"
-                result["type"] = existing_type
-                return result
+            existing_path = existing.get("_path")
+            if existing_path:
+                Path(existing_path).unlink(missing_ok=True)
+                is_overwrite = True
 
     # Parse the file
     suffix = file_path.suffix.lower()
@@ -1474,9 +1470,9 @@ def import_file_auto(
     if data.get("_extraction_method"):
         meta["extraction_method"] = data.pop("_extraction_method")
 
-    # Validate and save
+    # Validate and save (skip duplicate check if overwriting)
     try:
-        path, warnings = validate_and_add_record(meta=meta, data=data)
+        path, warnings = validate_and_add_record(meta=meta, data=data, skip_duplicate_check=is_overwrite)
         result["status"] = "imported"
         result["path"] = str(path)
         if warnings:
@@ -1499,9 +1495,7 @@ def import_file_auto(
 
 def import_file_auto_all(
     file_path: Path,
-    force: bool = False,
-    drive_file_id: Optional[str] = None,
-    targeted: bool = False
+    drive_file_id: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """Import a file with multi-page PDF support.
 
@@ -1509,13 +1503,11 @@ def import_file_auto_all(
     and processes each page as a separate record. For JSON files and single-page
     PDFs, behaves like import_file_auto.
 
+    If a record with the same drive_file_id exists, it is overwritten.
+
     Args:
         file_path: Path to PDF or JSON file
-        force: If True, re-process previously discarded files
         drive_file_id: Optional Drive file ID for tracking
-        targeted: If True, bypass file-level "already imported" check and use
-                  stub-level duplicate detection instead. Use this for targeted
-                  re-import of specific files (recovery workflow).
 
     Returns:
         List of result dicts, one per imported record. Each has:
@@ -1530,53 +1522,17 @@ def import_file_auto_all(
 
     # JSON files - single record
     if suffix == ".json":
-        return [import_file_auto(file_path, force=force, drive_file_id=drive_file_id)]
+        return [import_file_auto(file_path, drive_file_id=drive_file_id)]
 
     # Not a PDF - delegate to single import
     if suffix != ".pdf":
-        return [import_file_auto(file_path, force=force, drive_file_id=drive_file_id)]
-
-    # PDF - check if already processed (by drive_file_id)
-    # Skip this check for targeted imports - rely on stub-level dedup instead
-    if drive_file_id and not targeted:
-        existing_records = find_all_by_drive_id(drive_file_id)
-        if existing_records:
-            # Already processed - return skipped results
-            results = []
-            for rec in existing_records:
-                rec_type = rec.get("meta", {}).get("type")
-                if rec_type in ("discarded", "unrelated"):
-                    if not force:
-                        results.append({
-                            "status": "skipped",
-                            "reason": "previously skipped",
-                            "type": None,
-                            "year": None,
-                            "party": None,
-                            "employer": None,
-                            "path": None,
-                        })
-                    # With --force, continue to re-process
-                    else:
-                        break  # Will process below
-                else:
-                    results.append({
-                        "status": "skipped",
-                        "reason": "already imported",
-                        "type": rec_type,
-                        "year": rec.get("meta", {}).get("year"),
-                        "party": rec.get("meta", {}).get("party"),
-                        "employer": rec.get("data", {}).get("employer"),
-                        "path": None,
-                    })
-            if results and not (force and any(r.get("reason") == "previously skipped" for r in results)):
-                return results
+        return [import_file_auto(file_path, drive_file_id=drive_file_id)]
 
     # Check page count
     page_count = _get_pdf_page_count(file_path)
     if page_count <= 1:
         # Single page - use standard import
-        result = import_file_auto(file_path, force=force, drive_file_id=drive_file_id)
+        result = import_file_auto(file_path, drive_file_id=drive_file_id)
         # Track single-page duplicates so we don't re-download
         if (drive_file_id and
             result.get("status") == "skipped" and
@@ -1595,7 +1551,7 @@ def import_file_auto_all(
         if not page_files:
             # Split failed - fall back to single import
             logger.warning(f"Failed to split PDF: {file_path.name}")
-            return [import_file_auto(file_path, force=force, drive_file_id=drive_file_id)]
+            return [import_file_auto(file_path, drive_file_id=drive_file_id)]
 
         for page_num, page_file in enumerate(page_files, start=1):
             # Process this page
@@ -1603,8 +1559,7 @@ def import_file_auto_all(
                 page_file,
                 source_filename=file_path.name,
                 page_number=page_num,
-                drive_file_id=drive_file_id,
-                force=force
+                drive_file_id=drive_file_id
             )
             result["page"] = page_num
             results.append(result)
@@ -1625,8 +1580,7 @@ def _import_single_page(
     page_file: Path,
     source_filename: str,
     page_number: int,
-    drive_file_id: Optional[str] = None,
-    force: bool = False
+    drive_file_id: Optional[str] = None
 ) -> Dict[str, Any]:
     """Import a single page from a multi-page PDF.
 
@@ -1635,7 +1589,6 @@ def _import_single_page(
         source_filename: Original filename (for metadata)
         page_number: Page number within the source file
         drive_file_id: Optional Drive file ID
-        force: If True, re-process discarded files
 
     Returns:
         Result dict like import_file_auto
@@ -2067,10 +2020,12 @@ For PAY STUB:
 {
   "pay_date": "YYYY-MM-DD",
   "employer": "company name",
+  "period": {"start": "YYYY-MM-DD", "end": "YYYY-MM-DD"},
+  "document_id": "if shown",
   "net_pay": 0.00,
   "pay_summary": {
-    "current": {"gross": 0.00},
-    "ytd": {"gross": 0.00}
+    "current": {"gross": 0.00, "taxes": 0.00, "net_pay": 0.00},
+    "ytd": {"gross": 0.00, "taxes": 0.00, "deductions": 0.00, "net_pay": 0.00}
   },
   "earnings": [
     {"type": "description", "current_amount": 0.00, "ytd_amount": 0.00}
@@ -2081,18 +2036,16 @@ For PAY STUB:
     "medicare": {"current": 0.00, "ytd": 0.00},
     "state": {"current": 0.00, "ytd": 0.00}
   },
-  "deductions": {
-    "retirement_401k": {"current": 0.00, "ytd": 0.00},
-    "health_insurance": {"current": 0.00, "ytd": 0.00},
-    "dental_vision": {"current": 0.00, "ytd": 0.00},
-    "other_pretax": {"current": 0.00, "ytd": 0.00}
-  }
+  "deductions": [
+    {"type": "description", "current_amount": 0.00, "ytd_amount": 0.00}
+  ]
 }
 
 IMPORTANT:
-- Extract ALL earnings including "Non-Cash Fringe" items (EEGTL, Group Term Life, imputed income)
-- Extract ALL deductions (401k, health, dental, FSA, HSA, etc)
-- The math should work: gross - taxes - deductions ≈ net_pay
+- Use null for values not shown in the document (do NOT calculate missing values)
+- Extract ALL earnings including fringe benefits (EEGTL, Group Term Life)
+- Extract ALL deductions with their exact names as shown in the document
+- Include period start/end dates and document_id if visible
 
 For W-2:
 {
@@ -2281,7 +2234,7 @@ def import_from_folder_auto(
                 logger.debug(f"downloaded {name}, processing...")
 
                 # Import with auto-detection (handles multi-page PDFs)
-                results = import_file_auto_all(local_path, force=force, drive_file_id=file_id)
+                results = import_file_auto_all(local_path, drive_file_id=file_id)
                 for result in results:
                     page_suffix = f" (page {result['page']})" if result.get('page') else ""
                     _accumulate_file_result(stats, result, f"{name}{page_suffix}", emit)
@@ -2299,7 +2252,7 @@ def import_from_folder_auto(
 
         for file_path in files:
             # Import with auto-detection (handles multi-page PDFs)
-            results = import_file_auto_all(file_path, force=force)
+            results = import_file_auto_all(file_path)
             for result in results:
                 page_suffix = f" (page {result['page']})" if result.get('page') else ""
                 _accumulate_file_result(stats, result, f"{file_path.name}{page_suffix}", emit)
@@ -2342,14 +2295,13 @@ def _accumulate_file_result(stats: dict, result: dict, name: str, emit: callable
 
 def import_from_drive_file(
     file_id: str,
-    force: bool = False,
     callback: Optional[callable] = None
 ) -> Dict[str, Any]:
     """Import a specific Drive file by ID, bypassing file-level dedup.
 
     This is the recovery workflow for re-importing a specific file. Unlike folder
     imports which skip files that have any existing records, this function:
-    - Always downloads and processes the file
+    - Always downloads and processes the file (force=True)
     - Uses stub-level duplicate detection to avoid creating duplicate records
     - Imports only genuinely new stubs from the file
 
@@ -2360,7 +2312,6 @@ def import_from_drive_file(
 
     Args:
         file_id: Google Drive file ID to import
-        force: If True, also re-process previously discarded files
         callback: Progress callback(event, data)
 
     Returns:
@@ -2419,14 +2370,8 @@ def import_from_drive_file(
         except FileNotFoundError:
             raise RuntimeError("gwsa not installed - required for Drive imports")
 
-        # Import with targeted=True to bypass file-level dedup
-        # This ensures stub-level dedup is used for each stub in the file
-        results = import_file_auto_all(
-            local_path,
-            force=force,
-            drive_file_id=file_id,
-            targeted=True
-        )
+        # Import file (overwrites existing record if same file ID)
+        results = import_file_auto_all(local_path, drive_file_id=file_id)
 
         for result in results:
             page_suffix = f" (page {result['page']})" if result.get('page') else ""

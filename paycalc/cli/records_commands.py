@@ -290,54 +290,138 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
     click.echo(f"Total: {total_count} record(s)")
 
 
-@records_cli.command("import")
-@click.argument("source", required=False)
+def _make_progress_callback(debug: bool):
+    """Create a progress callback for import operations."""
+    def progress_callback(event: str, data: dict):
+        if debug:
+            if event == "start":
+                click.echo(f"Importing from: {data.get('source')}")
+                click.echo(f"Found {data.get('file_count', 0)} files")
+            elif event == "imported":
+                rec_type = data.get("type", "record")
+                year = data.get("year", "?")
+                party = data.get("party", "?")
+                employer = data.get("employer", "")
+                click.echo(f"  ✓ {data.get('name')} → {rec_type}, {year}/{party}, {employer}")
+            elif event == "skipped":
+                reason = data.get("reason", "duplicate")
+                click.echo(f"  - {data.get('name')} (skipped: {reason})")
+            elif event == "discarded":
+                reason = data.get("reason", "unknown")
+                click.echo(f"  ✗ {data.get('name')} (discarded: {reason})")
+            elif event == "error":
+                click.echo(click.style(f"  ✗ {data.get('name')}: {data.get('error')}", fg="red"))
+    return progress_callback
+
+
+def _print_import_summary(stats: dict):
+    """Print import summary."""
+    click.echo("")
+    click.echo(f"Import complete: {stats['imported']} imported "
+               f"({stats['stubs']} stubs, {stats['w2s']} W-2s), "
+               f"{stats['skipped']} skipped, "
+               f"{stats['discarded']} discarded, "
+               f"{stats['errors']} errors")
+
+
+@records_cli.group("import")
+def import_cli():
+    """Import records from PDF/JSON sources.
+
+    Use 'import file' for single files or 'import folder' for directories.
+    """
+    pass
+
+
+@import_cli.command("file")
+@click.argument("source")
 @click.option("--debug", is_flag=True, help="Show detailed import decisions.")
-@click.option("--force", is_flag=True, help="Re-process previously discarded files.")
-def records_import(source: Optional[str], debug: bool, force: bool):
-    """Import records from PDF/JSON sources with auto-detection.
+def import_file(source: str, debug: bool):
+    """Import a single file (always reprocesses, bypasses file-level dedup).
 
     SOURCE can be:
-    - A PDF or JSON file path
-    - A local folder path
-    - A Google Drive folder ID
-    - Omitted: imports from all configured drive.pay_records[] folders
-
-    Auto-detects from parsed content:
-    - Record type (stub vs W-2) from document structure
-    - Year from pay_date (stubs) or tax_year (W-2s)
-    - Party by matching employer to profile config
+    - A local PDF or JSON file path
+    - A Google Drive file ID
 
     \b
     Examples:
-      pay-calc records import                  # All configured folders
-      pay-calc records import ./stubs_folder/  # Local folder
-      pay-calc records import 1tKho1iaEeFQpC   # Drive folder ID
-      pay-calc records import ./paystub.pdf    # Single file
+      pay-calc records import file ./paystub.pdf
+      pay-calc records import file 1tKho1iaEeFQpC...
     """
-    # Get configured folders if no source specified
-    if source is None:
-        from paycalc.sdk.config import load_profile
-        profile = load_profile()
-        drive_config = profile.get("drive", {})
-        pay_records = drive_config.get("pay_records", [])
-        if not pay_records:
-            raise click.ClickException(
-                "No source specified and no drive.pay_records[] configured.\n"
-                "Use: pay-calc records import <source>\n"
-                "Or configure: pay-calc profile records add <folder-id>"
-            )
-        # Extract folder IDs from config objects (format: {"id": "...", "comment": "..."})
-        sources = []
-        for rec in pay_records:
-            if isinstance(rec, dict):
-                sources.append(rec.get("id", ""))
-            else:
-                sources.append(str(rec))
-        sources = [s for s in sources if s]  # Filter empty
-    else:
-        sources = [source]
+    source_path = Path(source)
 
+    # Check if it's a local file
+    if source_path.exists() and source_path.is_file():
+        result = _import_single_file_auto(source_path, debug)
+        _print_import_summary(result)
+        return
+
+    # Assume it's a Drive file ID
+    if records.is_drive_folder_id(source):  # Works for file IDs too (same format)
+        try:
+            stats = records.import_from_drive_file(
+                file_id=source,
+                callback=_make_progress_callback(debug)
+            )
+            _print_import_summary(stats)
+        except (RuntimeError, ValueError) as e:
+            click.echo(click.style(f"Error importing file {source}: {e}", fg="red"))
+    else:
+        raise click.ClickException(f"File not found: {source}")
+
+
+@import_cli.command("folder")
+@click.argument("source")
+@click.option("--debug", is_flag=True, help="Show detailed import decisions.")
+@click.option("--force", is_flag=True, help="Re-process previously discarded files.")
+def import_folder(source: str, debug: bool, force: bool):
+    """Import records from a folder.
+
+    SOURCE can be a local folder path or Google Drive folder ID.
+
+    \b
+    Examples:
+      pay-calc records import folder ./stubs_folder/  # Local folder
+      pay-calc records import folder 1tKho1iaEeFQpC   # Drive folder ID
+    """
+    stats = _import_from_sources([source], debug, force)
+    _print_import_summary(stats)
+
+
+@import_cli.command("sources")
+@click.option("--debug", is_flag=True, help="Show detailed import decisions.")
+@click.option("--force", is_flag=True, help="Re-process previously discarded files.")
+def import_sources(debug: bool, force: bool):
+    """Import from all configured drive.pay_records[] folders.
+
+    \b
+    Example:
+      pay-calc records import sources
+    """
+    from paycalc.sdk.config import load_profile
+    profile = load_profile()
+    drive_config = profile.get("drive", {})
+    pay_records = drive_config.get("pay_records", [])
+    if not pay_records:
+        raise click.ClickException(
+            "No drive.pay_records[] configured.\n"
+            "Configure with: pay-calc profile records add <folder-id>"
+        )
+    # Extract folder IDs from config objects (format: {"id": "...", "comment": "..."})
+    sources = []
+    for rec in pay_records:
+        if isinstance(rec, dict):
+            sources.append(rec.get("id", ""))
+        else:
+            sources.append(str(rec))
+    sources = [s for s in sources if s]  # Filter empty
+
+    stats = _import_from_sources(sources, debug, force)
+    _print_import_summary(stats)
+
+
+def _import_from_sources(sources: list, debug: bool, force: bool) -> dict:
+    """Import from multiple folder sources."""
     total_stats = {
         "imported": 0,
         "skipped": 0,
@@ -348,54 +432,19 @@ def records_import(source: Optional[str], debug: bool, force: bool):
     }
 
     for src in sources:
-        source_path = Path(src) if not records.is_drive_folder_id(src) else None
+        try:
+            stats = records.import_from_folder_auto(
+                source=src,
+                callback=_make_progress_callback(debug),
+                force=force,
+                debug=debug
+            )
+            _accumulate_stats(total_stats, stats)
+        except (RuntimeError, ValueError) as e:
+            click.echo(click.style(f"Error importing from {src}: {e}", fg="red"))
+            total_stats["errors"] += 1
 
-        # Check if it's a single file
-        if source_path and source_path.is_file():
-            # Single file import
-            result = _import_single_file_auto(source_path, debug, force)
-            _accumulate_stats(total_stats, result)
-        else:
-            # Folder import (local or Drive)
-            def progress_callback(event: str, data: dict):
-                if debug:
-                    if event == "start":
-                        click.echo(f"Importing from: {data.get('source')}")
-                        click.echo(f"Found {data.get('file_count', 0)} files")
-                    elif event == "imported":
-                        rec_type = data.get("type", "record")
-                        year = data.get("year", "?")
-                        party = data.get("party", "?")
-                        employer = data.get("employer", "")
-                        click.echo(f"  ✓ {data.get('name')} → {rec_type}, {year}/{party}, {employer}")
-                    elif event == "skipped":
-                        reason = data.get("reason", "duplicate")
-                        click.echo(f"  - {data.get('name')} (skipped: {reason})")
-                    elif event == "discarded":
-                        reason = data.get("reason", "unknown")
-                        click.echo(f"  ✗ {data.get('name')} (discarded: {reason})")
-                    elif event == "error":
-                        click.echo(click.style(f"  ✗ {data.get('name')}: {data.get('error')}", fg="red"))
-
-            try:
-                stats = records.import_from_folder_auto(
-                    source=src,
-                    callback=progress_callback,
-                    force=force,
-                    debug=debug
-                )
-                _accumulate_stats(total_stats, stats)
-            except (RuntimeError, ValueError) as e:
-                click.echo(click.style(f"Error importing from {src}: {e}", fg="red"))
-                total_stats["errors"] += 1
-
-    # Summary
-    click.echo("")
-    click.echo(f"Import complete: {total_stats['imported']} imported "
-               f"({total_stats['stubs']} stubs, {total_stats['w2s']} W-2s), "
-               f"{total_stats['skipped']} skipped, "
-               f"{total_stats['discarded']} discarded, "
-               f"{total_stats['errors']} errors")
+    return total_stats
 
 
 def _accumulate_stats(total: dict, result: dict):
@@ -408,12 +457,10 @@ def _accumulate_stats(total: dict, result: dict):
     total["w2s"] += result.get("w2s", 0)
 
 
-def _import_single_file_auto(file_path: Path, debug: bool, force: bool) -> dict:
+def _import_single_file_auto(file_path: Path, debug: bool) -> dict:
     """Import a single file with auto-detection and multi-page support.
 
-    When a specific file is targeted (vs folder import), we use stub-level
-    duplicate detection instead of file-level tracking. This enables the
-    recovery workflow: re-importing a specific file that was partially imported.
+    If a record with the same file ID exists, it is overwritten.
 
     Returns stats dict with: imported, skipped, discarded, errors, stubs, w2s
     """
@@ -429,13 +476,8 @@ def _import_single_file_auto(file_path: Path, debug: bool, force: bool) -> dict:
         click.echo(f"Processing: {file_path.name}")
 
     try:
-        # Use import_file_auto_all with targeted=True:
-        # - Processes all pages of multi-page PDFs
-        # - Bypasses file-level "already imported" check
-        # - Relies on stub-level duplicate detection
-        import_results = records.import_file_auto_all(
-            file_path, force=force, targeted=True
-        )
+        # Import file (overwrites existing record if same file ID)
+        import_results = records.import_file_auto_all(file_path)
 
         for import_result in import_results:
             status = import_result.get("status")
