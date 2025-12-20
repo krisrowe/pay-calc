@@ -185,14 +185,17 @@ def stub_to_w2(
     fit_taxable = ytd.get("fit_taxable_wages", ytd_gross)
 
     # Box 2: Federal income tax withheld
-    fed_withheld = taxes.get("federal_income_tax", {}).get("ytd_withheld", 0)
+    # Handle both schemas: federal_income_tax.ytd_withheld OR federal_income.ytd
+    fed_tax = taxes.get("federal_income_tax", {}) or taxes.get("federal_income", {})
+    fed_withheld = fed_tax.get("ytd_withheld", 0) or fed_tax.get("ytd", 0)
 
     # Box 3: Social Security wages (capped at SS wage base)
     ss_wage_base = SS_WAGE_BASE.get(year, 176100)
     ss_wages = min(ytd_gross, ss_wage_base)
 
     # Box 4: Social Security tax withheld
-    ss_withheld = taxes.get("social_security", {}).get("ytd_withheld", 0)
+    ss_tax = taxes.get("social_security", {})
+    ss_withheld = ss_tax.get("ytd_withheld", 0) or ss_tax.get("ytd", 0)
 
     # Box 5: Medicare wages and tips
     # Subtract pretax health insurance (dental, medical, vision) from gross
@@ -206,7 +209,8 @@ def stub_to_w2(
     medicare_wages = ytd_gross - health_insurance_ytd
 
     # Box 6: Medicare tax withheld
-    medicare_withheld = taxes.get("medicare", {}).get("ytd_withheld", 0)
+    medicare_tax = taxes.get("medicare", {})
+    medicare_withheld = medicare_tax.get("ytd_withheld", 0) or medicare_tax.get("ytd", 0)
 
     # Build W-2 data
     w2_data = {
