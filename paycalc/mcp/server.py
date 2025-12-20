@@ -287,6 +287,8 @@ async def generate_w2(
 async def generate_tax_projection(
     year: str = Field(description="Tax year (4 digits, e.g., '2025')"),
     output_format: str = Field(default="json", description="Output format: 'json' (default) or 'csv'"),
+    allow_projection: bool = Field(default=False, description="If True, project income to year-end when stub data is incomplete"),
+    stock_price: float | None = Field(default=None, description="Stock price for RSU valuation. Use get_stock_quote() to fetch current price for GOOG."),
 ) -> dict[str, Any] | str:
     """Calculate federal tax liability and refund/owed amount.
 
@@ -299,6 +301,10 @@ async def generate_tax_projection(
     2. W-2 extract files (from w2-extract command)
     3. Generated W-2 from pay stubs (via SDK)
 
+    With allow_projection=True, projects income to year-end based on:
+    - Regular pay pattern (biweekly/monthly cadence)
+    - RSU vesting schedule (if configured and stock_price provided)
+
     Returns structured JSON with data_sources metadata showing where each
     party's W-2 data came from. CSV format available for spreadsheet import.
 
@@ -307,7 +313,12 @@ async def generate_tax_projection(
     try:
         from paycalc.sdk.tax import generate_tax_projection as sdk_tax_projection
 
-        result = sdk_tax_projection(year, output_format=output_format)
+        result = sdk_tax_projection(
+            year,
+            output_format=output_format,
+            allow_projection=allow_projection,
+            stock_price=stock_price,
+        )
 
         if output_format == "csv":
             return {"csv": result}

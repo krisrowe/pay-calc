@@ -390,19 +390,34 @@ def generate_projection(
 
     for segment in segments:
         if segment:
-            seg_ytd = segment[-1].get("pay_summary", {}).get("ytd", {})
-            actual_gross += seg_ytd.get("gross", 0)
-            actual_fit_taxable += seg_ytd.get("fit_taxable_wages", 0)
+            latest_stub = segment[-1]
+            seg_ytd = latest_stub.get("pay_summary", {}).get("ytd", {})
+            seg_gross = seg_ytd.get("gross", 0)
+            actual_gross += seg_gross
+
+            # FIT taxable: use explicit value if available, else calculate from gross - pretax
+            fit_taxable = seg_ytd.get("fit_taxable_wages")
+            if not fit_taxable:  # None or 0 means we need to calculate
+                # Calculate from gross minus pretax deductions (401k, FSA, HSA)
+                pretax_total = 0
+                deductions = latest_stub.get("deductions", [])
+                if isinstance(deductions, list):
+                    for ded in deductions:
+                        ded_type = ded.get("type", "").lower()
+                        if any(t in ded_type for t in ["401", "403", "fsa", "hsa", "tsp", "retirement"]):
+                            pretax_total += ded.get("ytd_amount", 0)
+                fit_taxable = seg_gross - pretax_total
+            actual_fit_taxable += fit_taxable
 
             # Get tax breakdown from taxes section
-            taxes = segment[-1].get("taxes", {})
+            taxes = latest_stub.get("taxes", {})
             actual_federal += taxes.get("federal_income_tax", {}).get("ytd_withheld", 0)
             actual_ss_tax += taxes.get("social_security", {}).get("ytd_withheld", 0)
             actual_medicare_tax += taxes.get("medicare", {}).get("ytd_withheld", 0)
 
             # SS and Medicare wages (usually same as gross for these)
-            actual_ss_wages += seg_ytd.get("gross", 0)
-            actual_medicare_wages += seg_ytd.get("gross", 0)
+            actual_ss_wages += seg_gross
+            actual_medicare_wages += seg_gross
 
     actual_taxes = actual_federal + actual_ss_tax + actual_medicare_tax
 

@@ -185,9 +185,10 @@ def stub_to_w2(
     # FIT taxable = gross - pretax deductions (401k, FSA, HSA, etc.)
     ytd_gross = ytd.get("gross", 0)
 
-    # Check if fit_taxable_wages is explicitly provided
+    # Check if fit_taxable_wages is explicitly provided and valid
+    # (0 or None means we need to calculate it from gross - pretax deductions)
     fit_taxable_explicit = ytd.get("fit_taxable_wages")
-    if fit_taxable_explicit is not None:
+    if fit_taxable_explicit:  # truthy = not None and not 0
         fit_taxable = fit_taxable_explicit
     else:
         # Calculate from gross minus pretax deductions
@@ -413,16 +414,26 @@ def generate_w2(
         stub_id = latest_stub_record.get("id", "unknown")
         pay_date_str = latest_stub.get("pay_date", "")
 
-        # Check if year complete (December stub) OR this is a past employer (not the most recent)
+        # Check if year complete (December stub) OR this is a past employer
         is_current_employer = (employer_key == most_recent_employer)
-        year_complete = False
+        is_december = False
+        days_remaining = 0
         if pay_date_str:
             pay_date = datetime.strptime(pay_date_str, "%Y-%m-%d")
-            year_complete = pay_date.month == 12
+            year_end = datetime(int(year), 12, 31)
+            days_remaining = (year_end - pay_date).days
+            is_december = pay_date.month == 12
 
-        # Past employers: use final stub as-is (no projection needed)
-        # Current employer with December stub: use it
-        if year_complete or not is_current_employer:
+        # Decide whether to use stub as-is or project:
+        # - Past employers: always use final stub as-is
+        # - Current employer in December: use as-is unless allow_projection AND days remaining
+        # - Current employer before December: must project (if allowed)
+        use_stub_as_is = (
+            not is_current_employer or  # Past employer
+            (is_december and (not allow_projection or days_remaining <= 0))  # December, no projection needed/wanted
+        )
+
+        if use_stub_as_is:
             # Generate from stub
             w2_result = stub_to_w2(
                 stub=latest_stub,
@@ -532,25 +543,24 @@ def generate_w2_with_projection(
     Returns:
         dict with ytd_w2, and optionally projected_additional and projected_w2
     """
-    # Get base W-2 data
-    w2_data = generate_w2_from_analysis(
+    # Get base W-2 data using the new generate_w2 function
+    w2_data = generate_w2(
         year=year,
         party=party,
-        final_stub_date=final_stub_date,
-        employer_filter=employer_filter,
-        data_dir=data_dir,
+        allow_projection=False,  # We handle projection separately below
     )
 
-    date_range = w2_data.get("analysis_date_range", {})
-    form = w2_data["forms"][0]
-    ytd_w2 = form["data"]
+    # Extract aggregated W-2 data
+    ytd_w2 = w2_data["w2"]
+    employer = ", ".join(e["employer"] for e in w2_data.get("employers", []))
+    date_range = {}  # Date range now tracked per-employer in w2_data["employers"]
 
     result = {
         "year": year,
         "party": party,
         "date_range": date_range,
-        "source_file": form["source_file"],
-        "employer": form["employer"],
+        "sources": w2_data.get("sources", []),
+        "employer": employer,
         "ytd_w2": ytd_w2,
     }
 
