@@ -80,8 +80,15 @@ def validate_stub_for_w2(
         errors.append("Missing Medicare tax withheld")
 
     # Warning: No 401k deduction (unusual but not error)
-    deductions = stub.get("deductions", {})
-    pretax_401k = deductions.get("401k_pretax", 0)
+    deductions = stub.get("deductions", [])
+    pretax_401k = 0
+    if isinstance(deductions, list):
+        for ded in deductions:
+            if "401" in ded.get("type", "").lower() or "k pretax" in ded.get("type", "").lower():
+                pretax_401k = ded.get("ytd_amount", 0)
+                break
+    elif isinstance(deductions, dict):
+        pretax_401k = deductions.get("401k_pretax", 0)
     if not pretax_401k and ytd_gross and ytd_gross > 50000:
         warnings.append("No 401k deduction found (unusual for high earners)")
 
@@ -188,7 +195,15 @@ def stub_to_w2(
     ss_withheld = taxes.get("social_security", {}).get("ytd_withheld", 0)
 
     # Box 5: Medicare wages and tips
-    medicare_wages = ytd_gross
+    # Subtract pretax health insurance (dental, medical, vision) from gross
+    health_insurance_ytd = 0
+    deductions = stub.get("deductions", [])
+    if isinstance(deductions, list):
+        for ded in deductions:
+            ded_type = ded.get("type", "").lower()
+            if any(t in ded_type for t in ["dental", "medical", "vision"]):
+                health_insurance_ytd += ded.get("ytd_amount", 0)
+    medicare_wages = ytd_gross - health_insurance_ytd
 
     # Box 6: Medicare tax withheld
     medicare_withheld = taxes.get("medicare", {}).get("ytd_withheld", 0)
