@@ -135,7 +135,7 @@ def generate_projection(
     Returns:
         Dictionary with all projection data including data_sources metadata
     """
-    from .config import get_data_path
+    from .config import get_data_path, get_setting
 
     if data_dir is None:
         data_dir = get_data_path()
@@ -201,8 +201,16 @@ def generate_projection(
     if ss_tax_rate is None:
         ss_tax_rate = 0.062
         ss_defaults_used.append(f"SS tax rate defaulted to 6.2% - add social_security.tax_rate to tax-rules/{year}.yaml")
-    him_ss_overpayment = calculate_ss_overpayment(him_ss_withheld, ss_wage_cap, ss_tax_rate)
-    her_ss_overpayment = calculate_ss_overpayment(her_ss_withheld, ss_wage_cap, ss_tax_rate)
+
+    # Check if SS overpayment is disabled (for debugging)
+    disable_ss_overpayment = get_setting("disable_ss_overpayment", False)
+    if disable_ss_overpayment:
+        ss_defaults_used.append("SS overpayment calculation disabled via settings.json (disable_ss_overpayment: true)")
+        him_ss_overpayment = 0.0
+        her_ss_overpayment = 0.0
+    else:
+        him_ss_overpayment = calculate_ss_overpayment(him_ss_withheld, ss_wage_cap, ss_tax_rate)
+        her_ss_overpayment = calculate_ss_overpayment(her_ss_withheld, ss_wage_cap, ss_tax_rate)
     total_ss_overpayment = him_ss_overpayment + her_ss_overpayment
 
     tentative_tax_per_return = federal_income_tax_assessed + (-medicare_refund)
