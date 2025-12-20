@@ -278,7 +278,78 @@ pay-calc profile export ~/repos/my-config/pay-calc/profile.yaml --set-path
 - `docs/` - Additional documentation
   - [paystubs.md](docs/paystubs.md) - Pay stub quirks and validation
 
+## Assumptions and Limitations
+
+### Scale and Performance
+
+This tool is designed for **individual/household use** with the following assumptions:
+
+**Expected scale (10-year usage):**
+- ~50-60 records per year (pay stubs + W-2s + Form 1040)
+- ~600 total records over 10 years
+- Performance: <0.1 second for all operations
+
+**Tracking overhead depends on Drive folder organization:**
+- **Clean folders** (recommended): ~10-100 tracking files
+- **Mixed folders** (common): ~500 tracking files
+- **Messy folders** (discouraged): ~2,000-5,000 tracking files
+
+All scenarios perform well (<1 second response time). See [DESIGN.md](DESIGN.md) for detailed projections.
+
+### Drive Folder Organization
+
+**Best practices for `profile.yaml` configuration:**
+
+✅ **Recommended**: Point to dedicated, organized folders
+```yaml
+drive:
+  pay_records:
+    - id: "abc123"
+      comment: "2024 W-2 Pay Records (in 2024 Income Taxes folder)"
+    - id: "def456"
+      comment: "2025 W-2 Pay Records (in 2025 Income Taxes folder)"
+```
+
+⚠️ **Acceptable**: Year-specific folders with some unrelated files
+```yaml
+drive:
+  pay_records:
+    - id: "ghi789"
+      comment: "2024 Tax Documents (mixed - has receipts, returns, etc.)"
+```
+
+❌ **Discouraged**: Entire Drive or very broad "Documents" folders
+- Creates many tracking files (one per unrelated file)
+- First import slower (must check all files)
+- Subsequent imports still fast (tracking prevents re-downloads)
+
+**What happens with messy folders:**
+The tool still works correctly, it just creates more tracking files to remember which files are not pay-related. If you point to your entire Drive and have 10,000 files, the tool will create ~10,000 tracking records. Performance remains acceptable (<1 second), but consider using more targeted folders.
+
+### Supported Use Cases
+
+✅ **Designed for:**
+- Individual or household (1-2 parties)
+- W-2 employment income
+- 10-50 years of historical data
+- Single-user access (no concurrent imports)
+
+❌ **Not designed for:**
+- Business payroll processing (hundreds of employees)
+- Real-time multi-user access
+- Non-W-2 income (1099, Schedule C) - may work but not tested
+
+### Technical Limitations
+
+- **Storage**: Individual JSON files in flat directory structure
+- **Performance**: Optimized for <10,000 total files
+- **Concurrency**: Single-user, no file locking
+- **Git-friendly**: All data stored as human-readable JSON
+
+If your use case exceeds these assumptions, see [DESIGN.md](DESIGN.md) for migration options (SQLite, JSONL, separate data repo).
+
 ## Dependencies
+
 
 - Python 3.x
 - PyPDF2 - For PDF text extraction

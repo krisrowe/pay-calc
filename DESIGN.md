@@ -61,6 +61,144 @@ records/
 
 **Migration:** Used `git mv` to preserve file history (105 files moved).
 
+## Scale Projections and Assumptions
+
+### 10-Year Usage Projection
+
+**Assumptions:**
+- 2 parties (e.g., household members with W-2 employment)
+- Biweekly pay schedule (26 pay periods per year)
+- 2 employers per party on average (job changes, multiple concurrent jobs)
+- Annual W-2s from each employer
+- Annual Form 1040 (joint filing)
+- Drive folder contains mix of relevant and unrelated files
+
+**Expected Record Growth:**
+
+| Category | Per Year | 10 Years | Notes |
+|----------|----------|----------|-------|
+| **Pay stubs** | 52 | 520 | 26 per party × 2 parties |
+| **W-2s** | 4 | 40 | 2 per party × 2 parties |
+| **Form 1040** | 1 | 10 | Joint filing |
+| **Amended returns** | 0.2 | 2 | Occasional 1040-X |
+| **Quarterly estimates** | 0 | 0 | Not tracked (paper vouchers) |
+| **TOTAL RECORDS** | **57** | **572** | Core financial records |
+
+**Tracking File Growth (Wildcard):**
+
+| Scenario | Files/Year | 10 Years | Description |
+|----------|------------|----------|-------------|
+| **Clean folders** | 10 | 100 | User maintains organized Drive folders |
+| **Mixed folders** | 50 | 500 | Some unrelated PDFs in tax folders |
+| **Messy folders** | 200 | 2,000 | User dumps all documents in one folder |
+| **Extreme case** | 500 | 5,000 | Entire Drive scanned, many unrelated files |
+
+**Total File Projections:**
+
+| Scenario | 10-Year Total | Performance | Recommendation |
+|----------|---------------|-------------|----------------|
+| **Clean** | 672 | 0.02s | Current approach perfect |
+| **Mixed** | 1,072 | 0.03s | Current approach fine |
+| **Messy** | 2,572 | 0.08s | Consider JSONL for tracking |
+| **Extreme** | 5,572 | 0.17s | Migrate tracking to SQLite |
+
+### Drive Folder Organization Assumptions
+
+**Expected user behavior:**
+
+1. **Dedicated tax folders** (recommended)
+   ```
+   Drive/
+   ├── 2024 Income Taxes/
+   │   ├── Pay Stubs/
+   │   └── W-2s/
+   └── 2025 Income Taxes/
+       └── Pay Stubs/
+   ```
+   - **Tracking overhead**: Low (~10 files/year)
+   - **Import efficiency**: High (most files relevant)
+
+2. **Mixed tax folders** (common)
+   ```
+   Drive/
+   └── 2024 Income Taxes/
+       ├── Pay Stubs/
+       ├── W-2s/
+       ├── Tax Return.pdf
+       ├── Receipts/
+       └── Random Documents/
+   ```
+   - **Tracking overhead**: Medium (~50 files/year)
+   - **Import efficiency**: Medium (50% relevant)
+
+3. **Catch-all folders** (discouraged but supported)
+   ```
+   Drive/
+   └── Documents/
+       ├── Pay Stub 2024-01-15.pdf
+       ├── Vacation Photos.jpg
+       ├── Resume.docx
+       └── ... (thousands of files)
+   ```
+   - **Tracking overhead**: High (200+ files/year)
+   - **Import efficiency**: Low (<10% relevant)
+
+**Design decisions based on assumptions:**
+
+- **File-level deduplication**: Prevents re-downloading unrelated files
+- **Tracking records**: Remember discarded files to skip on re-import
+- **Configurable sources**: Users can target specific folders to reduce noise
+- **Graceful degradation**: Performance acceptable even in messy folder scenarios
+
+### Configuration Guidance for Users
+
+**Recommended `profile.yaml` setup:**
+
+```yaml
+drive:
+  pay_records:
+    # GOOD: Specific, organized folders
+    - id: "1abc..."
+      comment: "2024 W-2 Pay Records (in 2024 Income Taxes)"
+    - id: "2def..."
+      comment: "2025 W-2 Pay Records (in 2025 Income Taxes)"
+    
+    # ACCEPTABLE: Year-specific folders with some unrelated files
+    - id: "3ghi..."
+      comment: "2024 Tax Documents (mixed)"
+    
+    # DISCOURAGED: Entire Drive or very broad folders
+    # - id: "4jkl..."
+    #   comment: "All Documents" (will create many tracking files)
+```
+
+**Best practices:**
+- Create dedicated folders for pay stubs and W-2s
+- One folder per tax year
+- Avoid pointing to entire Drive or "Documents" folders
+- Use folder comments to document purpose
+
+**What happens with messy folders:**
+- Tool still works, just creates more tracking files
+- First import slower (must check all files)
+- Subsequent imports fast (tracking prevents re-downloads)
+- Consider migrating tracking to JSONL or SQLite if >5,000 tracked files
+
+### Performance at Scale
+
+**Current architecture handles:**
+- ✅ 572 records (10-year clean scenario): 0.02s
+- ✅ 2,572 files (10-year messy scenario): 0.08s
+- ✅ 5,572 files (10-year extreme scenario): 0.17s
+
+**All well within acceptable CLI response times (<1 second).**
+
+**When to reconsider architecture:**
+- Tracking files exceed 10,000 (extremely messy Drive usage)
+- Need to support 50+ years of historical data
+- Multi-user concurrent access required
+
+
 ## Import Tracking: Individual Files vs Single Database
 
 **Decision:** Use individual JSON files in `_tracking/` directory.
@@ -397,4 +535,62 @@ Benchmarks for "check if file is tracked" operation:
 | SQLite | 0.1ms | 0.1ms | 0.1ms |
 
 **Conclusion:** SQLite wins at scale, but current approach is fine for < 10k files.
+
+## Rejected Optimization Ideas
+
+This section documents optimization ideas that were considered but rejected, with rationale.
+
+### Header Comments for Faster Parsing
+
+**Idea:** Add parseable comment header to each JSON file for metadata:
+```json
+# TYPE=stub YEAR=2024 PARTY=him
+{
+  "meta": {...},
+  "data": {...}
+}
+```
+
+**Potential benefit:**
+- Could scan files without parsing JSON (grep/awk)
+- Marginal speed improvement (~0.2ms per file)
+
+**Why rejected:**
+- ❌ Not valid JSON (breaks standard tools like `jq`)
+- ❌ Duplication (header + `meta` object must stay in sync)
+- ❌ Minimal performance gain (200ms for 10,000 files)
+- ❌ Adds complexity for negligible benefit
+
+**Alternatives considered:**
+- **Sidecar index files**: Separate `.index` files with metadata
+  - Rejected: More files to manage, sync issues
+- **SQLite indexes**: Separate database for fast lookups
+  - Acceptable for >10k files, but not needed yet
+
+**Decision:** Keep pure JSON files. Python's JSON parser is fast enough.
+
+### JSONL (JSON Lines) for Records
+
+**Idea:** Store all records in a single `records.jsonl` file:
+```jsonl
+{"id": "abc", "meta": {...}, "data": {...}}
+{"id": "def", "meta": {...}, "data": {...}}
+```
+
+**Potential benefit:**
+- Append-only (no file rewrites)
+- Fewer files (1 vs 1,000)
+
+**Why rejected for records:**
+- ❌ Terrible for git (entire file changes on every import)
+- ❌ No individual file history (can't see when specific stub changed)
+- ❌ Harder to inspect/edit individual records
+- ❌ Corruption affects all records, not just one
+
+**Where JSONL makes sense:**
+- ✅ Tracking files (append-heavy, don't need git history)
+- See "Alternative Data Management Approaches" section
+
+**Decision:** Keep individual JSON files for records. Consider JSONL for tracking if it grows beyond 5,000 entries.
+
 
