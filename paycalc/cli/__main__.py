@@ -303,7 +303,19 @@ def _format_tax_projection_text(proj: dict) -> str:
     return "\n".join(lines)
 
 
-@cli.command("taxes")
+@cli.group("tax")
+def tax_group():
+    """Tax projection and validation commands.
+
+    \b
+    Commands:
+      projection  Calculate tax liability from W-2 data
+      validate    Compare projection against actual Form 1040
+    """
+    pass
+
+
+@tax_group.command("projection")
 @click.argument("year")
 @click.option("--format", "output_format", type=click.Choice(["text", "json", "csv"]), default="text",
               help="Output format (default: text)")
@@ -311,7 +323,7 @@ def _format_tax_projection_text(proj: dict) -> str:
               help="Directory containing W-2 or analysis JSON files (default: XDG data dir)")
 @click.option("--allow-projection", is_flag=True,
               help="Allow income projection for employers with incomplete stub data")
-def taxes(year, output_format, data_dir, allow_projection):
+def tax_projection(year, output_format, data_dir, allow_projection):
     """Calculate federal tax liability and refund/owed amount.
 
     Loads income data for both parties (him + her), applies tax brackets,
@@ -330,7 +342,7 @@ def taxes(year, output_format, data_dir, allow_projection):
       --format=json  JSON object (for programmatic use)
       --format=csv   CSV format (for spreadsheet import)
 
-    Redirect output to file: pay-calc taxes 2025 --format=csv > taxes.csv
+    Redirect output to file: pay-calc tax projection 2025 --format=csv > taxes.csv
     """
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
@@ -374,6 +386,133 @@ def taxes(year, output_format, data_dir, allow_projection):
         raise click.ClickException(str(e))
     except Exception as e:
         raise click.ClickException(f"Error generating tax calculation: {e}")
+
+
+def _format_reconciliation_text(result: dict) -> str:
+    """Format tax reconciliation as ASCII table for terminal display."""
+    lines = []
+    summary = result["summary"]
+    comparisons = result["comparisons"]
+    gaps = result["gaps"]
+    year = result["projection"]["year"]
+
+    # Header
+    lines.append(f"TAX VALIDATION FOR {year}")
+    lines.append("=" * 70)
+    lines.append("")
+
+    # Summary
+    if summary.get("status") == "no_1040":
+        lines.append(f"⚠ {summary.get('message', 'No Form 1040 found')}")
+        lines.append("")
+        lines.append("Run 'pay-calc tax projection YEAR' to see calculated values.")
+        return "\n".join(lines)
+
+    # Line-by-line comparison table
+    lines.append(f"{'Line Item':<35} {'Calculated':>14} {'Actual':>14} {'Δ':>10} {'Status':<6}")
+    lines.append("-" * 70)
+
+    for comp in comparisons:
+        calc = comp["calculated"]
+        actual = comp["actual"]
+        delta = comp["delta"]
+        match = comp["match"]
+
+        calc_str = f"${calc:,.2f}" if calc != 0 else "$0.00"
+        actual_str = f"${actual:,.2f}" if actual != 0 else "$0.00"
+
+        if match:
+            delta_str = "—"
+            status = "✓"
+        else:
+            delta_str = f"${delta:+,.0f}"
+            status = "✗"
+
+        lines.append(f"{comp['line']:<35} {calc_str:>14} {actual_str:>14} {delta_str:>10} {status:<6}")
+
+    lines.append("-" * 70)
+    lines.append("")
+
+    # Gaps section
+    if gaps:
+        lines.append("ITEMS NOT TRACKED BY PAY-CALC")
+        lines.append("-" * 40)
+        for gap in gaps:
+            amount = gap.get("amount", 0)
+            sign = "-" if amount < 0 else "+"
+            lines.append(f"  {gap['item']:<30} {sign}${abs(amount):>10,.2f}  (Line {gap['line']})")
+        lines.append("")
+
+    # Final summary
+    lines.append("SUMMARY")
+    lines.append("-" * 40)
+    lines.append(f"  Calculated refund:    ${summary['calculated_refund']:>12,.2f}")
+    lines.append(f"  Actual refund:        ${summary['actual_refund']:>12,.2f}")
+    lines.append(f"  Gap:                  ${summary['gap']:>+12,.2f}")
+    lines.append(f"  Gap %:                {summary['gap_pct']:>12.1f}%")
+    lines.append("")
+
+    if summary["untracked_income"] != 0:
+        lines.append(f"  Untracked income:     ${summary['untracked_income']:>+12,.2f}")
+    if summary["untracked_credits"] > 0:
+        lines.append(f"  Untracked credits:    ${summary['untracked_credits']:>12,.2f}")
+    if summary["untracked_payments"] > 0:
+        lines.append(f"  Untracked payments:   ${summary['untracked_payments']:>12,.2f}")
+
+    return "\n".join(lines)
+
+
+@tax_group.command("validate")
+@click.argument("year")
+@click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text",
+              help="Output format (default: text)")
+@click.option("--data-dir", type=click.Path(exists=True),
+              help="Directory containing data (default: XDG data dir)")
+def tax_validate(year, output_format, data_dir):
+    """Compare tax projection against actual Form 1040.
+
+    Loads the calculated tax projection and compares it line-by-line
+    against the imported Form 1040 for the same year. Identifies gaps
+    between what pay-calc tracks and what appears on the actual return.
+
+    \b
+    Prerequisites:
+    1. Import pay stubs: pay-calc records import
+    2. Import Form 1040: Copy form_1040_YYYY.json to data/records/
+
+    \b
+    Output shows:
+    - Line-by-line comparison (calculated vs actual)
+    - Items not tracked by pay-calc (credits, other income, etc.)
+    - Summary with gap analysis
+    """
+    if not year.isdigit() or len(year) != 4:
+        raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
+
+    from paycalc.sdk import reconcile_tax_return, get_data_path
+
+    data_path = Path(data_dir) if data_dir else get_data_path()
+
+    try:
+        result = reconcile_tax_return(year, data_dir=data_path)
+
+        if output_format == "json":
+            # Remove form_1040 from output to avoid huge JSON dump
+            output = {
+                "year": year,
+                "summary": result["summary"],
+                "comparisons": result["comparisons"],
+                "gaps": result["gaps"],
+            }
+            click.echo(json.dumps(output, indent=2))
+        else:
+            click.echo(_format_reconciliation_text(result))
+
+    except ValueError as e:
+        # Missing 1040 or W-2 records - exit 1 with clear message
+        raise click.ClickException(str(e))
+    except FileNotFoundError as e:
+        raise click.ClickException(str(e))
 
 
 @cli.command("w2-generate")

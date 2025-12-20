@@ -443,6 +443,328 @@ def generate_tax_projection(
     return projection
 
 
+def load_form_1040(year: str, data_dir: Optional[Path] = None) -> Optional[dict]:
+    """Load Form 1040 JSON for a given year if it exists.
+
+    Searches for form_1040_{year}.json in the records directory.
+
+    Args:
+        year: Tax year (4 digits)
+        data_dir: Directory containing records. Defaults to XDG data path.
+
+    Returns:
+        Parsed 1040 JSON or None if not found
+    """
+    from .config import get_data_path
+
+    if data_dir is None:
+        data_dir = get_data_path()
+
+    # Look for 1040 in records directory
+    form_path = data_dir / "records" / f"form_1040_{year}.json"
+    if form_path.exists():
+        with open(form_path) as f:
+            return json.load(f)
+
+    return None
+
+
+def reconcile_tax_return(
+    year: str,
+    data_dir: Optional[Path] = None,
+) -> dict:
+    """Reconcile pay-calc tax projection against actual Form 1040.
+
+    Compares computed values against actual 1040 line items and identifies
+    gaps between pay-calc calculations and the official tax return.
+
+    Prerequisites:
+    - Form 1040 must exist for the year
+    - Official W-2 records must exist for all parties listed in the 1040
+    - Stub-generated or projected W-2 data is NOT acceptable
+
+    Args:
+        year: Tax year (4 digits)
+        data_dir: Directory containing data. Defaults to XDG data path.
+
+    Returns:
+        dict with:
+        - projection: The full tax projection (or None if validation failed)
+        - form_1040: The loaded 1040 data (or None)
+        - comparisons: List of line-item comparisons
+        - summary: Overall reconciliation status
+        - gaps: Items in 1040 not tracked by pay-calc
+
+    Raises:
+        ValueError: If Form 1040 is missing or W-2 records are insufficient
+    """
+    from .config import get_data_path
+    from .records import list_records
+
+    if data_dir is None:
+        data_dir = get_data_path()
+
+    # Load actual 1040 FIRST
+    form_1040 = load_form_1040(year, data_dir)
+
+    if form_1040 is None:
+        raise ValueError(
+            f"No Form 1040 found for {year}.\n"
+            f"Import with: pay-calc records import <file>"
+        )
+
+    # Check we have at least some W-2 records for this year
+    # NOTE: The 1040 only has combined totals (Line 1a = sum of all W-2s).
+    # We cannot detect which parties SHOULD have W-2s from the 1040 alone.
+    # We just verify we have some W-2 records and they're all official.
+    all_w2_records = list_records(year=year, type_filter="w2")
+
+    if not all_w2_records:
+        raise ValueError(
+            f"No W-2 records found for {year}.\n"
+            f"Import W-2s with: pay-calc records import <file>"
+        )
+
+    # Generate projection (will use official W-2 records)
+    projection = generate_projection(
+        year,
+        data_dir,
+        allow_projection=False,  # Never allow projection for validation
+        stock_price=None,
+    )
+
+    # Verify all data sources are official W-2s (not stub-generated)
+    non_official_sources = []
+    data_sources = projection.get("data_sources", {})
+    for party_key, party_info in data_sources.items():
+        for source in party_info.get("sources", []):
+            if "official W-2" not in source:
+                non_official_sources.append(f"{party_key}: {source}")
+
+    if non_official_sources:
+        sources_list = "\n  ".join(non_official_sources)
+        raise ValueError(
+            f"W-2 validation requires official W-2 records only.\n"
+            f"Non-official sources found:\n"
+            f"  {sources_list}\n"
+            f"Import official W-2s with: pay-calc records import <file>"
+        )
+
+    # Build line-item comparisons
+    comparisons = []
+    gaps = []
+
+    def compare(label: str, calc_value: float, actual_value: float, tolerance: float = 1.0, notes: str = "") -> dict:
+        """Compare calculated vs actual value."""
+        delta = calc_value - actual_value
+        match = abs(delta) <= tolerance
+        return {
+            "line": label,
+            "calculated": calc_value,
+            "actual": actual_value,
+            "delta": delta,
+            "match": match,
+            "notes": notes,
+        }
+
+    income = form_1040.get("income", {})
+    deductions = form_1040.get("deductions", {})
+    tax_credits = form_1040.get("tax_and_credits", {})
+    payments = form_1040.get("payments", {})
+    refund_owed = form_1040.get("refund_or_owed", {})
+    schedule_2 = form_1040.get("schedule_2", {})
+    schedule_3 = form_1040.get("schedule_3", {})
+
+    # Core income comparison
+    comparisons.append(compare(
+        "Wages (Line 1a)",
+        projection["combined_wages"],
+        income.get("line_1a_wages", 0),
+    ))
+
+    # Check for non-wage income (gaps)
+    if income.get("line_2b_taxable_interest", 0) > 0:
+        gaps.append({
+            "item": "Interest income",
+            "line": "2b",
+            "amount": income["line_2b_taxable_interest"],
+        })
+    if income.get("line_3b_ordinary_dividends", 0) > 0:
+        gaps.append({
+            "item": "Dividends",
+            "line": "3b",
+            "amount": income["line_3b_ordinary_dividends"],
+        })
+    if income.get("line_7_capital_gain_loss", 0) != 0:
+        gaps.append({
+            "item": "Capital gain/loss",
+            "line": "7",
+            "amount": income["line_7_capital_gain_loss"],
+        })
+    if income.get("line_8_schedule_1_income", 0) > 0:
+        gaps.append({
+            "item": "Schedule 1 income",
+            "line": "8",
+            "amount": income["line_8_schedule_1_income"],
+        })
+
+    # Total income comparison
+    comparisons.append(compare(
+        "Total income (Line 9)",
+        projection["combined_wages"],  # pay-calc only tracks wages
+        income.get("line_9_total_income", 0),
+        notes="pay-calc only tracks W-2 wages" if income.get("line_9_total_income", 0) != income.get("line_1a_wages", 0) else "",
+    ))
+
+    # Deductions
+    comparisons.append(compare(
+        "Standard deduction (Line 12a)",
+        projection["standard_deduction"],
+        deductions.get("line_12a_standard_deduction", 0),
+    ))
+
+    # QBI deduction gap
+    if deductions.get("line_13_qbi_deduction", 0) > 0:
+        gaps.append({
+            "item": "QBI deduction",
+            "line": "13",
+            "amount": deductions["line_13_qbi_deduction"],
+        })
+
+    # Taxable income (we need to adjust for gaps)
+    comparisons.append(compare(
+        "Taxable income (Line 15)",
+        projection["final_taxable_income"],
+        deductions.get("line_15_taxable_income", 0),
+        notes="Difference from non-wage income and deductions not tracked",
+    ))
+
+    # Tax calculated
+    comparisons.append(compare(
+        "Tax (Line 16)",
+        projection["federal_income_tax_assessed"],
+        tax_credits.get("line_16_tax", 0),
+        notes="Difference from taxable income gap",
+    ))
+
+    # Credits gap (Schedule 3)
+    part1 = schedule_3.get("part_1", {})
+    if part1.get("line_2_child_care_credit", 0) > 0:
+        gaps.append({
+            "item": "Child care credit",
+            "line": "Schedule 3 Line 2",
+            "amount": part1["line_2_child_care_credit"],
+        })
+    if part1.get("line_8_total", 0) > 0 and part1.get("line_8_total", 0) != part1.get("line_2_child_care_credit", 0):
+        gaps.append({
+            "item": "Other nonrefundable credits",
+            "line": "Schedule 3 Line 8",
+            "amount": part1["line_8_total"],
+        })
+
+    # Schedule 2 - Additional taxes
+    part2 = schedule_2.get("part_2", {})
+    additional_medicare = part2.get("line_6_additional_medicare_tax", 0)
+    # pay-calc calculates this as part of medicare_refund (negative = owed)
+    calc_additional_medicare = max(0, -projection["medicare_refund"]) if projection["medicare_refund"] < 0 else 0
+    # Actually, additional medicare is built into the medicare calc
+    # Let's just note it
+    comparisons.append(compare(
+        "Additional Medicare Tax (Sch 2 Line 6)",
+        max(0, projection["total_medicare_taxes_assessed"] - projection["combined_medicare_wages"] * 0.0145),
+        additional_medicare,
+        tolerance=1.0,
+    ))
+
+    if part2.get("line_7_net_investment_income_tax", 0) > 0:
+        gaps.append({
+            "item": "NIIT (3.8%)",
+            "line": "Schedule 2 Line 7",
+            "amount": part2["line_7_net_investment_income_tax"],
+        })
+    if part2.get("line_18_other_taxes", 0) > 0:
+        gaps.append({
+            "item": "Other taxes (HSA penalty, etc.)",
+            "line": "Schedule 2 Line 18",
+            "amount": part2["line_18_other_taxes"],
+        })
+
+    # Total tax
+    comparisons.append(compare(
+        "Total tax (Line 24)",
+        projection["tentative_tax_per_return"],
+        tax_credits.get("line_24_total_tax", 0),
+        notes="Gap from credits and additional taxes not tracked",
+    ))
+
+    # Payments
+    comparisons.append(compare(
+        "W-2 withholding (Line 25a)",
+        projection["him_fed_withheld"] + projection["her_fed_withheld"],
+        payments.get("line_25a_w2_withholding", 0),
+    ))
+
+    # Form 8959 withholding gap
+    if payments.get("line_25c_other_withholding", 0) > 0:
+        gaps.append({
+            "item": "Form 8959 withholding (Addl Medicare)",
+            "line": "25c",
+            "amount": payments["line_25c_other_withholding"],
+            "notes": "Not credited as payment in pay-calc",
+        })
+
+    comparisons.append(compare(
+        "Total payments (Line 33)",
+        projection["him_fed_withheld"] + projection["her_fed_withheld"] + projection["total_ss_overpayment"],
+        payments.get("line_33_total_payments", 0),
+        notes="pay-calc doesn't include Form 8959 withholding",
+    ))
+
+    # Final refund/owed
+    actual_refund = refund_owed.get("line_34_overpaid", 0)
+    if actual_refund == 0:
+        actual_refund = -refund_owed.get("line_37_owed", 0)
+
+    comparisons.append(compare(
+        "Refund (Line 34/35)",
+        projection["final_refund"],
+        actual_refund,
+        notes="Final reconciliation",
+    ))
+
+    # Calculate summary
+    total_gap = projection["final_refund"] - actual_refund
+    gaps_total = sum(g.get("amount", 0) for g in gaps if g.get("amount", 0) > 0)
+    credits_missed = sum(g.get("amount", 0) for g in gaps if "credit" in g.get("item", "").lower())
+    payments_missed = sum(g.get("amount", 0) for g in gaps if "withholding" in g.get("item", "").lower())
+
+    # Income lines are simple numbers (2b, 3b, 7, 8) not "Schedule X Line Y"
+    income_lines = ["2b", "3b", "7", "8", "13"]  # Include QBI deduction as it affects income
+    untracked_income = sum(
+        g.get("amount", 0) for g in gaps
+        if g.get("line", "") in income_lines
+    )
+
+    summary = {
+        "status": "reconciled" if abs(total_gap) < 1.0 else "gap",
+        "calculated_refund": projection["final_refund"],
+        "actual_refund": actual_refund,
+        "gap": total_gap,
+        "gap_pct": abs(total_gap) / max(actual_refund, 1) * 100 if actual_refund else 0,
+        "untracked_income": untracked_income,
+        "untracked_credits": credits_missed,
+        "untracked_payments": payments_missed,
+    }
+
+    return {
+        "projection": projection,
+        "form_1040": form_1040,
+        "comparisons": comparisons,
+        "summary": summary,
+        "gaps": gaps,
+    }
+
+
 def generate_tax_projection_file(
     year: str,
     data_dir: Optional[Path] = None,

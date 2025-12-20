@@ -267,15 +267,27 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
         if rec_type == "discarded":
             grp_key = ("_discarded", "")
         else:
-            data = rec.get("data", {})
-            if rec_type == "stub":
-                rec_year = data.get("pay_date", "")[:4] or "unknown"
-            elif rec_type in ("w2", "form_1040"):
-                rec_year = str(data.get("tax_year", "unknown"))
+            # Extract year from meta (primary) or data (fallback)
+            meta_year = meta.get("year")
+            if meta_year:
+                rec_year = str(meta_year)
             else:
-                rec_year = "unknown"
-            rec_party = meta.get("party", "unknown")
-            grp_key = (rec_year, rec_party)
+                # Fallback: extract from data for records without meta.year
+                data = rec.get("data", {})
+                if rec_type == "stub":
+                    rec_year = data.get("pay_date", "")[:4] or "unknown"
+                elif rec_type in ("w2", "form_1040"):
+                    rec_year = str(data.get("tax_year", "unknown"))
+                else:
+                    rec_year = "unknown"
+            
+            # Group by party if present, otherwise by record type
+            rec_party = meta.get("party")
+            if rec_party:
+                grp_key = (rec_year, rec_party)
+            else:
+                # No party = group by type (e.g., form_1040 is joint filing)
+                grp_key = (rec_year, f"_{rec_type}")
 
         by_group.setdefault(grp_key, []).append((rec, rec_type))
 
@@ -286,6 +298,10 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
     for (grp_year, grp_party), grp_records in sorted(by_group.items()):
         if grp_year == "_discarded":
             header = "Discarded"
+        elif grp_party.startswith("_"):
+            # Type-based grouping (no party) - show friendly type name
+            type_name = grp_party[1:].replace("_", " ").title()  # "_form_1040" -> "Form 1040"
+            header = f"{type_name} ({grp_year})" if show_year_in_header else type_name
         elif show_year_in_header:
             header = f"{grp_year}/{grp_party}"
         else:
