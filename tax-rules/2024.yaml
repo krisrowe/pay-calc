@@ -10,6 +10,10 @@ mfj:
     - { over: 731200, rate: 0.37 }
 additional_medicare_tax_threshold: 250000.00
 
+social_security:
+  wage_cap: 168600.00
+  tax_rate: 0.062
+
 401k:
   employee_elective_limit: 23000    # Pre-tax + Roth employee contributions
   total_annual_limit: 69000         # Employee + employer total

@@ -249,6 +249,22 @@ def _format_tax_projection_text(proj: dict) -> str:
     lines.append(f"  {medicare_label:<25} ${proj['medicare_refund']:>12,.2f}")
     lines.append("")
 
+    # SS overpayment section (only show if there's overpayment)
+    total_ss_overpayment = proj.get("total_ss_overpayment", 0)
+    if total_ss_overpayment > 0:
+        lines.append("SOCIAL SECURITY OVERPAYMENT")
+        lines.append("-" * 40)
+        him_ss_overpayment = proj.get('him_ss_overpayment', 0)
+        her_ss_overpayment = proj.get('her_ss_overpayment', 0)
+        if him_ss_overpayment > 0:
+            lines.append(f"  Party 1 SS withheld:       ${proj.get('him_ss_withheld', 0):>12,.2f}")
+            lines.append(f"  Party 1 SS overpayment:    ${him_ss_overpayment:>12,.2f}")
+        if her_ss_overpayment > 0:
+            lines.append(f"  Party 2 SS withheld:       ${proj.get('her_ss_withheld', 0):>12,.2f}")
+            lines.append(f"  Party 2 SS overpayment:    ${her_ss_overpayment:>12,.2f}")
+        lines.append(f"  Total SS credit:           ${total_ss_overpayment:>12,.2f}")
+        lines.append("")
+
     # Withholding section
     lines.append("WITHHOLDING")
     lines.append("-" * 40)
@@ -263,6 +279,8 @@ def _format_tax_projection_text(proj: dict) -> str:
     lines.append("-" * 40)
     lines.append(f"  Federal income tax:       -${proj['federal_income_tax_assessed']:>12,.2f}")
     lines.append(f"  Medicare adjustment:       ${proj['medicare_refund']:>12,.2f}")
+    if total_ss_overpayment > 0:
+        lines.append(f"  SS overpayment credit:     ${total_ss_overpayment:>12,.2f}")
     lines.append(f"  Tentative tax:            -${proj['tentative_tax_per_return']:>12,.2f}")
     lines.append(f"  Total withheld:            ${total_withheld:>12,.2f}")
     lines.append("  " + "=" * 38)

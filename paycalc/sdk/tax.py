@@ -53,6 +53,24 @@ def calculate_additional_medicare_tax(total_medicare_wages: float, threshold: fl
     return excess_medicare_wages * 0.009
 
 
+def calculate_ss_overpayment(ss_tax_withheld: float, ss_wage_cap: float, ss_tax_rate: float) -> float:
+    """Calculate SS tax overpayment for a single taxpayer.
+
+    When someone has multiple employers, each employer withholds SS independently.
+    If total SS wages exceed the cap, excess SS tax should be refunded.
+
+    Args:
+        ss_tax_withheld: Total SS tax withheld across all employers
+        ss_wage_cap: Maximum wages subject to SS tax (e.g., $176,100 for 2025)
+        ss_tax_rate: SS tax rate (e.g., 0.062)
+
+    Returns:
+        Excess SS tax paid (credit/refund amount), or 0 if no overpayment
+    """
+    max_ss_tax = ss_wage_cap * ss_tax_rate
+    return max(0, ss_tax_withheld - max_ss_tax)
+
+
 def load_party_w2_data(
     data_dir: Path,
     year: str,
@@ -148,6 +166,8 @@ def generate_projection(
     her_medicare_wages = her_data.get("medicare_wages", her_wages)
     him_medicare_withheld = him_data.get("medicare_tax", 0)
     her_medicare_withheld = her_data.get("medicare_tax", 0)
+    him_ss_withheld = him_data.get("social_security_tax", 0)
+    her_ss_withheld = her_data.get("social_security_tax", 0)
 
     combined_wages = him_wages + her_wages
     combined_medicare_wages = him_medicare_wages + her_medicare_wages
@@ -170,9 +190,25 @@ def generate_projection(
     total_medicare_taxes_assessed = base_medicare_tax + additional_medicare_tax
     medicare_refund = combined_medicare_withheld - total_medicare_taxes_assessed
 
+    # Calculate SS overpayment (when multiple employers cause over-withholding)
+    ss_rules = tax_rules.get("social_security", {})
+    ss_wage_cap = ss_rules.get("wage_cap")
+    ss_tax_rate = ss_rules.get("tax_rate")
+    ss_defaults_used = []
+    if ss_wage_cap is None:
+        ss_wage_cap = 184500  # 2026 default
+        ss_defaults_used.append(f"SS wage cap defaulted to $184,500 (2026) - add social_security.wage_cap to tax-rules/{year}.yaml")
+    if ss_tax_rate is None:
+        ss_tax_rate = 0.062
+        ss_defaults_used.append(f"SS tax rate defaulted to 6.2% - add social_security.tax_rate to tax-rules/{year}.yaml")
+    him_ss_overpayment = calculate_ss_overpayment(him_ss_withheld, ss_wage_cap, ss_tax_rate)
+    her_ss_overpayment = calculate_ss_overpayment(her_ss_withheld, ss_wage_cap, ss_tax_rate)
+    total_ss_overpayment = him_ss_overpayment + her_ss_overpayment
+
     tentative_tax_per_return = federal_income_tax_assessed + (-medicare_refund)
     total_withheld = him_fed_withheld + her_fed_withheld
-    final_refund = total_withheld - tentative_tax_per_return
+    # SS overpayment is a credit that increases refund
+    final_refund = total_withheld - tentative_tax_per_return + total_ss_overpayment
 
     # Build data sources with per-employer details
     data_sources = {
@@ -192,7 +228,7 @@ def generate_projection(
     if her_result.get("projection_warnings"):
         data_sources["her"]["projection_warnings"] = her_result["projection_warnings"]
 
-    return {
+    result = {
         "year": year,
         "him_wages": him_wages,
         "her_wages": her_wages,
@@ -207,10 +243,18 @@ def generate_projection(
         "combined_medicare_withheld": combined_medicare_withheld,
         "total_medicare_taxes_assessed": total_medicare_taxes_assessed,
         "medicare_refund": medicare_refund,
+        "him_ss_withheld": him_ss_withheld,
+        "her_ss_withheld": her_ss_withheld,
+        "him_ss_overpayment": him_ss_overpayment,
+        "her_ss_overpayment": her_ss_overpayment,
+        "total_ss_overpayment": total_ss_overpayment,
         "tentative_tax_per_return": tentative_tax_per_return,
         "final_refund": final_refund,
         "data_sources": data_sources,
     }
+    if ss_defaults_used:
+        result["ss_warnings"] = ss_defaults_used
+    return result
 
 
 def _write_projection_rows(writer, projection: dict) -> None:
