@@ -583,64 +583,60 @@ def list_records(
     records_dir = get_records_dir()
     results = []
 
-    # Determine which directories to scan
-    if year and party:
-        # Specific year/party
-        scan_dirs = [records_dir / year / party]
-    elif year:
-        # All parties for a year
-        year_dir = records_dir / year
-        scan_dirs = [year_dir / p for p in year_dir.iterdir() if p.is_dir()] if year_dir.exists() else []
-    elif party:
-        # All years for a party
-        scan_dirs = []
-        for year_dir in records_dir.iterdir():
-            if year_dir.is_dir() and year_dir.name != "_discarded":
-                party_dir = year_dir / party
-                if party_dir.exists():
-                    scan_dirs.append(party_dir)
-    else:
-        # All records
-        scan_dirs = []
-        for year_dir in records_dir.iterdir():
-            if year_dir.is_dir() and year_dir.name != "_discarded":
-                for party_dir in year_dir.iterdir():
-                    if party_dir.is_dir():
-                        scan_dirs.append(party_dir)
+    # Scan all JSON files in the flat records directory
+    for json_file in records_dir.glob("*.json"):
+        try:
+            with open(json_file) as f:
+                record = json.load(f)
 
-    # Scan directories for JSON files
-    for scan_dir in scan_dirs:
-        if not scan_dir.exists():
-            continue
-        for json_file in scan_dir.glob("*.json"):
-            try:
-                with open(json_file) as f:
-                    record = json.load(f)
+            meta = record.get("meta", {})
+            record_type = meta.get("type")
 
-                meta = record.get("meta", {})
-                record_type = meta.get("type")
+            # Skip tracking records (discarded/unrelated) unless requested
+            if record_type in ("discarded", "unrelated") and not include_discarded:
+                continue
 
-                # Apply type filter
-                if type_filter and record_type != type_filter:
+            # Apply type filter
+            if type_filter and record_type != type_filter:
+                continue
+
+            # Apply year filter (check both meta.year and data fields)
+            if year:
+                meta_year = str(meta.get("year", ""))
+                data = record.get("data", {})
+                # For stubs: extract year from pay_date
+                # For W-2s: use tax_year
+                # For Form 1040: use tax_year
+                data_year = ""
+                if record_type == "stub":
+                    pay_date = data.get("pay_date", "")
+                    data_year = pay_date[:4] if pay_date else ""
+                elif record_type in ("w2", "form_1040"):
+                    data_year = str(data.get("tax_year", ""))
+                
+                # Match if either meta.year or derived year matches
+                if meta_year != year and data_year != year:
                     continue
 
-                # Skip tracking records (discarded/unrelated) unless requested
-                if record_type in ("discarded", "unrelated") and not include_discarded:
+            # Apply party filter
+            if party:
+                meta_party = meta.get("party", "")
+                if meta_party != party:
                     continue
 
-                # Add ID and path for convenience
-                record["id"] = json_file.stem
-                record["_path"] = str(json_file)
-                results.append(record)
+            # Add ID and path for convenience
+            record["id"] = json_file.stem
+            record["_path"] = str(json_file)
+            results.append(record)
 
-            except (json.JSONDecodeError, IOError):
-                continue  # Skip invalid files
+        except (json.JSONDecodeError, IOError):
+            continue  # Skip invalid files
 
-    # Also scan discarded if requested
+    # Also scan _tracking if requested
     if include_discarded:
-        discarded_dir = records_dir / "_discarded"
-        if discarded_dir.exists():
-            for json_file in discarded_dir.glob("*.json"):
+        tracking_dir = records_dir / "_tracking"
+        if tracking_dir.exists():
+            for json_file in tracking_dir.glob("*.json"):
                 try:
                     with open(json_file) as f:
                         record = json.load(f)

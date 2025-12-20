@@ -146,6 +146,21 @@ def format_record_row(record: dict, record_type: str, verbose: bool = False) -> 
         else:
             return f"{rec_id:<10} {tax_year:<12} {'w2':<8} {employer:<21} ${wages:>11,.2f}{warn_str}"
 
+    elif record_type == "form_1040":
+        tax_year = str(data.get("tax_year", "unknown"))
+        refund_owed = data.get("refund_or_owed", {})
+        refund = refund_owed.get("line_35a_refund_amount", 0.0)
+        owed = refund_owed.get("line_37_amount_owed", 0.0)
+        
+        if refund > 0:
+            amount_str = f"Refund ${refund:>8,.2f}"
+        elif owed > 0:
+            amount_str = f"Owed ${owed:>10,.2f}"
+        else:
+            amount_str = "Even"
+        
+        return f"{rec_id:<10} {tax_year:<12} {'1040':<8} {'IRS Form 1040':<21} {amount_str}"
+
     elif record_type == "discarded":
         filename = meta.get("source_filename", "unknown")[:30]
         reason = meta.get("discard_reason", "unknown")
@@ -255,8 +270,10 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
             data = rec.get("data", {})
             if rec_type == "stub":
                 rec_year = data.get("pay_date", "")[:4] or "unknown"
-            else:  # w2
+            elif rec_type in ("w2", "form_1040"):
                 rec_year = str(data.get("tax_year", "unknown"))
+            else:
+                rec_year = "unknown"
             rec_party = meta.get("party", "unknown")
             grp_key = (rec_year, rec_party)
 
