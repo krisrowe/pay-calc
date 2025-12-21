@@ -347,7 +347,6 @@ def generate_projection(
         "schedule_1_income": ("income.line_8_schedule_1_income", "tax_years.{year}.schedule_1_income"),
         "qbi_deduction": ("deductions.line_13_qbi_deduction", "tax_years.{year}.qbi_deduction"),
         "child_care_expenses": ("schedule_summaries.form_2441.qualified_expenses", "tax_years.{year}.child_care_expenses"),
-        "niit": ("schedule_2.part_2.line_7_net_investment_income_tax", "tax_years.{year}.niit"),
         "other_taxes": ("schedule_2.part_2.line_18_other_taxes", "tax_years.{year}.other_taxes"),
     }
     supplemental = get_multiple_supplemental_values(year, supplemental_lookups, data_dir)
@@ -476,7 +475,19 @@ def generate_projection(
     child_care_expenses = supplemental["child_care_expenses"].value
     child_care_rate = tax_rules.get("child_care", {}).get("credit_rate", 0.20)
     child_care_credit = child_care_expenses * child_care_rate
-    niit = supplemental["niit"].value
+
+    # NIIT (Net Investment Income Tax) - Form 8960
+    # 3.8% of lesser of: Net Investment Income OR (MAGI - $250k threshold)
+    # For high earners (MAGI >> $250k), this simplifies to 3.8% × NII
+    net_investment_income = (
+        supplemental["interest_income"].value
+        + supplemental["dividend_income"].value
+        + supplemental["short_term_gain_loss"].value
+        + supplemental["long_term_gain_loss"].value
+    )
+    niit_rate = 0.038
+    niit = round(max(0, net_investment_income) * niit_rate)
+
     other_taxes = supplemental["other_taxes"].value
     additional_taxes = niit + other_taxes
 
@@ -555,7 +566,16 @@ def generate_projection(
 
     r_child_care_expenses = r_supplemental["child_care_expenses"]["value"]
     r_child_care_credit = _round_to_dollar(r_child_care_expenses * child_care_rate)
-    r_niit = r_supplemental["niit"]["value"]
+
+    # NIIT calculated from rounded investment income components
+    r_net_investment_income = (
+        r_supplemental["interest_income"]["value"]
+        + r_supplemental["dividend_income"]["value"]
+        + r_supplemental["short_term_gain_loss"]["value"]
+        + r_supplemental["long_term_gain_loss"]["value"]
+    )
+    r_niit = round(max(0, r_net_investment_income) * niit_rate)
+
     r_other_taxes = r_supplemental["other_taxes"]["value"]
     r_additional_taxes = r_niit + r_other_taxes
 
@@ -1229,7 +1249,7 @@ PROJECTION_SUPPLEMENTAL_FIELDS = {
     "schedule_1_income",
     "qbi_deduction",
     "child_care_expenses",
-    "niit",
+    # "niit" - now calculated from investment income components, not a supplemental lookup
     "other_taxes",
 }
 
@@ -1325,7 +1345,7 @@ def projection_to_1040(projection: dict) -> dict:
                 "line_16_tax": projection["federal_income_tax_assessed"],
                 "line_22_schedule_2": (
                     projection["additional_medicare_tax"]
-                    + supp("niit")
+                    + projection["niit"]
                     + supp("other_taxes")
                 ),
                 "line_24_total_tax": projection["tentative_tax_per_return"],
@@ -1348,7 +1368,7 @@ def projection_to_1040(projection: dict) -> dict:
             "schedule_2": {
                 "part_2": {
                     "line_6_additional_medicare_tax": projection["additional_medicare_tax"],
-                    "line_7_net_investment_income_tax": supp("niit"),
+                    "line_7_net_investment_income_tax": projection["niit"],
                     "line_18_other_taxes": supp("other_taxes"),
                 }
             },

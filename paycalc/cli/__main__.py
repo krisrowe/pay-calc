@@ -339,10 +339,10 @@ def _format_tax_projection_text(proj: dict) -> str:
             return f"  ({year} {source})" if year else f"  ({source})"
         return ""
 
-    niit_info = supplemental.get("niit", {})
-    niit = niit_info.get("value", 0)
+    # NIIT is calculated from investment income components, not a supplemental lookup
+    niit = proj.get("niit", 0)
     if niit > 0:
-        lines.append(f"  NIIT (Sched 2 Line 7):    -${niit:>12,.2f}{_get_source_str(niit_info)}")
+        lines.append(f"  NIIT (Sched 2 Line 7):    -${niit:>12,.2f}  (calculated)")
 
     other_info = supplemental.get("other_taxes", {})
     other_taxes = other_info.get("value", 0)
