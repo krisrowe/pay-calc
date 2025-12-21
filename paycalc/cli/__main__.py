@@ -449,7 +449,7 @@ def _format_reconciliation_text(result: dict) -> str:
     lines.append(f"  Calculated refund:    ${summary['calculated_refund']:>12,.2f}")
     lines.append(f"  Actual refund:        ${summary['actual_refund']:>12,.2f}")
     lines.append(f"  Gap:                  ${summary['gap']:>+12,.2f}")
-    lines.append(f"  Gap %:                {summary['gap_pct']:>12.1f}%")
+    lines.append(f"  Gap % of taxable inc: {summary['gap_pct']:>12.4f}%")
     lines.append("")
 
     if summary["untracked_income"] != 0:

@@ -216,12 +216,26 @@ def generate_projection(
         Dictionary with all projection data including data_sources metadata
     """
     from .config import get_data_path, get_setting
+    from .supplemental import get_multiple_supplemental_values
 
     if data_dir is None:
         data_dir = get_data_path()
 
     if tax_rules is None:
         tax_rules = load_tax_rules(year)
+
+    # Get supplemental values (non-wage income, credits, etc.) with source tracking
+    supplemental_lookups = {
+        "interest_income": ("income.line_2b_taxable_interest", "tax_years.{year}.interest_income"),
+        "dividend_income": ("income.line_3b_ordinary_dividends", "tax_years.{year}.dividend_income"),
+        "capital_gain_loss": ("income.line_7_capital_gain_loss", "tax_years.{year}.capital_gain_loss"),
+        "schedule_1_income": ("income.line_8_schedule_1_income", "tax_years.{year}.schedule_1_income"),
+        "qbi_deduction": ("deductions.line_13_qbi_deduction", "tax_years.{year}.qbi_deduction"),
+        "child_care_credit": ("schedule_3.part_1.line_2_child_care_credit", "tax_years.{year}.child_care_credit"),
+        "niit": ("schedule_2.part_2.line_7_net_investment_income_tax", "tax_years.{year}.niit"),
+        "other_taxes": ("schedule_2.part_2.line_18_other_taxes", "tax_years.{year}.other_taxes"),
+    }
+    supplemental = get_multiple_supplemental_values(year, supplemental_lookups, data_dir)
 
     # Load W-2 data for both parties (with source tracking)
     him_result = load_party_w2_data(
@@ -253,9 +267,20 @@ def generate_projection(
     combined_medicare_wages = him_medicare_wages + her_medicare_wages
     combined_medicare_withheld = him_medicare_withheld + her_medicare_withheld
 
+    # Calculate total income including supplemental (non-wage) income
+    non_wage_income = (
+        supplemental["interest_income"].value
+        + supplemental["dividend_income"].value
+        + supplemental["capital_gain_loss"].value  # Can be negative
+        + supplemental["schedule_1_income"].value
+    )
+    total_income = combined_wages + non_wage_income
+
     # Tax rules structure: mfj.standard_deduction, mfj.tax_brackets, additional_medicare_tax_threshold
     standard_deduction = tax_rules["mfj"]["standard_deduction"]
-    final_taxable_income = max(0, combined_wages - standard_deduction)
+    qbi_deduction = supplemental["qbi_deduction"].value
+    total_deductions = standard_deduction + qbi_deduction
+    final_taxable_income = max(0, total_income - total_deductions)
 
     federal_income_tax_assessed = calculate_federal_income_tax(
         final_taxable_income, tax_rules["mfj"]["tax_brackets"]
@@ -299,7 +324,22 @@ def generate_projection(
     her_additional_medicare_withheld = calculate_additional_medicare_withheld(her_medicare_wages, year)
     form_8959_withholding = him_additional_medicare_withheld + her_additional_medicare_withheld
 
-    tentative_tax_per_return = federal_income_tax_assessed + (-medicare_refund)
+    # Credits and additional taxes from supplemental sources
+    child_care_credit = supplemental["child_care_credit"].value
+    niit = supplemental["niit"].value
+    other_taxes = supplemental["other_taxes"].value
+    additional_taxes = niit + other_taxes
+
+    # Calculate total tax (Line 24)
+    # Line 24 = Line 16 (income tax) + Schedule 2 taxes - credits
+    # Note: Base Medicare (1.45%) is payroll tax, not on 1040 Line 24
+    # Only Additional Medicare Tax (0.9% on wages over $250k MFJ) goes to Schedule 2
+    tentative_tax_per_return = (
+        federal_income_tax_assessed          # Line 16
+        + additional_medicare_tax            # Schedule 2 Line 6
+        + additional_taxes                   # NIIT (Line 7) + Other taxes (Line 18)
+        - child_care_credit                  # Schedule 3 credits
+    )
     total_withheld = him_fed_withheld + her_fed_withheld
     # SS overpayment and Form 8959 withholding are credits that increase refund
     final_refund = total_withheld - tentative_tax_per_return + total_ss_overpayment + form_8959_withholding
@@ -322,6 +362,10 @@ def generate_projection(
     if her_result.get("projection_warnings"):
         data_sources["her"]["projection_warnings"] = her_result["projection_warnings"]
 
+    # Convert supplemental values to dicts with source metadata
+    def _supp_to_dict(sv):
+        return {"value": sv.value, "source": sv.source, "year": sv.year}
+
     result = {
         "year": year,
         "him_wages": him_wages,
@@ -329,7 +373,11 @@ def generate_projection(
         "him_fed_withheld": him_fed_withheld,
         "her_fed_withheld": her_fed_withheld,
         "combined_wages": combined_wages,
+        "non_wage_income": non_wage_income,
+        "total_income": total_income,
         "standard_deduction": standard_deduction,
+        "qbi_deduction": qbi_deduction,
+        "total_deductions": total_deductions,
         "final_taxable_income": final_taxable_income,
         "tax_brackets": tax_rules["mfj"]["tax_brackets"],
         "federal_income_tax_assessed": federal_income_tax_assessed,
@@ -345,9 +393,17 @@ def generate_projection(
         "him_additional_medicare_withheld": him_additional_medicare_withheld,
         "her_additional_medicare_withheld": her_additional_medicare_withheld,
         "form_8959_withholding": form_8959_withholding,
+        "child_care_credit": child_care_credit,
+        "niit": niit,
+        "other_taxes": other_taxes,
+        "additional_taxes": additional_taxes,
         "tentative_tax_per_return": tentative_tax_per_return,
         "final_refund": final_refund,
         "data_sources": data_sources,
+        # Supplemental values with source tracking
+        "supplemental": {
+            name: _supp_to_dict(sv) for name, sv in supplemental.items()
+        },
     }
     if ss_defaults_used:
         result["ss_warnings"] = ss_defaults_used
@@ -675,38 +731,33 @@ def reconcile_tax_return(
         income.get("line_1a_wages", 0),
     ))
 
-    # Check for non-wage income (gaps)
-    if income.get("line_2b_taxable_interest", 0) > 0:
-        gaps.append({
-            "item": "Interest income",
-            "line": "2b",
-            "amount": income["line_2b_taxable_interest"],
-        })
-    if income.get("line_3b_ordinary_dividends", 0) > 0:
-        gaps.append({
-            "item": "Dividends",
-            "line": "3b",
-            "amount": income["line_3b_ordinary_dividends"],
-        })
-    if income.get("line_7_capital_gain_loss", 0) != 0:
-        gaps.append({
-            "item": "Capital gain/loss",
-            "line": "7",
-            "amount": income["line_7_capital_gain_loss"],
-        })
-    if income.get("line_8_schedule_1_income", 0) > 0:
-        gaps.append({
-            "item": "Schedule 1 income",
-            "line": "8",
-            "amount": income["line_8_schedule_1_income"],
-        })
+    # Non-wage income - now tracked via supplemental values
+    comparisons.append(compare(
+        "Interest income (Line 2b)",
+        projection["supplemental"]["interest_income"]["value"],
+        income.get("line_2b_taxable_interest", 0),
+    ))
+    comparisons.append(compare(
+        "Dividends (Line 3b)",
+        projection["supplemental"]["dividend_income"]["value"],
+        income.get("line_3b_ordinary_dividends", 0),
+    ))
+    comparisons.append(compare(
+        "Capital gain/loss (Line 7)",
+        projection["supplemental"]["capital_gain_loss"]["value"],
+        income.get("line_7_capital_gain_loss", 0),
+    ))
+    comparisons.append(compare(
+        "Schedule 1 income (Line 8)",
+        projection["supplemental"]["schedule_1_income"]["value"],
+        income.get("line_8_schedule_1_income", 0),
+    ))
 
-    # Total income comparison
+    # Total income comparison - now uses total_income including non-wage
     comparisons.append(compare(
         "Total income (Line 9)",
-        projection["combined_wages"],  # pay-calc only tracks wages
+        projection["total_income"],
         income.get("line_9_total_income", 0),
-        notes="pay-calc only tracks W-2 wages" if income.get("line_9_total_income", 0) != income.get("line_1a_wages", 0) else "",
     ))
 
     # Deductions
@@ -716,20 +767,18 @@ def reconcile_tax_return(
         deductions.get("line_12a_standard_deduction", 0),
     ))
 
-    # QBI deduction gap
-    if deductions.get("line_13_qbi_deduction", 0) > 0:
-        gaps.append({
-            "item": "QBI deduction",
-            "line": "13",
-            "amount": deductions["line_13_qbi_deduction"],
-        })
+    # QBI deduction - now tracked
+    comparisons.append(compare(
+        "QBI deduction (Line 13)",
+        projection["qbi_deduction"],
+        deductions.get("line_13_qbi_deduction", 0),
+    ))
 
-    # Taxable income (we need to adjust for gaps)
+    # Taxable income
     comparisons.append(compare(
         "Taxable income (Line 15)",
         projection["final_taxable_income"],
         deductions.get("line_15_taxable_income", 0),
-        notes="Difference from non-wage income and deductions not tracked",
     ))
 
     # Tax calculated
@@ -737,31 +786,28 @@ def reconcile_tax_return(
         "Tax (Line 16)",
         projection["federal_income_tax_assessed"],
         tax_credits.get("line_16_tax", 0),
-        notes="Difference from taxable income gap",
     ))
 
-    # Credits gap (Schedule 3)
+    # Credits (Schedule 3)
     part1 = schedule_3.get("part_1", {})
-    if part1.get("line_2_child_care_credit", 0) > 0:
-        gaps.append({
-            "item": "Child care credit",
-            "line": "Schedule 3 Line 2",
-            "amount": part1["line_2_child_care_credit"],
-        })
-    if part1.get("line_8_total", 0) > 0 and part1.get("line_8_total", 0) != part1.get("line_2_child_care_credit", 0):
+    comparisons.append(compare(
+        "Child care credit (Sch 3 Line 2)",
+        projection["child_care_credit"],
+        part1.get("line_2_child_care_credit", 0),
+    ))
+
+    # Other nonrefundable credits not yet tracked
+    other_credits = part1.get("line_8_total", 0) - part1.get("line_2_child_care_credit", 0)
+    if other_credits > 0:
         gaps.append({
             "item": "Other nonrefundable credits",
             "line": "Schedule 3 Line 8",
-            "amount": part1["line_8_total"],
+            "amount": other_credits,
         })
 
     # Schedule 2 - Additional taxes
     part2 = schedule_2.get("part_2", {})
     additional_medicare = part2.get("line_6_additional_medicare_tax", 0)
-    # pay-calc calculates this as part of medicare_refund (negative = owed)
-    calc_additional_medicare = max(0, -projection["medicare_refund"]) if projection["medicare_refund"] < 0 else 0
-    # Actually, additional medicare is built into the medicare calc
-    # Let's just note it
     comparisons.append(compare(
         "Additional Medicare Tax (Sch 2 Line 6)",
         max(0, projection["total_medicare_taxes_assessed"] - projection["combined_medicare_wages"] * 0.0145),
@@ -769,25 +815,25 @@ def reconcile_tax_return(
         tolerance=1.0,
     ))
 
-    if part2.get("line_7_net_investment_income_tax", 0) > 0:
-        gaps.append({
-            "item": "NIIT (3.8%)",
-            "line": "Schedule 2 Line 7",
-            "amount": part2["line_7_net_investment_income_tax"],
-        })
-    if part2.get("line_18_other_taxes", 0) > 0:
-        gaps.append({
-            "item": "Other taxes (HSA penalty, etc.)",
-            "line": "Schedule 2 Line 18",
-            "amount": part2["line_18_other_taxes"],
-        })
+    # NIIT - now tracked
+    comparisons.append(compare(
+        "NIIT (Sch 2 Line 7)",
+        projection["niit"],
+        part2.get("line_7_net_investment_income_tax", 0),
+    ))
+
+    # Other taxes - now tracked
+    comparisons.append(compare(
+        "Other taxes (Sch 2 Line 18)",
+        projection["other_taxes"],
+        part2.get("line_18_other_taxes", 0),
+    ))
 
     # Total tax
     comparisons.append(compare(
         "Total tax (Line 24)",
         projection["tentative_tax_per_return"],
         tax_credits.get("line_24_total_tax", 0),
-        notes="Gap from credits and additional taxes not tracked",
     ))
 
     # Payments
@@ -835,12 +881,17 @@ def reconcile_tax_return(
         if g.get("line", "") in income_lines
     )
 
+    # Gap as % of taxable income (more meaningful than % of refund)
+    taxable_income = projection["final_taxable_income"]
+    gap_pct = abs(total_gap) / taxable_income * 100 if taxable_income > 0 else 0
+
     summary = {
         "status": "reconciled" if abs(total_gap) < 1.0 else "gap",
         "calculated_refund": projection["final_refund"],
         "actual_refund": actual_refund,
         "gap": total_gap,
-        "gap_pct": abs(total_gap) / max(actual_refund, 1) * 100 if actual_refund else 0,
+        "gap_pct": gap_pct,
+        "gap_pct_basis": "taxable_income",
         "untracked_income": untracked_income,
         "untracked_credits": credits_missed,
         "untracked_payments": payments_missed,
