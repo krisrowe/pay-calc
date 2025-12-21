@@ -83,6 +83,11 @@ def get_tax_rule(year: str, key: str, nested_key: str = None) -> Any:
         raise KeyError(f"Tax rule '{key}' not defined in any tax-rules/*.yaml file")
 
 
+def _round_to_dollar(amount: float) -> int:
+    """Round to nearest dollar per IRS rules (0.50+ rounds up)."""
+    return int(amount + 0.5) if amount >= 0 else int(amount - 0.5)
+
+
 def calculate_federal_income_tax(taxable_income: float, tax_brackets: list) -> float:
     """Calculate federal income tax based on taxable income and tax brackets."""
     tax_owed = 0.0
@@ -419,11 +424,24 @@ def generate_projection(
         her_ss_overpayment = calculate_ss_overpayment(her_ss_withheld, ss_wage_cap, ss_tax_rate)
     total_ss_overpayment = him_ss_overpayment + her_ss_overpayment
 
-    # Form 8959 withholding (Additional Medicare withheld at $200k per-employee threshold)
-    # This is credited as a payment on Line 25c of Form 1040
+    # Form 8959 Part V - Withholding Reconciliation
+    # Line 25c = Additional Medicare Tax actually withheld by employers
+    # Key insight from TurboTax: round each W-2's values BEFORE summing
+    #
+    # Calculation:
+    #   Line 24: Sum of Medicare tax withheld (W-2 Box 6) - round each, then sum
+    #   Line 25b: Total Medicare wages * 1.45% (regular rate) - rounded
+    #   Line 25c: Line 24 - Line 25b (additional Medicare withheld)
+    #
+    all_employers = him_result["employers"] + her_result["employers"]
+    f8959_line_24 = sum(_round_to_dollar(emp["w2"].get("medicare_tax", 0)) for emp in all_employers)
+    f8959_total_wages = sum(_round_to_dollar(emp["w2"].get("medicare_wages", 0)) for emp in all_employers)
+    f8959_line_25b = _round_to_dollar(f8959_total_wages * 0.0145)
+    form_8959_withholding = f8959_line_24 - f8959_line_25b
+
+    # Also track per-party values for backward compatibility
     him_additional_medicare_withheld = calculate_additional_medicare_withheld(him_medicare_wages, year)
     her_additional_medicare_withheld = calculate_additional_medicare_withheld(her_medicare_wages, year)
-    form_8959_withholding = him_additional_medicare_withheld + her_additional_medicare_withheld
 
     # Credits and additional taxes from supplemental sources
     child_care_credit = supplemental["child_care_credit"].value
@@ -463,49 +481,103 @@ def generate_projection(
     if her_result.get("projection_warnings"):
         data_sources["her"]["projection_warnings"] = her_result["projection_warnings"]
 
-    # Convert supplemental values to dicts with source metadata
+    # IRS-style rounding: round components first, then compute derived values
+    # This matches how 1040 calculations work (each line rounded before next)
+
+    # Round source values first
+    r_him_wages = _round_to_dollar(him_wages)
+    r_her_wages = _round_to_dollar(her_wages)
+    r_him_fed_withheld = _round_to_dollar(him_fed_withheld)
+    r_her_fed_withheld = _round_to_dollar(her_fed_withheld)
+    r_him_ss_withheld = _round_to_dollar(him_ss_withheld)
+    r_her_ss_withheld = _round_to_dollar(her_ss_withheld)
+    r_him_ss_overpayment = _round_to_dollar(him_ss_overpayment)
+    r_her_ss_overpayment = _round_to_dollar(her_ss_overpayment)
+    r_him_additional_medicare_withheld = _round_to_dollar(him_additional_medicare_withheld)
+    r_her_additional_medicare_withheld = _round_to_dollar(her_additional_medicare_withheld)
+    r_standard_deduction = _round_to_dollar(standard_deduction)
+    r_federal_income_tax_assessed = _round_to_dollar(federal_income_tax_assessed)
+    r_additional_medicare_tax = _round_to_dollar(additional_medicare_tax)
+    r_combined_medicare_wages = _round_to_dollar(combined_medicare_wages)
+    r_combined_medicare_withheld = _round_to_dollar(combined_medicare_withheld)
+    r_total_medicare_taxes_assessed = _round_to_dollar(total_medicare_taxes_assessed)
+
+    # Round supplemental values and convert to dicts
     def _supp_to_dict(sv):
-        return {"value": sv.value, "source": sv.source, "year": sv.year}
+        return {"value": _round_to_dollar(sv.value), "source": sv.source, "year": sv.year}
+
+    r_supplemental = {name: _supp_to_dict(sv) for name, sv in supplemental.items()}
+
+    # Derived values computed from rounded components
+    r_combined_wages = r_him_wages + r_her_wages
+    r_non_wage_income = (
+        r_supplemental["interest_income"]["value"]
+        + r_supplemental["dividend_income"]["value"]
+        + r_supplemental["capital_gain_loss"]["value"]
+        + r_supplemental["schedule_1_income"]["value"]
+    )
+    r_total_income = r_combined_wages + r_non_wage_income
+    r_qbi_deduction = r_supplemental["qbi_deduction"]["value"]
+    r_total_deductions = r_standard_deduction + r_qbi_deduction
+    r_final_taxable_income = max(0, r_total_income - r_total_deductions)
+
+    r_child_care_credit = r_supplemental["child_care_credit"]["value"]
+    r_niit = r_supplemental["niit"]["value"]
+    r_other_taxes = r_supplemental["other_taxes"]["value"]
+    r_additional_taxes = r_niit + r_other_taxes
+
+    r_medicare_refund = r_combined_medicare_withheld - r_total_medicare_taxes_assessed
+    r_total_ss_overpayment = r_him_ss_overpayment + r_her_ss_overpayment
+    # form_8959_withholding is already computed with per-employer rounding above
+    r_form_8959_withholding = form_8959_withholding
+
+    # Line 24 = Line 16 + Schedule 2 taxes - credits
+    r_tentative_tax_per_return = (
+        r_federal_income_tax_assessed
+        + r_additional_medicare_tax
+        + r_additional_taxes
+        - r_child_care_credit
+    )
+
+    r_total_withheld = r_him_fed_withheld + r_her_fed_withheld
+    r_final_refund = r_total_withheld - r_tentative_tax_per_return + r_total_ss_overpayment + r_form_8959_withholding
 
     result = {
         "year": year,
-        "him_wages": him_wages,
-        "her_wages": her_wages,
-        "him_fed_withheld": him_fed_withheld,
-        "her_fed_withheld": her_fed_withheld,
-        "combined_wages": combined_wages,
-        "non_wage_income": non_wage_income,
-        "total_income": total_income,
-        "standard_deduction": standard_deduction,
-        "qbi_deduction": qbi_deduction,
-        "total_deductions": total_deductions,
-        "final_taxable_income": final_taxable_income,
+        "him_wages": r_him_wages,
+        "her_wages": r_her_wages,
+        "him_fed_withheld": r_him_fed_withheld,
+        "her_fed_withheld": r_her_fed_withheld,
+        "combined_wages": r_combined_wages,
+        "non_wage_income": r_non_wage_income,
+        "total_income": r_total_income,
+        "standard_deduction": r_standard_deduction,
+        "qbi_deduction": r_qbi_deduction,
+        "total_deductions": r_total_deductions,
+        "final_taxable_income": r_final_taxable_income,
         "tax_brackets": tax_rules["mfj"]["tax_brackets"],
-        "federal_income_tax_assessed": federal_income_tax_assessed,
-        "combined_medicare_wages": combined_medicare_wages,
-        "combined_medicare_withheld": combined_medicare_withheld,
-        "total_medicare_taxes_assessed": total_medicare_taxes_assessed,
-        "additional_medicare_tax": additional_medicare_tax,  # Schedule 2 Line 6
-        "medicare_refund": medicare_refund,
-        "him_ss_withheld": him_ss_withheld,
-        "her_ss_withheld": her_ss_withheld,
-        "him_ss_overpayment": him_ss_overpayment,
-        "her_ss_overpayment": her_ss_overpayment,
-        "total_ss_overpayment": total_ss_overpayment,
-        "him_additional_medicare_withheld": him_additional_medicare_withheld,
-        "her_additional_medicare_withheld": her_additional_medicare_withheld,
-        "form_8959_withholding": form_8959_withholding,
-        "child_care_credit": child_care_credit,
-        "niit": niit,
-        "other_taxes": other_taxes,
-        "additional_taxes": additional_taxes,
-        "tentative_tax_per_return": tentative_tax_per_return,
-        "final_refund": final_refund,
+        "federal_income_tax_assessed": r_federal_income_tax_assessed,
+        "combined_medicare_wages": r_combined_medicare_wages,
+        "combined_medicare_withheld": r_combined_medicare_withheld,
+        "total_medicare_taxes_assessed": r_total_medicare_taxes_assessed,
+        "additional_medicare_tax": r_additional_medicare_tax,
+        "medicare_refund": r_medicare_refund,
+        "him_ss_withheld": r_him_ss_withheld,
+        "her_ss_withheld": r_her_ss_withheld,
+        "him_ss_overpayment": r_him_ss_overpayment,
+        "her_ss_overpayment": r_her_ss_overpayment,
+        "total_ss_overpayment": r_total_ss_overpayment,
+        "him_additional_medicare_withheld": r_him_additional_medicare_withheld,
+        "her_additional_medicare_withheld": r_her_additional_medicare_withheld,
+        "form_8959_withholding": r_form_8959_withholding,
+        "child_care_credit": r_child_care_credit,
+        "niit": r_niit,
+        "other_taxes": r_other_taxes,
+        "additional_taxes": r_additional_taxes,
+        "tentative_tax_per_return": r_tentative_tax_per_return,
+        "final_refund": r_final_refund,
         "data_sources": data_sources,
-        # Supplemental values with source tracking
-        "supplemental": {
-            name: _supp_to_dict(sv) for name, sv in supplemental.items()
-        },
+        "supplemental": r_supplemental,
     }
     if ss_defaults_used:
         result["ss_warnings"] = ss_defaults_used
@@ -1037,3 +1109,275 @@ def generate_tax_projection_file(
         output_path = data_dir / f"{year}_tax_projection.csv"
 
     return write_projection_csv(projection, output_path)
+
+
+# =============================================================================
+# Projection Schema Validation and 1040 Conversion
+# =============================================================================
+
+# Required fields for a valid projection object
+PROJECTION_REQUIRED_FIELDS = {
+    "year",
+    "him_wages",
+    "her_wages",
+    "combined_wages",
+    "him_fed_withheld",
+    "her_fed_withheld",
+    "total_income",
+    "standard_deduction",
+    "final_taxable_income",
+    "federal_income_tax_assessed",
+    "additional_medicare_tax",
+    "tentative_tax_per_return",
+    "final_refund",
+    "supplemental",
+}
+
+PROJECTION_SUPPLEMENTAL_FIELDS = {
+    "interest_income",
+    "dividend_income",
+    "capital_gain_loss",
+    "schedule_1_income",
+    "qbi_deduction",
+    "child_care_credit",
+    "niit",
+    "other_taxes",
+}
+
+
+class ProjectionSchemaError(ValueError):
+    """Raised when projection dict is missing required fields."""
+    pass
+
+
+def validate_projection_schema(projection: dict) -> list[str]:
+    """Validate that a projection dict has all required fields.
+
+    Args:
+        projection: Projection dict from generate_projection()
+
+    Returns:
+        List of validation errors (empty if valid)
+
+    Raises:
+        ProjectionSchemaError: If critical fields are missing
+    """
+    errors = []
+
+    # Check top-level required fields
+    for field in PROJECTION_REQUIRED_FIELDS:
+        if field not in projection:
+            errors.append(f"Missing required field: {field}")
+
+    # Check supplemental sub-fields if supplemental exists
+    supplemental = projection.get("supplemental", {})
+    if supplemental:
+        for field in PROJECTION_SUPPLEMENTAL_FIELDS:
+            if field not in supplemental:
+                errors.append(f"Missing supplemental field: {field}")
+            elif not isinstance(supplemental[field], dict):
+                errors.append(f"Supplemental field '{field}' must be a dict with 'value' key")
+            elif "value" not in supplemental[field]:
+                errors.append(f"Supplemental field '{field}' missing 'value' key")
+
+    return errors
+
+
+def projection_to_1040(projection: dict) -> dict:
+    """Convert a projection dict to Form 1040 schema format.
+
+    Validates the projection schema first, then transforms to 1040 line-item
+    format. Values are already rounded in generate_projection(), so this is
+    a pure schema transformation with no additional calculations.
+
+    Args:
+        projection: Projection dict from generate_projection()
+
+    Returns:
+        Dict in Form 1040 schema format
+
+    Raises:
+        ProjectionSchemaError: If projection is missing required fields
+    """
+    errors = validate_projection_schema(projection)
+    if errors:
+        raise ProjectionSchemaError(
+            f"Invalid projection schema:\n  " + "\n  ".join(errors)
+        )
+
+    # Helper to get supplemental value (already rounded)
+    def supp(field: str) -> int:
+        return projection["supplemental"][field]["value"]
+
+    # Build 1040 structure - values already rounded in generate_projection()
+    return {
+        "meta": {
+            "year": projection["year"],
+            "source": "projection",
+            "generated_from": "pay-calc projection_to_1040",
+        },
+        "data": {
+            "income": {
+                "line_1a_wages": projection["combined_wages"],
+                "line_2b_taxable_interest": supp("interest_income"),
+                "line_3a_qualified_dividends": supp("dividend_income"),  # Assume all qualified
+                "line_3b_ordinary_dividends": supp("dividend_income"),
+                "line_7_capital_gain_loss": supp("capital_gain_loss"),
+                "line_8_schedule_1_income": supp("schedule_1_income"),
+                "line_9_total_income": projection["total_income"],
+            },
+            "deductions": {
+                "line_12a_standard_deduction": projection["standard_deduction"],
+                "line_13_qbi_deduction": projection["qbi_deduction"],
+                "line_14_total_deductions": projection["total_deductions"],
+                "line_15_taxable_income": projection["final_taxable_income"],
+            },
+            "tax_and_credits": {
+                "line_16_tax": projection["federal_income_tax_assessed"],
+                "line_22_schedule_2": (
+                    projection["additional_medicare_tax"]
+                    + supp("niit")
+                    + supp("other_taxes")
+                ),
+                "line_24_total_tax": projection["tentative_tax_per_return"],
+            },
+            "payments": {
+                "line_25a_w2_withholding": projection["him_fed_withheld"] + projection["her_fed_withheld"],
+                "line_25c_other_withholding": projection.get("form_8959_withholding", 0),
+                "line_31_excess_ss": projection.get("total_ss_overpayment", 0),
+                "line_33_total_payments": (
+                    projection["him_fed_withheld"]
+                    + projection["her_fed_withheld"]
+                    + projection.get("total_ss_overpayment", 0)
+                    + projection.get("form_8959_withholding", 0)
+                ),
+            },
+            "refund_or_owed": {
+                "line_34_overpaid": max(0, projection["final_refund"]),
+                "line_37_owed": max(0, -projection["final_refund"]),
+            },
+            "schedule_2": {
+                "part_2": {
+                    "line_6_additional_medicare_tax": projection["additional_medicare_tax"],
+                    "line_7_net_investment_income_tax": supp("niit"),
+                    "line_18_other_taxes": supp("other_taxes"),
+                }
+            },
+            "schedule_3": {
+                "part_1": {
+                    "line_2_child_care_credit": supp("child_care_credit"),
+                }
+            },
+        },
+    }
+
+
+def compare_1040(calculated: dict, actual: dict) -> dict:
+    """Compare two Form 1040 objects and return line-by-line comparison.
+
+    Both inputs should be in 1040 schema format (with 'data' key containing
+    income, deductions, tax_and_credits, payments, refund_or_owed sections).
+
+    Args:
+        calculated: 1040 dict from projection_to_1040() or similar
+        actual: 1040 dict from imported tax return
+
+    Returns:
+        Dict with:
+        - comparisons: List of line-item comparisons
+        - summary: Overall comparison status
+        - year: Tax year (from calculated)
+    """
+    # Unwrap 'data' key if present
+    calc_data = calculated.get("data", calculated)
+    actual_data = actual.get("data", actual)
+
+    comparisons = []
+
+    def compare_line(label: str, calc_path: str, actual_path: str, tolerance: int = 1) -> dict:
+        """Compare a single line item."""
+        # Navigate to value using dot-path
+        calc_val = calc_data
+        for key in calc_path.split("."):
+            calc_val = calc_val.get(key, {}) if isinstance(calc_val, dict) else 0
+        if isinstance(calc_val, dict):
+            calc_val = 0
+
+        actual_val = actual_data
+        for key in actual_path.split("."):
+            actual_val = actual_val.get(key, {}) if isinstance(actual_val, dict) else 0
+        if isinstance(actual_val, dict):
+            actual_val = 0
+
+        delta = calc_val - actual_val
+        return {
+            "line": label,
+            "calculated": calc_val,
+            "actual": actual_val,
+            "delta": delta,
+            "match": abs(delta) <= tolerance,
+        }
+
+    # Income section
+    comparisons.append(compare_line("Wages (Line 1a)", "income.line_1a_wages", "income.line_1a_wages"))
+    comparisons.append(compare_line("Interest (Line 2b)", "income.line_2b_taxable_interest", "income.line_2b_taxable_interest"))
+    comparisons.append(compare_line("Dividends (Line 3b)", "income.line_3b_ordinary_dividends", "income.line_3b_ordinary_dividends"))
+    comparisons.append(compare_line("Capital gain/loss (Line 7)", "income.line_7_capital_gain_loss", "income.line_7_capital_gain_loss"))
+    comparisons.append(compare_line("Schedule 1 income (Line 8)", "income.line_8_schedule_1_income", "income.line_8_schedule_1_income"))
+    comparisons.append(compare_line("Total income (Line 9)", "income.line_9_total_income", "income.line_9_total_income"))
+
+    # Deductions
+    comparisons.append(compare_line("Standard deduction (Line 12a)", "deductions.line_12a_standard_deduction", "deductions.line_12a_standard_deduction"))
+    comparisons.append(compare_line("QBI deduction (Line 13)", "deductions.line_13_qbi_deduction", "deductions.line_13_qbi_deduction"))
+    comparisons.append(compare_line("Taxable income (Line 15)", "deductions.line_15_taxable_income", "deductions.line_15_taxable_income"))
+
+    # Tax
+    comparisons.append(compare_line("Tax (Line 16)", "tax_and_credits.line_16_tax", "tax_and_credits.line_16_tax"))
+    comparisons.append(compare_line("Total tax (Line 24)", "tax_and_credits.line_24_total_tax", "tax_and_credits.line_24_total_tax"))
+
+    # Payments
+    comparisons.append(compare_line("W-2 withholding (Line 25a)", "payments.line_25a_w2_withholding", "payments.line_25a_w2_withholding"))
+    comparisons.append(compare_line("Form 8959 withholding (Line 25c)", "payments.line_25c_other_withholding", "payments.line_25c_other_withholding"))
+    comparisons.append(compare_line("Total payments (Line 33)", "payments.line_33_total_payments", "payments.line_33_total_payments"))
+
+    # Refund/owed
+    comparisons.append(compare_line("Refund (Line 34)", "refund_or_owed.line_34_overpaid", "refund_or_owed.line_34_overpaid"))
+    comparisons.append(compare_line("Amount owed (Line 37)", "refund_or_owed.line_37_owed", "refund_or_owed.line_37_owed"))
+
+    # Schedule 2
+    comparisons.append(compare_line("Additional Medicare (Sch 2 Line 6)", "schedule_2.part_2.line_6_additional_medicare_tax", "schedule_2.part_2.line_6_additional_medicare_tax"))
+    comparisons.append(compare_line("NIIT (Sch 2 Line 7)", "schedule_2.part_2.line_7_net_investment_income_tax", "schedule_2.part_2.line_7_net_investment_income_tax"))
+
+    # Schedule 3
+    comparisons.append(compare_line("Child care credit (Sch 3 Line 2)", "schedule_3.part_1.line_2_child_care_credit", "schedule_3.part_1.line_2_child_care_credit"))
+
+    # Summary
+    calc_refund = calc_data.get("refund_or_owed", {}).get("line_34_overpaid", 0)
+    calc_owed = calc_data.get("refund_or_owed", {}).get("line_37_owed", 0)
+    actual_refund = actual_data.get("refund_or_owed", {}).get("line_34_overpaid", 0)
+    actual_owed = actual_data.get("refund_or_owed", {}).get("line_37_owed", 0)
+
+    calc_net = calc_refund - calc_owed
+    actual_net = actual_refund - actual_owed
+    gap = calc_net - actual_net
+
+    mismatches = [c for c in comparisons if not c["match"]]
+
+    summary = {
+        "status": "match" if abs(gap) <= 1 else "gap",
+        "calculated_refund": calc_refund,
+        "calculated_owed": calc_owed,
+        "actual_refund": actual_refund,
+        "actual_owed": actual_owed,
+        "gap": gap,
+        "mismatches": len(mismatches),
+        "total_comparisons": len(comparisons),
+    }
+
+    year = calculated.get("meta", {}).get("year") or actual.get("meta", {}).get("year") or "unknown"
+
+    return {
+        "year": year,
+        "comparisons": comparisons,
+        "summary": summary,
+    }

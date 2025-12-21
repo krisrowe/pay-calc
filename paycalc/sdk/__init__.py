@@ -43,6 +43,11 @@ from .tax import (
     format_data_sources,
     load_form_1040,
     reconcile_tax_return,
+    # Schema validation and 1040 conversion
+    validate_projection_schema,
+    projection_to_1040,
+    compare_1040,
+    ProjectionSchemaError,
 )
 
 from .gaps import (
@@ -115,6 +120,11 @@ __all__ = [
     "format_data_sources",
     "load_form_1040",
     "reconcile_tax_return",
+    # Schema validation and 1040 conversion
+    "validate_projection_schema",
+    "projection_to_1040",
+    "compare_1040",
+    "ProjectionSchemaError",
     # Gap detection
     "Gap",
     "GapAnalysis",

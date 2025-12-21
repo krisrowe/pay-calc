@@ -393,13 +393,15 @@ def tax_group():
 
     \b
     Commands:
-      projection  Calculate tax liability from W-2 data
-      validate    Compare projection against actual Form 1040
+      project   Calculate tax liability from W-2 data
+      convert   Convert projection JSON to Form 1040 schema
+      compare   Compare two Form 1040 objects
+      validate  Shortcut: project → convert → compare with actual 1040
     """
     pass
 
 
-@tax_group.command("projection")
+@tax_group.command("project")
 @click.argument("year")
 @click.option("--format", "output_format", type=click.Choice(["text", "json", "csv"]), default="text",
               help="Output format (default: text)")
@@ -407,12 +409,13 @@ def tax_group():
               help="Directory containing W-2 or analysis JSON files (default: XDG data dir)")
 @click.option("--allow-projection", is_flag=True,
               help="Allow income projection for employers with incomplete stub data")
-def tax_projection(year, output_format, data_dir, allow_projection):
+def tax_project(year, output_format, data_dir, allow_projection):
     """Calculate federal tax liability and refund/owed amount.
 
     Loads income data for both parties (him + her), applies tax brackets,
     and calculates federal income tax, medicare taxes, and projected
-    refund or amount owed.
+    refund or amount owed. All values are rounded to whole dollars per
+    IRS rules.
 
     \b
     Data sources (per employer, in order of preference):
@@ -423,10 +426,12 @@ def tax_projection(year, output_format, data_dir, allow_projection):
     \b
     Output formats:
       --format=text  ASCII tables (default, for terminal viewing)
-      --format=json  JSON object (for programmatic use)
+      --format=json  JSON object (for piping to tax convert)
       --format=csv   CSV format (for spreadsheet import)
 
-    Redirect output to file: pay-calc tax projection 2025 --format=csv > taxes.csv
+    \b
+    Pipeline usage:
+      pay-calc tax project 2024 --format=json | pay-calc tax convert
     """
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
@@ -470,6 +475,85 @@ def tax_projection(year, output_format, data_dir, allow_projection):
         raise click.ClickException(str(e))
     except Exception as e:
         raise click.ClickException(f"Error generating tax calculation: {e}")
+
+
+@tax_group.command("convert")
+def tax_convert():
+    """Convert projection JSON to Form 1040 schema format.
+
+    Reads projection JSON from stdin (piped from tax project --format=json),
+    validates the projection schema, and outputs Form 1040 schema JSON.
+
+    \b
+    Usage:
+      pay-calc tax project 2024 --format=json | pay-calc tax convert
+
+    \b
+    The output can be:
+    - Compared against an actual 1040 using: | pay-calc tax compare <actual.json>
+    - Saved for later comparison
+    """
+    import sys
+    from paycalc.sdk import projection_to_1040, ProjectionSchemaError
+
+    if sys.stdin.isatty():
+        raise click.ClickException(
+            "No projection data provided. Pipe projection JSON to this command.\n"
+            "Example: pay-calc tax project 2024 --format=json | pay-calc tax convert"
+        )
+
+    try:
+        stdin_data = sys.stdin.read()
+        projection = json.loads(stdin_data)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Invalid JSON input: {e}")
+
+    try:
+        form_1040 = projection_to_1040(projection)
+        click.echo(json.dumps(form_1040, indent=2))
+    except ProjectionSchemaError as e:
+        raise click.ClickException(str(e))
+
+
+@tax_group.command("compare")
+@click.argument("actual_file", type=click.Path(exists=True))
+def tax_compare(actual_file):
+    """Compare two Form 1040 objects (calculated vs actual).
+
+    Reads calculated 1040 JSON from stdin and compares against ACTUAL_FILE.
+    Both must be in Form 1040 schema format.
+
+    \b
+    Usage:
+      pay-calc tax project 2024 --format=json | pay-calc tax convert | pay-calc tax compare actual_1040.json
+
+    \b
+    Or with files:
+      cat calculated_1040.json | pay-calc tax compare actual_1040.json
+    """
+    import sys
+    from paycalc.sdk import compare_1040
+
+    if sys.stdin.isatty():
+        raise click.ClickException(
+            "No calculated 1040 data provided. Pipe 1040 JSON to this command.\n"
+            "Example: pay-calc tax project 2024 --format=json | pay-calc tax convert | pay-calc tax compare actual.json"
+        )
+
+    try:
+        stdin_data = sys.stdin.read()
+        calculated = json.loads(stdin_data)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Invalid JSON input from stdin: {e}")
+
+    try:
+        with open(actual_file) as f:
+            actual = json.load(f)
+    except json.JSONDecodeError as e:
+        raise click.ClickException(f"Invalid JSON in {actual_file}: {e}")
+
+    result = compare_1040(calculated, actual)
+    click.echo(json.dumps(result, indent=2))
 
 
 def _format_reconciliation_text(result: dict) -> str:
@@ -546,6 +630,55 @@ def _format_reconciliation_text(result: dict) -> str:
     return "\n".join(lines)
 
 
+def _format_compare_text(result: dict) -> str:
+    """Format compare_1040 result as ASCII table for terminal display."""
+    lines = []
+    summary = result["summary"]
+    comparisons = result["comparisons"]
+    year = result.get("year", "")
+
+    # Header
+    lines.append(f"TAX COMPARISON FOR {year}")
+    lines.append("=" * 70)
+    lines.append("")
+
+    # Line-by-line comparison table
+    lines.append(f"{'Line Item':<35} {'Calculated':>12} {'Actual':>12} {'Δ':>8} {'OK':<4}")
+    lines.append("-" * 70)
+
+    for comp in comparisons:
+        calc = comp["calculated"]
+        actual = comp["actual"]
+        delta = comp["delta"]
+        match = comp["match"]
+
+        calc_str = f"${calc:,}" if calc != 0 else "$0"
+        actual_str = f"${actual:,}" if actual != 0 else "$0"
+
+        if match:
+            delta_str = "—"
+            status = "✓"
+        else:
+            delta_str = f"${delta:+,}"
+            status = "✗"
+
+        lines.append(f"{comp['line']:<35} {calc_str:>12} {actual_str:>12} {delta_str:>8} {status:<4}")
+
+    lines.append("-" * 70)
+    lines.append("")
+
+    # Summary
+    lines.append("SUMMARY")
+    lines.append("-" * 40)
+    lines.append(f"  Status:             {summary['status'].upper()}")
+    lines.append(f"  Calculated refund:  ${summary['calculated_refund']:>10,}")
+    lines.append(f"  Actual refund:      ${summary['actual_refund']:>10,}")
+    lines.append(f"  Gap:                ${summary['gap']:>+10,}")
+    lines.append(f"  Mismatches:         {summary['mismatches']} of {summary['total_comparisons']}")
+
+    return "\n".join(lines)
+
+
 @tax_group.command("validate")
 @click.argument("year")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]), default="text",
@@ -553,44 +686,55 @@ def _format_reconciliation_text(result: dict) -> str:
 @click.option("--data-dir", type=click.Path(exists=True),
               help="Directory containing data (default: XDG data dir)")
 def tax_validate(year, output_format, data_dir):
-    """Compare tax projection against actual Form 1040.
+    """Shortcut: generate projection, convert to 1040, compare with actual.
 
-    Loads the calculated tax projection and compares it line-by-line
-    against the imported Form 1040 for the same year. Identifies gaps
-    between what pay-calc tracks and what appears on the actual return.
+    Equivalent to:
+      pay-calc tax project YEAR --format=json | pay-calc tax convert | pay-calc tax compare <1040_file>
+
+    But looks up the actual Form 1040 from records automatically.
 
     \b
     Prerequisites:
-    1. Import pay stubs: pay-calc records import
-    2. Import Form 1040: Copy form_1040_YYYY.json to data/records/
+    1. Import W-2s: pay-calc records import <w2_file>
+    2. Import Form 1040: pay-calc records import <form_1040_file>
 
     \b
     Output shows:
     - Line-by-line comparison (calculated vs actual)
-    - Items not tracked by pay-calc (credits, other income, etc.)
     - Summary with gap analysis
     """
     if not year.isdigit() or len(year) != 4:
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
-    from paycalc.sdk import reconcile_tax_return, get_data_path
+    from paycalc.sdk import (
+        generate_projection, projection_to_1040, compare_1040,
+        load_form_1040, get_data_path
+    )
 
     data_path = Path(data_dir) if data_dir else get_data_path()
 
+    # Step 1: Load actual 1040 from records
+    actual_1040 = load_form_1040(year, data_dir=data_path)
+    if actual_1040 is None:
+        raise click.ClickException(
+            f"No Form 1040 found for {year}.\n"
+            f"Import with: pay-calc records import <form_1040_file>"
+        )
+
     try:
-        result = reconcile_tax_return(year, data_dir=data_path)
+        # Step 2: Generate projection
+        projection = generate_projection(year, data_dir=data_path)
+
+        # Step 3: Convert to 1040 format
+        calculated_1040 = projection_to_1040(projection)
+
+        # Step 4: Compare
+        result = compare_1040(calculated_1040, {"data": actual_1040})
 
         if output_format == "json":
-            # Remove form_1040 from output to avoid huge JSON dump
-            output = {
-                "year": year,
-                "summary": result["summary"],
-                "comparisons": result["comparisons"],
-                "gaps": result["gaps"],
-            }
-            click.echo(json.dumps(output, indent=2))
+            click.echo(json.dumps(result, indent=2))
         else:
-            click.echo(_format_reconciliation_text(result))
+            click.echo(_format_compare_text(result))
 
     except ValueError as e:
         # Missing 1040 or W-2 records - exit 1 with clear message
