@@ -345,7 +345,7 @@ def generate_projection(
         "capital_gain_loss": ("income.line_7_capital_gain_loss", "tax_years.{year}.capital_gain_loss"),
         "schedule_1_income": ("income.line_8_schedule_1_income", "tax_years.{year}.schedule_1_income"),
         "qbi_deduction": ("deductions.line_13_qbi_deduction", "tax_years.{year}.qbi_deduction"),
-        "child_care_credit": ("schedule_3.part_1.line_2_child_care_credit", "tax_years.{year}.child_care_credit"),
+        "child_care_expenses": ("schedule_summaries.form_2441.qualified_expenses", "tax_years.{year}.child_care_expenses"),
         "niit": ("schedule_2.part_2.line_7_net_investment_income_tax", "tax_years.{year}.niit"),
         "other_taxes": ("schedule_2.part_2.line_18_other_taxes", "tax_years.{year}.other_taxes"),
     }
@@ -468,7 +468,10 @@ def generate_projection(
     her_additional_medicare_withheld = calculate_additional_medicare_withheld(her_medicare_wages, year)
 
     # Credits and additional taxes from supplemental sources
-    child_care_credit = supplemental["child_care_credit"].value
+    # Child care credit: expenses × rate from tax_rules
+    child_care_expenses = supplemental["child_care_expenses"].value
+    child_care_rate = tax_rules.get("child_care", {}).get("credit_rate", 0.20)
+    child_care_credit = child_care_expenses * child_care_rate
     niit = supplemental["niit"].value
     other_taxes = supplemental["other_taxes"].value
     additional_taxes = niit + other_taxes
@@ -545,7 +548,8 @@ def generate_projection(
     r_total_deductions = r_standard_deduction + r_qbi_deduction
     r_final_taxable_income = max(0, r_total_income - r_total_deductions)
 
-    r_child_care_credit = r_supplemental["child_care_credit"]["value"]
+    r_child_care_expenses = r_supplemental["child_care_expenses"]["value"]
+    r_child_care_credit = _round_to_dollar(r_child_care_expenses * child_care_rate)
     r_niit = r_supplemental["niit"]["value"]
     r_other_taxes = r_supplemental["other_taxes"]["value"]
     r_additional_taxes = r_niit + r_other_taxes
@@ -1070,7 +1074,8 @@ def reconcile_tax_return(
     ))
 
     # Calculate summary
-    total_gap = projection["final_refund"] - actual_refund
+    # Gap = actual - calculated: positive = better than expected, negative = worse
+    total_gap = actual_refund - projection["final_refund"]
     gaps_total = sum(g.get("amount", 0) for g in gaps if g.get("amount", 0) > 0)
     credits_missed = sum(g.get("amount", 0) for g in gaps if "credit" in g.get("item", "").lower())
     payments_missed = sum(g.get("amount", 0) for g in gaps if "withholding" in g.get("item", "").lower())
@@ -1086,11 +1091,57 @@ def reconcile_tax_return(
     taxable_income = projection["final_taxable_income"]
     gap_pct = abs(total_gap) / taxable_income * 100 if taxable_income > 0 else 0
 
+    # Build display-ready summary
+    # actual/calc as signed values: positive = refund, negative = owed
+    calc_value = projection["final_refund"]
+    actual_value = actual_refund
+    variance_amount = actual_value - calc_value
+
+    # Determine captions based on sign (always show positive amounts)
+    if actual_value >= 0:
+        actual_caption = "Actual refund"
+        actual_display = actual_value
+    else:
+        actual_caption = "Actual owed"
+        actual_display = abs(actual_value)
+
+    if calc_value >= 0:
+        calc_caption = "Calculated refund"
+        calc_display = calc_value
+    else:
+        calc_caption = "Calculated owed"
+        calc_display = abs(calc_value)
+
+    # Variance favorable: positive = good, negative = bad, zero = neutral (None)
+    if variance_amount > 0:
+        favorable = True
+    elif variance_amount < 0:
+        favorable = False
+    else:
+        favorable = None
+
     summary = {
-        "status": "reconciled" if abs(total_gap) < 1.0 else "gap",
-        "calculated_refund": projection["final_refund"],
-        "actual_refund": actual_refund,
-        "gap": total_gap,
+        "status": "match" if abs(variance_amount) < 1.0 else "gap",
+        "matching": {
+            "count": len(comparisons) - len([c for c in comparisons if c.get("delta", 0) != 0]),
+            "total": len(comparisons),
+        },
+        "amounts": [
+            {"caption": actual_caption, "value": actual_display, "subtract": False},
+            {"caption": calc_caption, "value": calc_display, "subtract": True},
+        ],
+        "variance": {
+            "amount": abs(variance_amount),
+            "favorable": favorable,
+        },
+        # Legacy fields for backward compatibility
+        "calculated_refund": max(0, calc_value),
+        "calculated_owed": max(0, -calc_value),
+        "actual_refund": max(0, actual_value),
+        "actual_owed": max(0, -actual_value),
+        "gap": variance_amount,
+        "mismatches": len([c for c in comparisons if c.get("delta", 0) != 0]),
+        "total_comparisons": len(comparisons),
         "gap_pct": gap_pct,
         "gap_pct_basis": "taxable_income",
         "untracked_income": untracked_income,
@@ -1166,7 +1217,7 @@ PROJECTION_SUPPLEMENTAL_FIELDS = {
     "capital_gain_loss",
     "schedule_1_income",
     "qbi_deduction",
-    "child_care_credit",
+    "child_care_expenses",
     "niit",
     "other_taxes",
 }
@@ -1292,7 +1343,7 @@ def projection_to_1040(projection: dict) -> dict:
             },
             "schedule_3": {
                 "part_1": {
-                    "line_2_child_care_credit": supp("child_care_credit"),
+                    "line_2_child_care_credit": projection["child_care_credit"],
                 }
             },
         },
@@ -1386,17 +1437,53 @@ def compare_1040(calculated: dict, actual: dict) -> dict:
 
     calc_net = calc_refund - calc_owed
     actual_net = actual_refund - actual_owed
-    gap = calc_net - actual_net
+    variance_amount = actual_net - calc_net  # positive = favorable
 
     mismatches = [c for c in comparisons if not c["match"]]
 
+    # Determine captions based on sign (always show positive amounts)
+    if actual_net >= 0:
+        actual_caption = "Actual refund"
+        actual_display = actual_net
+    else:
+        actual_caption = "Actual owed"
+        actual_display = abs(actual_net)
+
+    if calc_net >= 0:
+        calc_caption = "Calculated refund"
+        calc_display = calc_net
+    else:
+        calc_caption = "Calculated owed"
+        calc_display = abs(calc_net)
+
+    # Variance favorable: positive = good, negative = bad, zero = neutral (None)
+    if variance_amount > 0:
+        favorable = True
+    elif variance_amount < 0:
+        favorable = False
+    else:
+        favorable = None
+
     summary = {
-        "status": "match" if abs(gap) <= 1 else "gap",
+        "status": "match" if abs(variance_amount) <= 1 else "gap",
+        "matching": {
+            "count": len(comparisons) - len(mismatches),
+            "total": len(comparisons),
+        },
+        "amounts": [
+            {"caption": actual_caption, "value": actual_display, "subtract": False},
+            {"caption": calc_caption, "value": calc_display, "subtract": True},
+        ],
+        "variance": {
+            "amount": abs(variance_amount),
+            "favorable": favorable,
+        },
+        # Legacy fields for backward compatibility
         "calculated_refund": calc_refund,
         "calculated_owed": calc_owed,
         "actual_refund": actual_refund,
         "actual_owed": actual_owed,
-        "gap": gap,
+        "gap": variance_amount,
         "mismatches": len(mismatches),
         "total_comparisons": len(comparisons),
     }

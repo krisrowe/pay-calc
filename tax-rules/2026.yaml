@@ -26,3 +26,12 @@ social_security:
 401k:
   employee_elective_limit: 24500    # Pre-tax + Roth employee contributions
   total_annual_limit: 73500         # Employee + employer total
+
+# Child and Dependent Care Credit (Form 2441)
+# Rate is 20-35% based on AGI, but phases to 20% minimum at AGI > $43,000
+# At high income (>$43k AGI), rate is always 20%
+# NOTE: These values have been frozen since 2001 (EGTRRA) - no inflation adjustment
+child_care:
+  credit_rate: 0.20                 # Minimum rate for AGI > $43,000
+  max_expenses_one_child: 3000      # Frozen since 2001
+  max_expenses_two_plus: 6000       # Frozen since 2001

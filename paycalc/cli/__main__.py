@@ -348,10 +348,11 @@ def _format_tax_projection_text(proj: dict) -> str:
     if other_taxes > 0:
         lines.append(f"  Other taxes (Sched 2):    -${other_taxes:>12,.2f}{_get_source_str(other_info)}")
 
-    credit_info = supplemental.get("child_care_credit", {})
-    child_care_credit = credit_info.get("value", 0)
+    # Child care credit is calculated from expenses - get source from expenses
+    expenses_info = supplemental.get("child_care_expenses", {})
+    child_care_credit = proj.get("child_care_credit", 0)
     if child_care_credit > 0:
-        lines.append(f"  Child care credit:         ${child_care_credit:>12,.2f}{_get_source_str(credit_info)}")
+        lines.append(f"  Child care credit:         ${child_care_credit:>12,.2f}{_get_source_str(expenses_info)}")
 
     lines.append(f"  Tentative tax (Line 24):  -${proj['tentative_tax_per_return']:>12,.2f}")
     lines.append(f"  Total withheld:            ${total_withheld:>12,.2f}")
@@ -682,11 +683,33 @@ def _format_compare_text(result: dict) -> str:
     # Summary
     lines.append("SUMMARY")
     lines.append("-" * 40)
-    lines.append(f"  Status:             {summary['status'].upper()}")
-    lines.append(f"  Calculated refund:  ${summary['calculated_refund']:>10,}")
-    lines.append(f"  Actual refund:      ${summary['actual_refund']:>10,}")
-    lines.append(f"  Gap:                ${summary['gap']:>+10,}")
-    lines.append(f"  Mismatches:         {summary['mismatches']} of {summary['total_comparisons']}")
+    matches = summary['total_comparisons'] - summary['mismatches']
+    matching = summary.get('matching', {})
+    match_count = matching.get('count', summary['total_comparisons'] - summary['mismatches'])
+    match_total = matching.get('total', summary['total_comparisons'])
+    lines.append(f"  Status:             {summary['status'].upper()} ({match_count:2}/{match_total:2})")
+
+    # Render amounts from structured data
+    amounts = summary.get('amounts', [])
+    for amt in amounts:
+        caption = amt['caption']
+        value = amt['value']
+        subtract = amt.get('subtract', False)
+        sign = "-" if subtract else " "
+        lines.append(f"  {caption + ':':<20}{sign}${value:>10,}")
+
+    lines.append(f"  {'-' * 34}")
+
+    # Render variance from structured data
+    var_data = summary.get('variance', {})
+    var_amount = var_data.get('amount', abs(summary.get('gap', 0)))
+    favorable = var_data.get('favorable')
+    if favorable is True:
+        lines.append(f"  {'Variance (+):':<20} ${var_amount:>10,}")
+    elif favorable is False:
+        lines.append(f"  {'Variance (-):':<20}-${var_amount:>10,}")
+    else:
+        lines.append(f"  {'Variance:':<20} ${var_amount:>10,}")
 
     return "\n".join(lines)
 

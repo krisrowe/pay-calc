@@ -39,9 +39,8 @@ def _load_1040_for_year(year: str, data_dir: Path) -> Optional[dict]:
 
 def _load_profile_yaml() -> dict:
     """Load the profile.yaml configuration."""
-    from .config import get_config_path
-    config_path = get_config_path()
-    profile_path = config_path / "profile.yaml"
+    from .config import get_profile_path
+    profile_path = get_profile_path(require_exists=False)
     if not profile_path.exists():
         return {}
     with open(profile_path) as f:
