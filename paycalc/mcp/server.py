@@ -290,7 +290,7 @@ async def generate_w2(
 async def generate_tax_projection(
     year: str = Field(description="Tax year (4 digits, e.g., '2025')"),
     output_format: str = Field(default="json", description="Output format: 'json' (default) or 'csv'"),
-    allow_projection: bool = Field(default=False, description="If True, project income to year-end when stub data is incomplete"),
+    ytd_final_party: str | None = Field(default=None, description="Use final YTD without projection: null (project both), 'all' (final for both), 'him'/'her' (final for one, project the other)"),
     stock_price: float | None = Field(default=None, description="Stock price for RSU valuation. Use get_stock_quote() to fetch current price for GOOG."),
 ) -> dict[str, Any] | str:
     """Calculate federal tax liability and refund/owed amount.
@@ -301,12 +301,18 @@ async def generate_tax_projection(
 
     Data sources (in priority order):
     1. Official W-2 records (from records import)
-    2. W-2 extract files (from w2-extract command)
-    3. Generated W-2 from pay stubs (via SDK)
+    2. Latest stub → projected to year-end (default)
+    3. Latest stub as-is (if ytd_final_party specified)
 
-    With allow_projection=True, projects income to year-end based on:
+    By default, projects income to year-end based on:
     - Regular pay pattern (biweekly/monthly cadence)
     - RSU vesting schedule (if configured and stock_price provided)
+
+    The ytd_final_party parameter controls per-party projection:
+    - null/None: project both parties to year-end (default)
+    - "all": use final YTD for both parties (no projection)
+    - "him": use final YTD for him, project her
+    - "her": use final YTD for her, project him
 
     Returns structured JSON with data_sources metadata showing where each
     party's W-2 data came from. CSV format available for spreadsheet import.
@@ -319,7 +325,7 @@ async def generate_tax_projection(
         result = sdk_tax_projection(
             year,
             output_format=output_format,
-            allow_projection=allow_projection,
+            ytd_final_party=ytd_final_party,
             stock_price=stock_price,
         )
 

@@ -402,7 +402,7 @@ def _normalize_employer(name: str) -> str:
 def generate_w2(
     year: str,
     party: str,
-    allow_projection: bool = False,
+    allow_projection: bool = True,
     stock_price: Optional[float] = None,
 ) -> dict:
     """Generate W-2 data for a party, per-employer.
@@ -410,12 +410,14 @@ def generate_w2(
     For each employer:
     1. Check for official W-2 record → use it
     2. Else get latest stub → generate W-2 from it
-    3. If stub incomplete (not December) → project if allowed
+    3. If stub incomplete (not December) → project to year-end (default)
 
     Args:
         year: Tax year (4 digits)
         party: 'him' or 'her'
-        allow_projection: If True, project to year-end when stub data incomplete
+        allow_projection: If True (default), project incomplete stubs to year-end.
+            If False, use stubs as-is (ytd-final mode) - trusts user assertion
+            that the YTD values are complete/final.
         stock_price: Stock price for RSU valuation (used with projection)
 
     Returns:
@@ -426,7 +428,6 @@ def generate_w2(
 
     Raises:
         FileNotFoundError: If no W-2 or stub data found
-        ValueError: If incomplete year and allow_projection=False
     """
     from collections import defaultdict
     from .records import list_records
@@ -614,19 +615,41 @@ def generate_w2(
                 aggregated_w2[k] += v
 
         else:
-            raise ValueError(
-                f"Latest stub for {display_name} is from {pay_date_str} (not December). "
-                f"Set allow_projection=True to project to year-end."
+            # ytd-final mode: use stub as-is even if not December
+            # User asserted this is their final YTD data
+            w2_result = stub_to_w2(
+                stub=latest_stub,
+                year=year,
+                party=party,
+                validate=True,
             )
+            source_note = "ytd-final"
+            employer_results.append({
+                "employer": display_name,
+                "source": source_note,
+                "source_detail": f"Stub {stub_id} ({pay_date_str})",
+                "w2": w2_result["w2"],
+            })
+            sources_used.append(f"{display_name}: {source_note} {pay_date_str}")
 
-    # Validate tolerance if any data came from stubs (not official W-2s)
-    # This catches data errors before actual W-2 is available
-    has_stub_source = any(
-        e.get("source") in ("stub", "final", "projection")
-        for e in employer_results
-    )
-    if has_stub_source and party:
-        validate_w2_tolerance(dict(aggregated_w2), year, party)
+            for k, v in w2_result["w2"].items():
+                aggregated_w2[k] += v
+
+    # Validate tolerance if using final YTD data (not projecting)
+    # Skip tolerance check when projecting - income variance is expected mid-year
+    # Run tolerance check in ytd-final mode to catch data import errors
+    #
+    # TODO: Make tolerance thresholds configurable (see TODO.md #15)
+    # - Separate thresholds for base pay (tighter, ~15%) vs supplemental income (wider, ~50%)
+    # - Load from settings.json: tolerance.base_pay_variance, tolerance.supplemental_income_variance
+    # - Use _pay_type field to classify income components before comparing
+    if not allow_projection:
+        has_stub_source = any(
+            e.get("source") in ("stub", "final", "ytd-final")
+            for e in employer_results
+        )
+        if has_stub_source and party:
+            validate_w2_tolerance(dict(aggregated_w2), year, party)
 
     return {
         "w2": dict(aggregated_w2),

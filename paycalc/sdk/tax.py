@@ -290,7 +290,7 @@ def generate_projection(
     year: str,
     data_dir: Path = None,
     tax_rules: dict = None,
-    allow_projection: bool = False,
+    ytd_final_party: Optional[str] = None,
     stock_price: Optional[float] = None,
 ) -> dict:
     """Generate tax projection data for a given year.
@@ -299,8 +299,11 @@ def generate_projection(
         year: Tax year (e.g., "2024")
         data_dir: Directory containing W-2 data files. Defaults to XDG data path.
         tax_rules: Optional pre-loaded tax rules (loads from file if not provided)
-        allow_projection: If True, allow income projection for incomplete stub data
-        stock_price: Stock price for RSU valuation (used with allow_projection)
+        ytd_final_party: Controls income projection per party:
+            None (default) - project both parties to year-end
+            "all" - use final YTD for both (no projection)
+            "him"/"her" - use final YTD for that party, project the other
+        stock_price: Stock price for RSU valuation (used with projection)
 
     Returns:
         Dictionary with all projection data including data_sources metadata
@@ -313,6 +316,27 @@ def generate_projection(
 
     if tax_rules is None:
         tax_rules = load_tax_rules(year)
+
+    # Determine per-party projection settings from ytd_final_party
+    # allow_projection=True means project to year-end, False means use as-is
+    if ytd_final_party is None:
+        # Default: project both parties
+        him_allow_projection = True
+        her_allow_projection = True
+    elif ytd_final_party == "all":
+        # ytd-final for both: no projection
+        him_allow_projection = False
+        her_allow_projection = False
+    elif ytd_final_party == "him":
+        # ytd-final for him only
+        him_allow_projection = False
+        her_allow_projection = True
+    elif ytd_final_party == "her":
+        # ytd-final for her only
+        him_allow_projection = True
+        her_allow_projection = False
+    else:
+        raise ValueError(f"Invalid ytd_final_party: {ytd_final_party}. Must be None, 'all', 'him', or 'her'.")
 
     # Get supplemental values (non-wage income, credits, etc.) with source tracking
     supplemental_lookups = {
@@ -330,12 +354,12 @@ def generate_projection(
     # Load W-2 data for both parties (with source tracking)
     him_result = load_party_w2_data(
         data_dir, year, "him",
-        allow_projection=allow_projection,
+        allow_projection=him_allow_projection,
         stock_price=stock_price,
     )
     her_result = load_party_w2_data(
         data_dir, year, "her",
-        allow_projection=allow_projection,
+        allow_projection=her_allow_projection,
         stock_price=stock_price,
     )
 
@@ -724,7 +748,7 @@ def generate_tax_projection(
     year: str,
     data_dir: Optional[Path] = None,
     output_format: Literal["json", "csv"] = "json",
-    allow_projection: bool = False,
+    ytd_final_party: Optional[str] = None,
     stock_price: Optional[float] = None,
 ) -> Union[dict, str]:
     """Generate tax projection data.
@@ -736,8 +760,11 @@ def generate_tax_projection(
         year: Tax year (e.g., "2024")
         data_dir: Directory containing W-2 data files. Defaults to XDG data path.
         output_format: "json" returns dict (default), "csv" returns CSV string.
-        allow_projection: If True and stub data incomplete, include income projection
-        stock_price: Stock price for RSU valuation (used with allow_projection)
+        ytd_final_party: Controls income projection per party:
+            None (default) - project both parties to year-end
+            "all" - use final YTD for both (no projection)
+            "him"/"her" - use final YTD for that party, project the other
+        stock_price: Stock price for RSU valuation (used with projection)
 
     Returns:
         dict (json format) or str (csv format)
@@ -752,7 +779,7 @@ def generate_tax_projection(
     projection = generate_projection(
         year,
         data_dir,
-        allow_projection=allow_projection,
+        ytd_final_party=ytd_final_party,
         stock_price=stock_price,
     )
 

@@ -33,3 +33,4 @@ settings.json
 pay-calc/
 gwsa-debug.log
 .cache/
+working-*.txt

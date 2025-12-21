@@ -407,9 +407,9 @@ def tax_group():
               help="Output format (default: text)")
 @click.option("--data-dir", type=click.Path(exists=True),
               help="Directory containing W-2 or analysis JSON files (default: XDG data dir)")
-@click.option("--allow-projection", is_flag=True,
-              help="Allow income projection for employers with incomplete stub data")
-def tax_project(year, output_format, data_dir, allow_projection):
+@click.option("--ytd-final", "ytd_final", type=click.Choice(["all", "him", "her"]), default=None,
+              help="Use stub YTD as-is: all (both parties), him, or her")
+def tax_project(year, output_format, data_dir, ytd_final):
     """Calculate federal tax liability and refund/owed amount.
 
     Loads income data for both parties (him + her), applies tax brackets,
@@ -420,8 +420,14 @@ def tax_project(year, output_format, data_dir, allow_projection):
     \b
     Data sources (per employer, in order of preference):
     1. Official W-2 records (imported W-2 forms)
-    2. Latest stub from records (if December, year complete)
-    3. Projection from latest stub (if --allow-projection)
+    2. Latest stub from records → projected to year-end (default)
+    3. Latest stub as-is (if --ytd-final)
+
+    \b
+    The --ytd-final option controls income projection:
+      --ytd-final=all    Use final YTD for both parties (no projection)
+      --ytd-final=him    Use final YTD for him, project her
+      --ytd-final=her    Use final YTD for her, project him
 
     \b
     Output formats:
@@ -441,19 +447,25 @@ def tax_project(year, output_format, data_dir, allow_projection):
 
     data_path = Path(data_dir) if data_dir else get_data_path()
 
+    # --ytd-final controls per-party projection:
+    #   None         -> project both parties (default)
+    #   "all"        -> ytd-final for both (no projection)
+    #   "him"/"her"  -> ytd-final for that party only
+    ytd_final_party = ytd_final  # None, "all", "him", or "her"
+
     try:
         if output_format == "text":
             # Get JSON, format as ASCII tables (includes data sources in output)
             projection = generate_tax_projection(
                 year, data_dir=data_path, output_format="json",
-                allow_projection=allow_projection
+                ytd_final_party=ytd_final_party
             )
             click.echo(_format_tax_projection_text(projection))
         elif output_format == "json":
             # JSON output already includes data_sources in the response object
             projection = generate_tax_projection(
                 year, data_dir=data_path, output_format="json",
-                allow_projection=allow_projection
+                ytd_final_party=ytd_final_party
             )
             click.echo(json.dumps(projection, indent=2))
         else:  # csv
@@ -461,7 +473,7 @@ def tax_project(year, output_format, data_dir, allow_projection):
             from paycalc.sdk.tax import projection_to_csv_string
             projection = generate_tax_projection(
                 year, data_dir=data_path, output_format="json",
-                allow_projection=allow_projection
+                ytd_final_party=ytd_final_party
             )
             csv_output = projection_to_csv_string(projection)
             click.echo(csv_output)
