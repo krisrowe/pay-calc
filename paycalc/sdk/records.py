@@ -86,7 +86,7 @@ def matches_jsonpath(data: Dict[str, Any], expression: str) -> bool:
     Args:
         data: Record data dictionary (the 'data' field from a record)
         expression: JSONPath expression using jsonpath-ng.ext syntax. Examples:
-            $.earnings[?type=="Recognition Bonus" & current_amount>0]
+            $.earnings[?type=="Bonus" & current_amount>0]
             $.taxes.federal_income_tax.current_withheld
 
     Returns:

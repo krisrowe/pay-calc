@@ -344,7 +344,7 @@ def calc(year, party, salary, bonus, other_salary, future_grant, price, salary_r
     other_party = "her" if party == "him" else "him"
     other_w4_settings = load_w4_settings(other_party)
 
-    # Calculate salary (default from typical Employer A LLC biweekly)
+    # Calculate salary (default biweekly amount)
     salary_source = None
     biweekly_gross = 5000.00  # default
     if salary is None:
