@@ -1,3 +1,5 @@
+# IRS Form 1040 Instructions - Tax Rate Schedules
+# Revenue Procedure 2025-32 (2026 inflation adjustments)
 mfj:
   standard_deduction: 32200
   tax_brackets:
@@ -8,6 +10,12 @@ mfj:
     - { up_to: 512450, rate: 0.32 }
     - { up_to: 768700, rate: 0.35 }
     - { over: 768700, rate: 0.37 }
+  # Qualified Dividends and Capital Gain Tax Worksheet thresholds
+  # https://apps.irs.gov/app/vita/content/globalmedia/capital_gain_tax_worksheet_1040i.pdf
+  capital_gains_brackets:
+    - { up_to: 98900, rate: 0.00 }
+    - { up_to: 613700, rate: 0.15 }
+    - { over: 613700, rate: 0.20 }
 additional_medicare_tax_threshold: 250000.00
 additional_medicare_withholding_threshold: 200000.00  # Per-employee threshold for employer withholding
 

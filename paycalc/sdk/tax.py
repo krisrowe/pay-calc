@@ -108,6 +108,91 @@ def calculate_federal_income_tax(taxable_income: float, tax_brackets: list) -> f
     return tax_owed
 
 
+def calculate_qualified_dividend_tax(
+    taxable_income: float,
+    qualified_dividends: float,
+    capital_gains: float,
+    tax_brackets: list,
+    capital_gains_brackets: list,
+) -> float:
+    """Calculate tax using IRS Qualified Dividends and Capital Gain Tax Worksheet.
+
+    When qualified dividends or long-term capital gains are present, this worksheet
+    calculates a lower tax than straight bracket math by applying preferential rates
+    (0%, 15%, 20%) to the qualified income portion.
+
+    Reference: IRS Form 1040 Instructions, Line 16
+    https://apps.irs.gov/app/vita/content/globalmedia/capital_gain_tax_worksheet_1040i.pdf
+
+    Args:
+        taxable_income: Form 1040 Line 15 (total taxable income)
+        qualified_dividends: Form 1040 Line 3a (qualified dividends)
+        capital_gains: Net long-term capital gains (from Schedule D or 0 if loss)
+        tax_brackets: Ordinary income tax brackets from tax-rules YAML
+        capital_gains_brackets: Capital gains brackets from tax-rules YAML
+
+    Returns:
+        Federal income tax (Form 1040 Line 16)
+    """
+    # Handle case where no qualified income - use regular brackets
+    capital_gains_for_worksheet = max(0, capital_gains)  # Losses don't get preferential treatment
+    total_qualified_income = qualified_dividends + capital_gains_for_worksheet
+
+    if total_qualified_income <= 0:
+        return calculate_federal_income_tax(taxable_income, tax_brackets)
+
+    # Worksheet Line 1: Taxable income
+    line_1 = taxable_income
+
+    # Worksheet Line 4: Total qualified income (dividends + gains)
+    line_4 = min(total_qualified_income, taxable_income)  # Can't exceed taxable income
+
+    # Worksheet Line 5: Ordinary income (taxable - qualified)
+    line_5 = max(0, line_1 - line_4)
+
+    # Calculate tax on qualified income at preferential rates
+    # Qualified income "stacks" on top of ordinary income
+    qualified_tax = 0.0
+    remaining_qualified = line_4
+    income_floor = line_5  # Ordinary income fills brackets first
+
+    sorted_cg_brackets = sorted(capital_gains_brackets, key=lambda b: b.get("up_to", float("inf")))
+
+    for bracket in sorted_cg_brackets:
+        if remaining_qualified <= 0:
+            break
+
+        rate = bracket["rate"]
+
+        if "up_to" in bracket:
+            bracket_ceiling = bracket["up_to"]
+            # How much room is in this bracket above ordinary income?
+            room_in_bracket = max(0, bracket_ceiling - income_floor)
+            taxable_at_this_rate = min(remaining_qualified, room_in_bracket)
+
+            qualified_tax += taxable_at_this_rate * rate
+            remaining_qualified -= taxable_at_this_rate
+            income_floor = max(income_floor, bracket_ceiling)
+
+        elif "over" in bracket:
+            # Top bracket - all remaining qualified income taxed here
+            qualified_tax += remaining_qualified * rate
+            remaining_qualified = 0
+
+    # Calculate tax on ordinary income at regular rates
+    ordinary_tax = calculate_federal_income_tax(line_5, tax_brackets)
+
+    # Total tax using worksheet method
+    worksheet_tax = ordinary_tax + qualified_tax
+
+    # Compare to straight bracket calculation (worksheet Line 24)
+    # Tax should never be higher than if all income was ordinary
+    straight_tax = calculate_federal_income_tax(taxable_income, tax_brackets)
+
+    # Return the smaller amount (worksheet Line 25)
+    return min(worksheet_tax, straight_tax)
+
+
 def calculate_additional_medicare_withheld(medicare_wages: float, year: str) -> float:
     """Calculate Additional Medicare Tax withheld per W-2 (0.9% of wages over threshold).
 
@@ -282,9 +367,25 @@ def generate_projection(
     total_deductions = standard_deduction + qbi_deduction
     final_taxable_income = max(0, total_income - total_deductions)
 
-    federal_income_tax_assessed = calculate_federal_income_tax(
-        final_taxable_income, tax_rules["mfj"]["tax_brackets"]
-    )
+    # Calculate federal income tax using Qualified Dividends and Capital Gain Worksheet
+    # when qualified dividends or capital gains are present
+    # Reference: https://apps.irs.gov/app/vita/content/globalmedia/capital_gain_tax_worksheet_1040i.pdf
+    qualified_dividends = supplemental["dividend_income"].value  # Assumed all qualified
+    capital_gains = supplemental["capital_gain_loss"].value
+    capital_gains_brackets = tax_rules["mfj"].get("capital_gains_brackets")
+
+    if capital_gains_brackets and (qualified_dividends > 0 or capital_gains > 0):
+        federal_income_tax_assessed = calculate_qualified_dividend_tax(
+            final_taxable_income,
+            qualified_dividends,
+            capital_gains,
+            tax_rules["mfj"]["tax_brackets"],
+            capital_gains_brackets,
+        )
+    else:
+        federal_income_tax_assessed = calculate_federal_income_tax(
+            final_taxable_income, tax_rules["mfj"]["tax_brackets"]
+        )
 
     medicare_threshold = tax_rules["additional_medicare_tax_threshold"]
     additional_medicare_tax = calculate_additional_medicare_tax(
