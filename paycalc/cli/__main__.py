@@ -367,10 +367,13 @@ def _format_tax_projection_text(proj: dict) -> str:
         lines.append(f"  SS overpayment credit:     ${total_ss_overpayment:>12,.2f}")
 
     lines.append("  " + "=" * 38)
+    # Show refund/owed with percentage of total income for context
+    total_income = proj.get('total_income', 0)
+    pct = abs(proj['final_refund']) / total_income * 100 if total_income > 0 else 0
     if proj["final_refund"] >= 0:
-        lines.append(f"  REFUND:                    ${proj['final_refund']:>12,.2f}")
+        lines.append(f"  REFUND:                    ${proj['final_refund']:>12,.2f}  ({pct:.1f}% of income)")
     else:
-        lines.append(f"  OWED:                     -${abs(proj['final_refund']):>12,.2f}")
+        lines.append(f"  OWED:                     -${abs(proj['final_refund']):>12,.2f}  ({pct:.1f}% of income)")
 
     # Data sources section - use SDK helper for consistent formatting
     data_sources = proj.get("data_sources", {})
