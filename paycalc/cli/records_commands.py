@@ -194,6 +194,12 @@ def records_cli():
 @click.option("--type", "type_filter", type=click.Choice(["stub", "w2"]),
               help="Filter by record type.")
 @click.option("--employer", help="Filter by employer (case-insensitive substring match).")
+@click.option("--data-filter", "data_filter",
+              help="JSONPath expression to filter records by data content. Evaluated against each record's "
+                   "'data' object (use 'records show <id> --format json' to see structure). "
+                   "Syntax: jsonpath-ng.ext (uses '&' for AND, '=~' for regex). "
+                   "Examples: '$.earnings[?type==\"Bonus\" & current_amount>0]', "
+                   "'$.deductions[?type=~\".*401.*\"]'.")
 @click.option("--show-discarded", is_flag=True,
               help="Also show discarded records.")
 @click.option("--format", "output_format", type=click.Choice(["text", "json"]),
@@ -201,7 +207,7 @@ def records_cli():
 @click.option("--verbose", "-v", is_flag=True,
               help="Show dedup fields (doc_id, medicare) for diffing between importers.")
 def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer: Optional[str],
-                 show_discarded: bool, output_format: str, verbose: bool):
+                 data_filter: Optional[str], show_discarded: bool, output_format: str, verbose: bool):
     """List pay records.
 
     FILTERS can be year (4 digits) and/or party (him/her) in any order.
@@ -213,8 +219,18 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
       pay-calc records list her          # All years for her
       pay-calc records list 2025 her     # Just 2025/her
       pay-calc records list --type stub  # Only stubs
-      pay-calc records list --employer "Employer A LLC"  # Filter by employer
+      pay-calc records list --employer "Acme Corp"   # Filter by employer
       pay-calc records list -v           # Verbose with dedup fields
+
+    \b
+    Data filtering (--data-filter, uses jsonpath-ng.ext syntax):
+      # Stubs with bonus earnings
+      pay-calc records list --data-filter '$.earnings[?type=="Bonus" & current_amount>0]'
+
+      # Stubs with 401k contributions (regex match on type)
+      pay-calc records list --data-filter '$.deductions[?type=~".*401.*" & current_amount>0]'
+
+      # Use 'records show <id> --format json' to see data structure for expressions
     """
     year, party = parse_year_party_filters(filters)
 
@@ -222,7 +238,8 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
         year=year,
         party=party,
         type_filter=type_filter,
-        include_discarded=show_discarded
+        include_discarded=show_discarded,
+        data_filter=data_filter
     )
 
     # Filter by employer if specified
@@ -253,6 +270,8 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
             filter_desc.append(f"type={type_filter}")
         if employer:
             filter_desc.append(f"employer={employer}")
+        if data_filter:
+            filter_desc.append(f"data-filter={data_filter}")
         desc = "/".join(filter_desc) if filter_desc else "any filters"
         click.echo(f"No records found for {desc}")
         click.echo(f"\nRun 'pay-calc records import' to import records.")

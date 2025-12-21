@@ -19,6 +19,9 @@ setup(
             'mcp[cli]>=1.0.0',
             'pydantic>=2.0.0',
         ],
+        'filter': [
+            'jsonpath-ng>=1.6.0',
+        ],
     },
     entry_points={
         'console_scripts': [

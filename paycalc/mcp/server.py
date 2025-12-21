@@ -23,6 +23,7 @@ async def list_records(
     party: str | None = Field(default=None, description="Filter by party ('him' or 'her')"),
     record_type: str | None = Field(default=None, description="Filter by type ('stub' or 'w2')"),
     employer: str | None = Field(default=None, description="Filter by employer name (case-insensitive substring match)"),
+    data_filter: str | None = Field(default=None, description="JSONPath expression to filter records by data content (jsonpath-ng.ext syntax). Evaluated against each record's 'data' object. Syntax: '&' for AND, '=~' for regex. Examples: '$.earnings[?type==\"Bonus\" & current_amount>0]', '$.deductions[?type=~\".*401.*\"]'. Use get_record to see data structure."),
     limit: int = Field(default=50, description="Maximum number of records to return (default 50)"),
 ) -> dict[str, Any]:
     """List pay records (stubs and W-2s) with optional filters. Returns record IDs, dates, employers, and amounts."""
@@ -33,6 +34,7 @@ async def list_records(
             party=party,
             type_filter=record_type,
             include_discarded=False,
+            data_filter=data_filter,
         )
 
         # Apply employer filter if specified
@@ -85,6 +87,7 @@ async def list_records(
                 "party": party,
                 "type": record_type,
                 "employer": employer,
+                "data_filter": data_filter,
             },
         }
 

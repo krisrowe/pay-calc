@@ -46,6 +46,8 @@ pay-calc records import ./local/folder    # Import from local folder
 pay-calc records import ./file.pdf        # Import single file
 pay-calc records list                     # List all imported records
 pay-calc records list 2025 him            # Filter by year/party
+pay-calc records list --data-filter '$.earnings[?type=="Bonus" & current_amount>0]'
+pay-calc records list --data-filter '$.deductions[?type=~".*401.*"]'
 pay-calc records show <id>                # Show record details
 pay-calc records remove <id>              # Remove a record
 
@@ -129,6 +131,7 @@ pay-calc tax-projection 2024
 |---------|------------------|-------|--------|
 | `records import` | Convert PDFs to JSON | Drive folder or local folder | Local JSON records |
 | `records list` | View imported records | Local JSON records | Table display |
+| `records list --data-filter` | Filter by JSONPath expression | Local JSON records | Filtered table |
 | `analysis` | Validate stubs, extract YTD totals | Local JSON records | `YYYY_party_pay_all.json` |
 | `projection` | Project year-end totals | Analysis output | Projection report |
 | `taxes` | Calculate tax liability | W-2 JSON or analysis output | `YYYY_tax_projection.csv` |
@@ -356,8 +359,11 @@ If your use case exceeds these assumptions, see [DESIGN.md](DESIGN.md) for migra
 - PyYAML - For reading configuration files
 - gwsa - For Google Drive integration (optional, for Drive imports)
 - gemini-client - For OCR of image-based PDFs (optional)
+- jsonpath-ng - For JSONPath filtering in `records list --data-filter` (optional)
 
 Install dependencies:
 ```bash
 pip install PyPDF2 PyYAML
+# For JSONPath filtering:
+pip install jsonpath-ng
 ```

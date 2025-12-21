@@ -594,3 +594,119 @@ This section documents optimization ideas that were considered but rejected, wit
 **Decision:** Keep individual JSON files for records. Consider JSONL for tracking if it grows beyond 5,000 entries.
 
 
+## Future Directions: Generalizing the Records System
+
+This section captures architectural evolution ideas that could make pay-calc a more general-purpose JSON records management tool.
+
+### Modular Type System with Registered Components
+
+**Current state:** Record types (stub, w2, form_1040) have processing logic scattered across multiple functions: PDF parsing, validation schemas, duplicate detection, year/party extraction, display formatting.
+
+**Vision:** Each record type becomes a registered module implementing a common interface:
+
+```python
+class RecordTypeHandler(Protocol):
+    """Interface for pluggable record type handlers."""
+
+    type_name: str  # e.g., "stub", "w2", "1099"
+
+    def detect(self, data: dict) -> float:
+        """Return confidence score (0-1) that this data matches this type."""
+        ...
+
+    def validate(self, data: dict) -> tuple[list[str], list[str]]:
+        """Return (errors, warnings) after schema and math validation."""
+        ...
+
+    def extract_identity(self, data: dict) -> dict:
+        """Extract fields used for duplicate detection."""
+        ...
+
+    def extract_year(self, data: dict) -> str | None:
+        """Extract year from record data."""
+        ...
+
+    def extract_party(self, data: dict, config: dict) -> str | None:
+        """Detect party from employer name or other fields."""
+        ...
+
+    def format_display(self, record: dict, verbose: bool) -> str:
+        """Format record for CLI display."""
+        ...
+
+    @property
+    def schema(self) -> dict:
+        """Return JSON Schema for validation."""
+        ...
+```
+
+**Benefits:**
+- Single source of truth per type (all logic in one module)
+- Easy to add new types (just register a new handler)
+- Type-specific validation is encapsulated
+- Duplicate detection uses type-aware identity extraction
+- Clear separation of concerns
+
+**Registration:**
+```python
+# paycalc/types/__init__.py
+HANDLERS: dict[str, RecordTypeHandler] = {}
+
+def register(handler: RecordTypeHandler):
+    HANDLERS[handler.type_name] = handler
+
+# paycalc/types/stub.py
+class StubHandler:
+    type_name = "stub"
+    # ... implement interface
+
+register(StubHandler())
+```
+
+### General Purpose JSON Records Tool
+
+**Vision:** The core records management (import, list, show, filter, validate) becomes type-agnostic. The tool manages any JSON records with:
+
+- **Type detection via registered handlers** (or fall back to user-specified type)
+- **Schema validation via JSON Schema** (bundled or user-provided)
+- **Flexible import from PDF or JSON** via rules or AI
+- **JSONPath-based filtering** for querying (already implemented)
+- **Content-based identity** for duplicate detection per type
+
+**Import pipeline would become:**
+```
+PDF/Image → [OCR/Parser selection based on rules or AI] → JSON
+JSON → [Type detection via handlers] → Validation → Storage
+```
+
+**Use cases beyond pay stubs:**
+- 1099 forms (contractor income)
+- State tax returns
+- Invoices and receipts
+- Bank statements
+- Notes and knowledge management (structured JSON with metadata)
+- Task/todo tracking (with status, dates, tags)
+- Any structured PDF or JSON document
+
+**What stays specific:**
+- The actual handlers for each type (StubHandler, W2Handler, etc.)
+- Tax calculation logic (specific to income tax domain)
+- Profile configuration (party definitions, employer keywords)
+
+**What becomes general:**
+- Record storage and retrieval
+- JSONPath filtering
+- Import pipeline orchestration
+- Duplicate detection framework
+- CLI structure (list, show, import, remove)
+
+### Implementation Path
+
+1. **Current:** Hardcoded logic for stub/w2/form_1040
+2. **Phase 1:** Extract type-specific logic into handler classes (internal refactor)
+3. **Phase 2:** Make handlers pluggable via registration
+4. **Phase 3:** Allow user-defined handlers for custom document types
+5. **Phase 4:** Extract generic records engine as separate package
+
+This evolution preserves the current functionality while opening the door for the tool to handle any structured document type, not just pay stubs.
+

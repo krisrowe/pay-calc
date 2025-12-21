@@ -74,6 +74,51 @@ RecordType = Literal["stub", "w2", "discarded"]
 
 
 # =============================================================================
+# AMOUNT FILTERING (JSONPath-based)
+# =============================================================================
+
+def matches_jsonpath(data: Dict[str, Any], expression: str) -> bool:
+    """Check if JSONPath expression matches any non-zero values in data.
+
+    The expression is evaluated against the record's data object (same structure
+    as shown by 'pay-calc records show <id> --format json' under the 'data' key).
+
+    Args:
+        data: Record data dictionary (the 'data' field from a record)
+        expression: JSONPath expression using jsonpath-ng.ext syntax. Examples:
+            $.earnings[?type=="Recognition Bonus" & current_amount>0]
+            $.taxes.federal_income_tax.current_withheld
+
+    Returns:
+        True if the expression matches at least one value
+
+    Examples:
+        # Find stubs with current bonus > 0
+        matches_jsonpath(data, '$.earnings[?type=="Bonus" & current_amount>0]')
+
+        # Find stubs with any 401k current deduction
+        matches_jsonpath(data, '$.deductions[?type=~".*401.*" & current_amount>0]')
+    """
+    try:
+        from jsonpath_ng.ext import parse  # ext module supports filter expressions
+        from jsonpath_ng.exceptions import JsonPathParserError
+    except ImportError:
+        logger.warning("jsonpath-ng not installed, data_filter disabled")
+        return False
+
+    try:
+        jsonpath_expr = parse(expression)
+        matches = jsonpath_expr.find(data)
+        return len(matches) > 0
+    except JsonPathParserError as e:
+        logger.warning(f"Invalid JSONPath expression '{expression}': {e}")
+        return False
+    except Exception as e:
+        logger.warning(f"JSONPath evaluation error: {e}")
+        return False
+
+
+# =============================================================================
 # VALIDATION PIPELINE
 # =============================================================================
 
@@ -567,7 +612,8 @@ def list_records(
     year: Optional[str] = None,
     party: Optional[str] = None,
     type_filter: Optional[RecordType] = None,
-    include_discarded: bool = False
+    include_discarded: bool = False,
+    data_filter: Optional[str] = None
 ) -> List[Dict[str, Any]]:
     """List records with optional filters.
 
@@ -576,6 +622,16 @@ def list_records(
         party: Filter by party (e.g., "him", "her")
         type_filter: Filter by type ("stub", "w2")
         include_discarded: Include discarded records (default False)
+        data_filter: JSONPath expression to filter records. The expression is
+            evaluated against each record's 'data' object. Records where the
+            expression matches at least one value are included.
+
+            Examples:
+                $.earnings[?type=="Bonus" & current_amount>0]
+                $.deductions[?type=~".*401.*" & current_amount>0]
+
+            See 'pay-calc records show <id> --format json' to view the data
+            structure for building expressions.
 
     Returns:
         List of records, each with 'meta', 'data', and 'id' keys
@@ -622,6 +678,12 @@ def list_records(
             if party:
                 meta_party = meta.get("party", "")
                 if meta_party != party:
+                    continue
+
+            # Apply JSONPath filter
+            if data_filter:
+                data = record.get("data", {})
+                if not matches_jsonpath(data, data_filter):
                     continue
 
             # Add ID and path for convenience

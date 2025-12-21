@@ -453,7 +453,7 @@ def load_form_1040(year: str, data_dir: Optional[Path] = None) -> Optional[dict]
         data_dir: Directory containing records. Defaults to XDG data path.
 
     Returns:
-        Parsed 1040 JSON or None if not found
+        Parsed 1040 data dict (unwrapped from 'data' key if present), or None if not found
     """
     from .config import get_data_path
 
@@ -464,7 +464,11 @@ def load_form_1040(year: str, data_dir: Optional[Path] = None) -> Optional[dict]
     form_path = data_dir / "records" / f"form_1040_{year}.json"
     if form_path.exists():
         with open(form_path) as f:
-            return json.load(f)
+            raw = json.load(f)
+        # Unwrap 'data' key if present (record format has meta + data)
+        if "data" in raw and "income" in raw.get("data", {}):
+            return raw["data"]
+        return raw
 
     return None
 
