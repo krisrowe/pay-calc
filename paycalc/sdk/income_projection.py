@@ -161,8 +161,14 @@ def get_rsu_projection(
             if month_key not in by_month:
                 warnings.append(f"No RSU vesting data for {month_key}")
 
+        total_shares = proj.get("total_shares", 0)
+
+        # Warn if RSU shares exist but no price provided for valuation
+        if total_shares > 0 and not price:
+            warnings.append(f"RSU projection skipped: {total_shares} shares pending but no stock price provided")
+
         return {
-            "rsu_shares": proj.get("total_shares", 0),
+            "rsu_shares": total_shares,
             "rsu_gross": proj.get("total_value", 0) if price else 0,
             "months_covered": months_covered,
             "warnings": warnings,

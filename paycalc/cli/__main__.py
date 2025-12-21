@@ -411,7 +411,9 @@ def tax_group():
               help="Directory containing W-2 or analysis JSON files (default: XDG data dir)")
 @click.option("--ytd-final", "ytd_final", type=click.Choice(["all", "him", "her"]), default=None,
               help="Use stub YTD as-is: all (both parties), him, or her")
-def tax_project(year, output_format, data_dir, ytd_final):
+@click.option("--stock-price", "stock_price", type=float, default=None,
+              help="Stock price for RSU projection (e.g., GOOG price for valuing unvested shares)")
+def tax_project(year, output_format, data_dir, ytd_final, stock_price):
     """Calculate federal tax liability and refund/owed amount.
 
     Loads income data for both parties (him + her), applies tax brackets,
@@ -460,14 +462,14 @@ def tax_project(year, output_format, data_dir, ytd_final):
             # Get JSON, format as ASCII tables (includes data sources in output)
             projection = generate_tax_projection(
                 year, data_dir=data_path, output_format="json",
-                ytd_final_party=ytd_final_party
+                ytd_final_party=ytd_final_party, stock_price=stock_price
             )
             click.echo(_format_tax_projection_text(projection))
         elif output_format == "json":
             # JSON output already includes data_sources in the response object
             projection = generate_tax_projection(
                 year, data_dir=data_path, output_format="json",
-                ytd_final_party=ytd_final_party
+                ytd_final_party=ytd_final_party, stock_price=stock_price
             )
             click.echo(json.dumps(projection, indent=2))
         else:  # csv
@@ -475,7 +477,7 @@ def tax_project(year, output_format, data_dir, ytd_final):
             from paycalc.sdk.tax import projection_to_csv_string
             projection = generate_tax_projection(
                 year, data_dir=data_path, output_format="json",
-                ytd_final_party=ytd_final_party
+                ytd_final_party=ytd_final_party, stock_price=stock_price
             )
             csv_output = projection_to_csv_string(projection)
             click.echo(csv_output)
