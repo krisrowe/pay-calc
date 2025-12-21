@@ -342,7 +342,8 @@ def generate_projection(
     supplemental_lookups = {
         "interest_income": ("income.line_2b_taxable_interest", "tax_years.{year}.interest_income"),
         "dividend_income": ("income.line_3b_ordinary_dividends", "tax_years.{year}.dividend_income"),
-        "capital_gain_loss": ("income.line_7_capital_gain_loss", "tax_years.{year}.capital_gain_loss"),
+        "short_term_gain_loss": ("schedule_summaries.schedule_d.short_term_gain_loss", "tax_years.{year}.short_term_gain_loss"),
+        "long_term_gain_loss": ("schedule_summaries.schedule_d.long_term_gain_loss", "tax_years.{year}.long_term_gain_loss"),
         "schedule_1_income": ("income.line_8_schedule_1_income", "tax_years.{year}.schedule_1_income"),
         "qbi_deduction": ("deductions.line_13_qbi_deduction", "tax_years.{year}.qbi_deduction"),
         "child_care_expenses": ("schedule_summaries.form_2441.qualified_expenses", "tax_years.{year}.child_care_expenses"),
@@ -382,10 +383,12 @@ def generate_projection(
     combined_medicare_withheld = him_medicare_withheld + her_medicare_withheld
 
     # Calculate total income including supplemental (non-wage) income
+    # Capital gains: short-term + long-term (both can be negative)
+    capital_gain_loss = supplemental["short_term_gain_loss"].value + supplemental["long_term_gain_loss"].value
     non_wage_income = (
         supplemental["interest_income"].value
         + supplemental["dividend_income"].value
-        + supplemental["capital_gain_loss"].value  # Can be negative
+        + capital_gain_loss
         + supplemental["schedule_1_income"].value
     )
     total_income = combined_wages + non_wage_income
@@ -397,17 +400,18 @@ def generate_projection(
     final_taxable_income = max(0, total_income - total_deductions)
 
     # Calculate federal income tax using Qualified Dividends and Capital Gain Worksheet
-    # when qualified dividends or capital gains are present
+    # when qualified dividends or LONG-TERM capital gains are present
+    # Short-term gains are taxed at ordinary income rates (already included in total_income)
     # Reference: https://apps.irs.gov/app/vita/content/globalmedia/capital_gain_tax_worksheet_1040i.pdf
     qualified_dividends = supplemental["dividend_income"].value  # Assumed all qualified
-    capital_gains = supplemental["capital_gain_loss"].value
+    long_term_gains = supplemental["long_term_gain_loss"].value  # Only long-term gets preferential rates
     capital_gains_brackets = tax_rules["mfj"].get("capital_gains_brackets")
 
-    if capital_gains_brackets and (qualified_dividends > 0 or capital_gains > 0):
+    if capital_gains_brackets and (qualified_dividends > 0 or long_term_gains > 0):
         federal_income_tax_assessed = calculate_qualified_dividend_tax(
             final_taxable_income,
             qualified_dividends,
-            capital_gains,
+            long_term_gains,  # Only long-term gains get preferential rates
             tax_rules["mfj"]["tax_brackets"],
             capital_gains_brackets,
         )
@@ -537,10 +541,11 @@ def generate_projection(
 
     # Derived values computed from rounded components
     r_combined_wages = r_him_wages + r_her_wages
+    r_capital_gain_loss = r_supplemental["short_term_gain_loss"]["value"] + r_supplemental["long_term_gain_loss"]["value"]
     r_non_wage_income = (
         r_supplemental["interest_income"]["value"]
         + r_supplemental["dividend_income"]["value"]
-        + r_supplemental["capital_gain_loss"]["value"]
+        + r_capital_gain_loss
         + r_supplemental["schedule_1_income"]["value"]
     )
     r_total_income = r_combined_wages + r_non_wage_income
@@ -947,9 +952,14 @@ def reconcile_tax_return(
         projection["supplemental"]["dividend_income"]["value"],
         income.get("line_3b_ordinary_dividends", 0),
     ))
+    # Line 7 is the combined short-term + long-term capital gains from Schedule D
+    proj_capital_gain_loss = (
+        projection["supplemental"]["short_term_gain_loss"]["value"]
+        + projection["supplemental"]["long_term_gain_loss"]["value"]
+    )
     comparisons.append(compare(
         "Capital gain/loss (Line 7)",
-        projection["supplemental"]["capital_gain_loss"]["value"],
+        proj_capital_gain_loss,
         income.get("line_7_capital_gain_loss", 0),
     ))
     comparisons.append(compare(
@@ -1214,7 +1224,8 @@ PROJECTION_REQUIRED_FIELDS = {
 PROJECTION_SUPPLEMENTAL_FIELDS = {
     "interest_income",
     "dividend_income",
-    "capital_gain_loss",
+    "short_term_gain_loss",
+    "long_term_gain_loss",
     "schedule_1_income",
     "qbi_deduction",
     "child_care_expenses",
@@ -1300,7 +1311,7 @@ def projection_to_1040(projection: dict) -> dict:
                 "line_2b_taxable_interest": supp("interest_income"),
                 "line_3a_qualified_dividends": supp("dividend_income"),  # Assume all qualified
                 "line_3b_ordinary_dividends": supp("dividend_income"),
-                "line_7_capital_gain_loss": supp("capital_gain_loss"),
+                "line_7_capital_gain_loss": supp("short_term_gain_loss") + supp("long_term_gain_loss"),
                 "line_8_schedule_1_income": supp("schedule_1_income"),
                 "line_9_total_income": projection["total_income"],
             },

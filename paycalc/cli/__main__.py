@@ -219,7 +219,8 @@ def _format_tax_projection_text(proj: dict) -> str:
     income_items = [
         ("interest_income", "Interest income"),
         ("dividend_income", "Dividends"),
-        ("capital_gain_loss", "Capital gain/loss"),
+        ("short_term_gain_loss", "Short-term cap gain/loss"),
+        ("long_term_gain_loss", "Long-term cap gain/loss"),
         ("schedule_1_income", "Schedule 1 income"),
     ]
     def _format_source(info):
