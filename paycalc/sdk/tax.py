@@ -10,16 +10,77 @@ from typing import Any, Literal, Optional, Union
 import yaml
 
 
+def _get_tax_rules_dir() -> Path:
+    """Get the tax-rules directory path."""
+    package_root = Path(__file__).parent.parent.parent  # sdk -> paycalc -> project root
+    return package_root / "tax-rules"
+
+
+def _get_available_years() -> list[int]:
+    """Get sorted list of available tax rule years (descending)."""
+    rules_dir = _get_tax_rules_dir()
+    years = [int(p.stem) for p in rules_dir.glob("*.yaml") if p.stem.isdigit()]
+    return sorted(years, reverse=True)
+
+
 def load_tax_rules(year: str) -> dict:
     """Load tax rules for a specific year from tax-rules/YYYY.yaml."""
-    # Use package-relative path so it works regardless of CWD
-    package_root = Path(__file__).parent.parent.parent  # sdk -> paycalc -> project root
-    config_file = package_root / "tax-rules" / f"{year}.yaml"
+    config_file = _get_tax_rules_dir() / f"{year}.yaml"
     if not config_file.exists():
         raise FileNotFoundError(f"Tax rules file not found for year {year}: {config_file}")
 
     with open(config_file, "r") as f:
         return yaml.safe_load(f)
+
+
+def get_tax_rule(year: str, key: str, nested_key: str = None) -> Any:
+    """Get a tax rule value with fallback to prior years.
+
+    Looks for the key in the requested year's rules. If not found, falls back
+    to prior years in descending order until a value is found.
+
+    Args:
+        year: Tax year to look up (e.g., "2024")
+        key: Top-level key in the YAML (e.g., "additional_medicare_withholding_threshold")
+        nested_key: Optional nested key (e.g., "wage_cap" under "social_security")
+
+    Returns:
+        The value from the YAML file
+
+    Raises:
+        KeyError: If no year has the requested key defined
+    """
+    rules_dir = _get_tax_rules_dir()
+    available_years = _get_available_years()
+    target_year = int(year)
+
+    # Filter to years <= requested year, sorted descending
+    candidate_years = [y for y in available_years if y <= target_year]
+
+    # If no years <= target, try all years in descending order (edge case)
+    if not candidate_years:
+        candidate_years = available_years
+
+    for check_year in candidate_years:
+        config_file = rules_dir / f"{check_year}.yaml"
+        if not config_file.exists():
+            continue
+
+        with open(config_file, "r") as f:
+            rules = yaml.safe_load(f)
+
+        if nested_key:
+            if key in rules and isinstance(rules[key], dict) and nested_key in rules[key]:
+                return rules[key][nested_key]
+        else:
+            if key in rules:
+                return rules[key]
+
+    # No year has this value defined
+    if nested_key:
+        raise KeyError(f"Tax rule '{key}.{nested_key}' not defined in any tax-rules/*.yaml file")
+    else:
+        raise KeyError(f"Tax rule '{key}' not defined in any tax-rules/*.yaml file")
 
 
 def calculate_federal_income_tax(taxable_income: float, tax_brackets: list) -> float:
@@ -45,6 +106,25 @@ def calculate_federal_income_tax(taxable_income: float, tax_brackets: list) -> f
                 tax_owed += income_in_this_bracket * rate
 
     return tax_owed
+
+
+def calculate_additional_medicare_withheld(medicare_wages: float, year: str) -> float:
+    """Calculate Additional Medicare Tax withheld per W-2 (0.9% of wages over threshold).
+
+    Employers withhold 0.9% on wages over $200k per employee, regardless of
+    filing status. This is the Form 8959 Line 25c component.
+
+    Args:
+        medicare_wages: Medicare wages from W-2 Box 5
+        year: Tax year (for looking up threshold from tax rules)
+
+    Returns:
+        Additional Medicare tax withheld amount
+    """
+    threshold = get_tax_rule(year, "additional_medicare_withholding_threshold")
+    if medicare_wages <= threshold:
+        return 0.0
+    return (medicare_wages - threshold) * 0.009
 
 
 def calculate_additional_medicare_tax(total_medicare_wages: float, threshold: float) -> float:
@@ -213,10 +293,16 @@ def generate_projection(
         her_ss_overpayment = calculate_ss_overpayment(her_ss_withheld, ss_wage_cap, ss_tax_rate)
     total_ss_overpayment = him_ss_overpayment + her_ss_overpayment
 
+    # Form 8959 withholding (Additional Medicare withheld at $200k per-employee threshold)
+    # This is credited as a payment on Line 25c of Form 1040
+    him_additional_medicare_withheld = calculate_additional_medicare_withheld(him_medicare_wages, year)
+    her_additional_medicare_withheld = calculate_additional_medicare_withheld(her_medicare_wages, year)
+    form_8959_withholding = him_additional_medicare_withheld + her_additional_medicare_withheld
+
     tentative_tax_per_return = federal_income_tax_assessed + (-medicare_refund)
     total_withheld = him_fed_withheld + her_fed_withheld
-    # SS overpayment is a credit that increases refund
-    final_refund = total_withheld - tentative_tax_per_return + total_ss_overpayment
+    # SS overpayment and Form 8959 withholding are credits that increase refund
+    final_refund = total_withheld - tentative_tax_per_return + total_ss_overpayment + form_8959_withholding
 
     # Build data sources with per-employer details
     data_sources = {
@@ -256,6 +342,9 @@ def generate_projection(
         "him_ss_overpayment": him_ss_overpayment,
         "her_ss_overpayment": her_ss_overpayment,
         "total_ss_overpayment": total_ss_overpayment,
+        "him_additional_medicare_withheld": him_additional_medicare_withheld,
+        "her_additional_medicare_withheld": her_additional_medicare_withheld,
+        "form_8959_withholding": form_8959_withholding,
         "tentative_tax_per_return": tentative_tax_per_return,
         "final_refund": final_refund,
         "data_sources": data_sources,
@@ -708,20 +797,17 @@ def reconcile_tax_return(
         payments.get("line_25a_w2_withholding", 0),
     ))
 
-    # Form 8959 withholding gap
-    if payments.get("line_25c_other_withholding", 0) > 0:
-        gaps.append({
-            "item": "Form 8959 withholding (Addl Medicare)",
-            "line": "25c",
-            "amount": payments["line_25c_other_withholding"],
-            "notes": "Not credited as payment in pay-calc",
-        })
+    # Form 8959 withholding (Line 25c)
+    comparisons.append(compare(
+        "Form 8959 withholding (Line 25c)",
+        projection["form_8959_withholding"],
+        payments.get("line_25c_other_withholding", 0),
+    ))
 
     comparisons.append(compare(
         "Total payments (Line 33)",
-        projection["him_fed_withheld"] + projection["her_fed_withheld"] + projection["total_ss_overpayment"],
+        projection["him_fed_withheld"] + projection["her_fed_withheld"] + projection["total_ss_overpayment"] + projection["form_8959_withholding"],
         payments.get("line_33_total_payments", 0),
-        notes="pay-calc doesn't include Form 8959 withholding",
     ))
 
     # Final refund/owed

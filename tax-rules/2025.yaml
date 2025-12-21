@@ -9,6 +9,7 @@ mfj:
     - { up_to: 731200, rate: 0.35 }
     - { over: 731200, rate: 0.37 }
 additional_medicare_tax_threshold: 250000.00
+additional_medicare_withholding_threshold: 200000.00  # Per-employee threshold for employer withholding
 
 social_security:
   wage_cap: 176100.00
