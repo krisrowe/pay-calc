@@ -203,14 +203,56 @@ def _format_tax_projection_text(proj: dict) -> str:
     lines.append("=" * 60)
     lines.append("")
 
-    # Income section
+    # Income section - show all components that build to taxable income
+    # Column adds up: wages + supplemental income = total income - deductions = taxable
     lines.append("INCOME")
-    lines.append("-" * 40)
-    lines.append(f"  His wages (W-2 Box 1):     ${proj['him_wages']:>12,.2f}")
-    lines.append(f"  Her wages (W-2 Box 1):     ${proj['her_wages']:>12,.2f}")
-    lines.append(f"  Combined gross income:     ${proj['combined_wages']:>12,.2f}")
-    lines.append(f"  Standard deduction (MFJ): -${proj['standard_deduction']:>12,.2f}")
-    lines.append(f"  Taxable income:            ${proj['final_taxable_income']:>12,.2f}")
+    lines.append("-" * 60)
+
+    # Wages with him/her breakdown shown to the side
+    him_wages = proj['him_wages']
+    her_wages = proj['her_wages']
+    combined_wages = proj['combined_wages']
+    lines.append(f"  {'Wages (Line 1a)':<24} ${combined_wages:>12,.2f}  (Him: ${him_wages:,.0f} / Her: ${her_wages:,.0f})")
+
+    # Supplemental income items (with source metadata)
+    supplemental = proj.get("supplemental", {})
+    income_items = [
+        ("interest_income", "Interest income"),
+        ("dividend_income", "Dividends"),
+        ("capital_gain_loss", "Capital gain/loss"),
+        ("schedule_1_income", "Schedule 1 income"),
+    ]
+    def _format_source(info):
+        source = info.get("source", "")
+        year = info.get("year", "")
+        if source == "1040":
+            return f"  ({year} Form 1040)" if year else "  (Form 1040)"
+        elif source:
+            return f"  ({year} {source})" if year else f"  ({source})"
+        return ""
+
+    for name, label in income_items:
+        info = supplemental.get(name, {})
+        value = info.get("value", 0)
+        if value != 0:
+            source_str = _format_source(info)
+            if value >= 0:
+                lines.append(f"  {label:<24} ${value:>12,.2f}{source_str}")
+            else:
+                lines.append(f"  {label:<24}-${abs(value):>12,.2f}{source_str}")
+
+    lines.append(f"  {'Total income (Line 9)':<24} ${proj['total_income']:>12,.2f}")
+    lines.append(f"  {'Standard deduction':<24}-${proj['standard_deduction']:>12,.2f}")
+
+    # QBI deduction if present
+    qbi_info = supplemental.get("qbi_deduction", {})
+    qbi_value = qbi_info.get("value", 0)
+    if qbi_value > 0:
+        source_str = _format_source(qbi_info)
+        lines.append(f"  {'QBI deduction (Line 13)':<24}-${qbi_value:>12,.2f}{source_str}")
+
+    lines.append("  " + "-" * 38)
+    lines.append(f"  {'Taxable income (Line 15)':<24} ${proj['final_taxable_income']:>12,.2f}")
     lines.append("")
 
     # Tax brackets
@@ -274,15 +316,54 @@ def _format_tax_projection_text(proj: dict) -> str:
     lines.append(f"  Total withheld:            ${total_withheld:>12,.2f}")
     lines.append("")
 
-    # Final result
+    # Final result - show all components that sum to refund
     lines.append("TAX RETURN PROJECTION")
     lines.append("-" * 40)
     lines.append(f"  Federal income tax:       -${proj['federal_income_tax_assessed']:>12,.2f}")
-    lines.append(f"  Medicare adjustment:       ${proj['medicare_refund']:>12,.2f}")
+
+    # Additional Medicare tax (Schedule 2 Line 6)
+    additional_medicare = proj.get('additional_medicare_tax', 0)
+    if additional_medicare > 0:
+        lines.append(f"  Additional Medicare tax:  -${additional_medicare:>12,.2f}")
+
+    # Supplemental taxes/credits that affect Line 24 (with source metadata)
+    supplemental = proj.get("supplemental", {})
+
+    def _get_source_str(info):
+        source = info.get("source", "")
+        year = info.get("year", "")
+        if source == "1040":
+            return f"  ({year} Form 1040)" if year else "  (Form 1040)"
+        elif source:
+            return f"  ({year} {source})" if year else f"  ({source})"
+        return ""
+
+    niit_info = supplemental.get("niit", {})
+    niit = niit_info.get("value", 0)
+    if niit > 0:
+        lines.append(f"  NIIT (Sched 2 Line 7):    -${niit:>12,.2f}{_get_source_str(niit_info)}")
+
+    other_info = supplemental.get("other_taxes", {})
+    other_taxes = other_info.get("value", 0)
+    if other_taxes > 0:
+        lines.append(f"  Other taxes (Sched 2):    -${other_taxes:>12,.2f}{_get_source_str(other_info)}")
+
+    credit_info = supplemental.get("child_care_credit", {})
+    child_care_credit = credit_info.get("value", 0)
+    if child_care_credit > 0:
+        lines.append(f"  Child care credit:         ${child_care_credit:>12,.2f}{_get_source_str(credit_info)}")
+
+    lines.append(f"  Tentative tax (Line 24):  -${proj['tentative_tax_per_return']:>12,.2f}")
+    lines.append(f"  Total withheld:            ${total_withheld:>12,.2f}")
+
+    # Form 8959 additional Medicare withheld (Line 25c)
+    form_8959_withheld = proj.get('form_8959_withholding', 0)
+    if form_8959_withheld > 0:
+        lines.append(f"  Form 8959 withheld:        ${form_8959_withheld:>12,.2f}")
+
     if total_ss_overpayment > 0:
         lines.append(f"  SS overpayment credit:     ${total_ss_overpayment:>12,.2f}")
-    lines.append(f"  Tentative tax:            -${proj['tentative_tax_per_return']:>12,.2f}")
-    lines.append(f"  Total withheld:            ${total_withheld:>12,.2f}")
+
     lines.append("  " + "=" * 38)
     if proj["final_refund"] >= 0:
         lines.append(f"  REFUND:                    ${proj['final_refund']:>12,.2f}")
@@ -299,6 +380,9 @@ def _format_tax_projection_text(proj: dict) -> str:
         # Indent each line from the SDK helper
         for line in format_data_sources(data_sources).split("\n"):
             lines.append(f"  {line}")
+
+    # Supplemental income items now shown in INCOME section above
+    # Taxes/credits shown in TAX RETURN PROJECTION section
 
     return "\n".join(lines)
 

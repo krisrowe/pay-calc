@@ -384,6 +384,7 @@ def generate_projection(
         "combined_medicare_wages": combined_medicare_wages,
         "combined_medicare_withheld": combined_medicare_withheld,
         "total_medicare_taxes_assessed": total_medicare_taxes_assessed,
+        "additional_medicare_tax": additional_medicare_tax,  # Schedule 2 Line 6
         "medicare_refund": medicare_refund,
         "him_ss_withheld": him_ss_withheld,
         "her_ss_withheld": her_ss_withheld,

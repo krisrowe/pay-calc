@@ -119,11 +119,84 @@ pay-calc analysis 2025 him
 
 ### Stage 3: Tax Projection
 
-The `tax-projection` command uses W-2 data or analysis output to calculate tax liability:
+The `tax projection` command uses W-2 data to calculate tax liability:
 
 ```bash
-pay-calc tax-projection 2024
+# Generate tax projection (text output)
+pay-calc tax projection 2024
+
+# Generate as JSON (for further processing)
+pay-calc tax projection 2024 --format=json
 ```
+
+Example output:
+```
+INCOME
+------------------------------------------------------------
+  Wages (Line 1a)          $  120,000.00  (Him: $80,000 / Her: $40,000)
+  Interest income          $      250.00  (1040 2024)
+  Dividends                $      100.00  (1040 2024)
+  Capital gain/loss       -$      500.00  (1040 2024)
+  Total income (Line 9)    $  119,850.00
+  Standard deduction      -$   29,200.00
+  --------------------------------------
+  Taxable income (Line 15) $   90,650.00
+
+...
+
+TAX RETURN PROJECTION
+----------------------------------------
+  Federal income tax:       -$   10,452.00
+  Additional Medicare tax:  -$      450.00
+  Tentative tax (Line 24):  -$   10,902.00
+  Total withheld:            $   12,000.00
+  ======================================
+  REFUND:                    $    1,098.00
+```
+
+Both tables add up:
+- **INCOME**: Components sum to Total income; deductions reduce to Taxable income
+- **TAX RETURN PROJECTION**: Tax components plus credits/withholding sum to Refund
+
+Supplemental values (interest, dividends, etc.) show their source (`1040 2024`, `yaml 2023`, or `default`) for audit trail.
+
+### Stage 4: Tax Validation (vs Actual 1040)
+
+Once you have an official Form 1040 imported, validate your projection against it:
+
+```bash
+# Import your filed 1040 (PDF or JSON)
+pay-calc records import ~/Downloads/2024-1040.pdf
+
+# Validate projection against actual return
+pay-calc tax validate 2024
+```
+
+Example output:
+```
+TAX VALIDATION FOR 2024
+======================================================================
+Line Item                               Calculated         Actual          Δ Status
+----------------------------------------------------------------------
+Wages (Line 1a)                        $120,000.00    $120,000.00          — ✓
+Interest income (Line 2b)                  $250.00        $250.00          — ✓
+Total income (Line 9)                  $120,250.00    $120,250.00          — ✓
+Taxable income (Line 15)                $91,050.00     $91,050.00          — ✓
+Tax (Line 16)                           $10,456.00     $10,452.00        $+4 ✗
+Refund (Line 34/35)                      $1,544.00      $1,548.00        $-4 ✗
+----------------------------------------------------------------------
+SUMMARY
+  Gap % of taxable inc:       0.0044%
+```
+
+**Supplemental Value Fallback**: For projecting future years, values like interest income, dividends, and credits are sourced from:
+1. Same year's 1040 (if filed)
+2. Same year's profile.yaml config
+3. Prior year's 1040 (fallback)
+4. Prior year's yaml (fallback)
+5. Default to $0
+
+This allows accurate projections even before the year ends.
 
 ## Command Inventory
 
@@ -134,7 +207,8 @@ pay-calc tax-projection 2024
 | `records list --data-filter` | Filter by JSONPath expression | Local JSON records | Filtered table |
 | `analysis` | Validate stubs, extract YTD totals | Local JSON records | `YYYY_party_pay_all.json` |
 | `projection` | Project year-end totals | Analysis output | Projection report |
-| `taxes` | Calculate tax liability | W-2 JSON or analysis output | `YYYY_tax_projection.csv` |
+| `tax projection` | Calculate tax liability | W-2 records | Text/JSON projection |
+| `tax validate` | Compare projection to 1040 | W-2 + 1040 records | Line-by-line comparison |
 
 ### Command Details
 
