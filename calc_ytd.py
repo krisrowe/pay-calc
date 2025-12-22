@@ -150,7 +150,7 @@ def aggregate_earnings(stub):
         
         if "regular pay" in etype:
             earnings_data["regular_pay"] += ytd
-        elif "bonus" in etype or "recognition bonus" in etype or "sales bonus" in etype or "annual bonus" in etype:
+        elif "bonus" in etype:
             earnings_data["bonuses"] += ytd
         elif "stock" in etype or "gusu" in etype:
             earnings_data["stock_units"] += ytd

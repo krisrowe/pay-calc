@@ -415,7 +415,7 @@ def tax_group():
 @click.option("--ytd-final", "ytd_final", type=click.Choice(["all", "him", "her"]), default=None,
               help="Use stub YTD as-is: all (both parties), him, or her")
 @click.option("--stock-price", "stock_price", type=float, default=None,
-              help="Stock price for RSU projection (e.g., GOOG price for valuing unvested shares)")
+              help="Stock price for RSU projection (current price of stock ticker symbol for valuing unvested shares)")
 def tax_project(year, output_format, data_dir, ytd_final, stock_price):
     """Calculate federal tax liability and refund/owed amount.
 
@@ -1158,7 +1158,8 @@ def _print_projection_report(proj: dict, analysis_data: dict):
     # Break down by type
     ytd_earnings = ytd_breakdown.get("earnings", {}) if ytd_breakdown else {}
     actual_regular = ytd_earnings.get("Regular Pay", 0)
-    actual_stock = ytd_earnings.get("Goog Stock Unit", 0)
+    # Sum all stock-related earnings (earning types containing "stock")
+    actual_stock = sum(v for k, v in ytd_earnings.items() if "stock" in k.lower())
     actual_other = actual.get('gross', 0) - actual_regular - actual_stock
 
     stock_proj = additional.get("stock_grants", 0)
@@ -1239,8 +1240,8 @@ def stock_quote(ticker, last_closed):
     flag (real-time quotes not supported).
 
     Examples:
-      pay-calc stock-quote GOOG --last-closed
-      pay-calc stock-quote AAPL --last-closed
+      pay-calc stock-quote SBUX --last-closed
+      pay-calc stock-quote JPM --last-closed
     """
     from paycalc.gemini_client import get_stock_quote
 

@@ -481,25 +481,35 @@ def get_sort_key(stub: Dict[str, Any]) -> Tuple:
 
 
 def identify_pay_type(stub: Dict[str, Any]) -> str:
-    """Identify the type of pay stub (regular, bonus, etc.)."""
+    """Identify the type of pay stub (regular, bonus, etc.).
+
+    Categorizes stubs by examining earnings types. Categories are derived
+    dynamically from earning type strings to avoid hardcoding employer-specific
+    terminology.
+    """
+    import re
+
     earnings = stub.get("earnings", [])
 
-    # First check for specific bonus/stock types in earnings
+    # First check for bonus/stock types in earnings
     for earning in earnings:
         etype = earning.get("type", "").lower()
         current = earning.get("current_amount", 0)
 
         if current > 0:
-            if "recognition bonus" in etype:
-                return "recognition_bonus"
-            elif "sales bonus" in etype:
-                return "sales_bonus"
-            elif "annual bonus" in etype:
-                return "annual_bonus"
-            elif "special bonus" in etype:
-                return "special_bonus"
-            elif "stock" in etype or "rsu" in etype:
+            # Stock/RSU grants
+            if "stock" in etype or "rsu" in etype:
                 return "stock_grant"
+
+            # Bonus types - derive category dynamically from earning type
+            # e.g., "Annual Bonus" -> "annual_bonus", "Quarterly Bonus" -> "quarterly_bonus"
+            if "bonus" in etype:
+                # Extract word(s) before "bonus" as the bonus type
+                match = re.match(r'^([\w\s]+?)\s*bonus', etype)
+                if match:
+                    prefix = match.group(1).strip().replace(" ", "_")
+                    return f"{prefix}_bonus"
+                return "bonus"
 
     # Check if this is a regular pay stub via earnings
     for earning in earnings:
@@ -894,7 +904,7 @@ def generate_imputed_income_summary(stubs: List[Dict[str, Any]]) -> Dict[str, An
     Generate imputed income summary from final YTD values.
 
     Imputed income includes:
-    - Prize/Gift: Non-cash bonus expenses (GPS Club awards, etc.)
+    - Prize/Gift: Non-cash bonus expenses (recognition awards, etc.)
     - Ben in Kind Grs: Benefits in kind (meals, gym, transit, etc.)
     - Tax Gross-Up: Covers taxes so employee receives full value
 

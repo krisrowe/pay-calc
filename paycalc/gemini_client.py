@@ -109,7 +109,7 @@ def get_stock_quote(ticker: str, timeout: int = 30) -> float:
     Uses Gemini to look up the most recent closing price.
 
     Args:
-        ticker: Stock ticker symbol (e.g., "GOOG", "AAPL").
+        ticker: Stock ticker symbol (e.g., "SBUX", "JPM").
         timeout: Timeout in seconds (default 30).
 
     Returns:

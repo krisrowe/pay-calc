@@ -152,7 +152,7 @@ async def get_record(
 
 @mcp.tool()
 async def get_stock_quote(
-    ticker: str = Field(description="Stock ticker symbol (e.g., 'GOOG', 'AAPL')"),
+    ticker: str = Field(description="Stock ticker symbol (e.g., 'SBUX', 'JPM')"),
 ) -> dict[str, Any]:
     """Get the last closing price for a stock ticker.
 
@@ -161,7 +161,7 @@ async def get_stock_quote(
     or generate_w2() as the 'stock_price' parameter.
 
     Example workflow:
-    1. Call get_stock_quote(ticker='GOOG') to get current price
+    1. Call get_stock_quote(ticker='SBUX') to get current price
     2. Pass result['last_close'] to generate_income_projection(stock_price=...)
     """
     try:
@@ -184,7 +184,7 @@ async def get_stock_quote(
 async def generate_income_projection(
     year: str = Field(description="Tax year (4 digits, e.g., '2025')"),
     party: str = Field(description="Party identifier ('him' or 'her')"),
-    stock_price: float | None = Field(default=None, description="Stock price for RSU valuation. Use get_stock_quote() to fetch current price for GOOG."),
+    stock_price: float | None = Field(default=None, description="Stock price for RSU valuation. Use get_stock_quote() to fetch current price."),
 ) -> dict[str, Any]:
     """Generate year-end income projection from pay stub analysis.
 
@@ -192,7 +192,7 @@ async def generate_income_projection(
     - Regular pay pattern (biweekly/monthly cadence)
     - RSU vesting schedule (if configured for party)
 
-    For RSU projections with dollar values, first call get_stock_quote('GOOG')
+    For RSU projections with dollar values, first call get_stock_quote()
     and pass the result's 'last_close' as stock_price.
 
     Requires analysis data to exist (run 'pay-calc analysis YEAR PARTY' first).
@@ -250,7 +250,7 @@ async def generate_w2(
     year: str = Field(description="Tax year (4 digits, e.g., '2025')"),
     party: str = Field(description="Party identifier ('him' or 'her')"),
     include_projection: bool = Field(default=False, description="Include projected income to year-end"),
-    stock_price: float | None = Field(default=None, description="Stock price for RSU projection. Use get_stock_quote() to fetch current price for GOOG."),
+    stock_price: float | None = Field(default=None, description="Stock price for RSU projection. Use get_stock_quote() to fetch current price."),
 ) -> dict[str, Any]:
     """Generate W-2 data from pay stub analysis.
 
@@ -264,7 +264,7 @@ async def generate_w2(
     All three have identical structure. The third is the sum of the first two.
     SS wages cap ($176,100) carries forward - additional shows only remaining taxable.
 
-    For RSU projections with dollar values, first call get_stock_quote('GOOG')
+    For RSU projections with dollar values, first call get_stock_quote()
     and pass the result's 'last_close' as stock_price.
 
     Requires analysis data to exist (run 'pay-calc analysis YEAR PARTY' first).
@@ -291,7 +291,7 @@ async def generate_tax_projection(
     year: str = Field(description="Tax year (4 digits, e.g., '2025')"),
     output_format: str = Field(default="json", description="Output format: 'json' (default) or 'csv'"),
     ytd_final_party: str | None = Field(default=None, description="Use final YTD without projection: null (project both), 'all' (final for both), 'him'/'her' (final for one, project the other)"),
-    stock_price: float | None = Field(default=None, description="Stock price for RSU valuation. Use get_stock_quote() to fetch current price for GOOG."),
+    stock_price: float | None = Field(default=None, description="Stock price for RSU valuation. Use get_stock_quote() to fetch current price."),
 ) -> dict[str, Any] | str:
     """Calculate federal tax liability and refund/owed amount.
 

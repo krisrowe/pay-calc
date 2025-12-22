@@ -62,7 +62,7 @@ def find_rsu_tax_rate_from_records() -> Optional[Dict]:
     """
     Search pay records for RSU-related earnings and extract federal withholding rate.
 
-    Uses the SDK's list_records to find stubs with RSU earnings (e.g., "Goog Stock Unit"),
+    Uses the SDK's list_records to find stubs with RSU earnings (e.g., stock unit vesting),
     sorted by pay_date descending to get the most recent.
 
     Returns:
@@ -463,7 +463,7 @@ def analyze_grant_pattern(csv_path: Path) -> Dict:
             seen_header = True
             continue
 
-        # Award line format: "01-05-2022",GOOG,RSU,"$0.00","1,040",...
+        # Award line format: "01-05-2022",TICKER,RSU,"$0.00","1,040",...
         # First field is the award date (starts with quote and date pattern)
         if seen_header and line.strip().startswith('"') and not line.strip().startswith('",'):
             parts = line.strip().split(',')
