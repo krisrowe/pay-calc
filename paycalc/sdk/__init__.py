@@ -77,6 +77,25 @@ from .income_projection import (
     detect_employer_segments,
 )
 
+from .analysis import (
+    sum_deductions,
+    extract_401k_from_deductions,
+    validate_stub_numbers,
+    get_sort_key,
+    identify_pay_type,
+    validate_segment_totals,
+    normalize_field_name,
+    get_warning_fields,
+    validate_stub_deltas,
+    validate_year_totals,
+    generate_401k_contributions,
+    generate_imputed_income_summary,
+    normalize_earnings_type,
+    generate_ytd_breakdown,
+    generate_summary,
+    print_text_report,
+)
+
 from . import records
 
 __all__ = [

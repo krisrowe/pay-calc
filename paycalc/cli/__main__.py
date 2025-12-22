@@ -941,10 +941,8 @@ def analysis(year, party, through_date, output_format):
         if filtered > 0:
             click.echo(f"Filtered out {filtered} stubs after {through_date}")
 
-    # Import analysis functions
-    import sys
-    sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-    from analysis import (
+    # Import analysis functions from SDK
+    from paycalc.sdk.analysis import (
         validate_year_totals,
         validate_stub_deltas,
         generate_summary,

@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
-from analysis import identify_pay_type
+from paycalc.sdk.analysis import identify_pay_type
 
 
 def make_stub(earnings: list[dict]) -> dict:
