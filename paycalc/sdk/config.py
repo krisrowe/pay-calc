@@ -867,9 +867,9 @@ def validate_folder_id(value: str) -> tuple[bool, str]:
 
     # Warn on suspicious length but allow it
     if len(value) < 15:
-        return True, f"Warning: Folder ID seems short ({len(value)} chars). Employer A IDs are typically 25-45 chars."
+        return True, f"Warning: Folder ID seems short ({len(value)} chars). Google Drive IDs are typically 25-45 chars."
 
     if len(value) > 60:
-        return True, f"Warning: Folder ID seems long ({len(value)} chars). Employer A IDs are typically 25-45 chars."
+        return True, f"Warning: Folder ID seems long ({len(value)} chars). Google Drive IDs are typically 25-45 chars."
 
     return True, ""
