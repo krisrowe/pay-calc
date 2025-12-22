@@ -718,6 +718,36 @@ def list_records(
     return results
 
 
+def count_records(
+    year: Optional[str] = None,
+    party: Optional[str] = None,
+    type_filter: Optional[RecordType] = None,
+    include_discarded: bool = False,
+    data_filter: Optional[str] = None
+) -> int:
+    """Count records matching the given filters.
+
+    Same filters as list_records(), but returns only the count.
+
+    Args:
+        year: Filter by year (e.g., "2024")
+        party: Filter by party (e.g., "him", "her")
+        type_filter: Filter by type ("stub", "w2")
+        include_discarded: Include discarded records (default False)
+        data_filter: JSONPath expression to filter records
+
+    Returns:
+        Number of matching records
+    """
+    return len(list_records(
+        year=year,
+        party=party,
+        type_filter=type_filter,
+        include_discarded=include_discarded,
+        data_filter=data_filter
+    ))
+
+
 def add_record(meta: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Path:
     """Save a record to the appropriate location.
 

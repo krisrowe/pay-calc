@@ -206,8 +206,11 @@ def records_cli():
               default="text", help="Output format.")
 @click.option("--verbose", "-v", is_flag=True,
               help="Show dedup fields (doc_id, medicare) for diffing between importers.")
+@click.option("--count", is_flag=True,
+              help="Only output the count of matching records.")
 def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer: Optional[str],
-                 data_filter: Optional[str], show_discarded: bool, output_format: str, verbose: bool):
+                 data_filter: Optional[str], show_discarded: bool, output_format: str, verbose: bool,
+                 count: bool):
     """List pay records.
 
     FILTERS can be year (4 digits) and/or party (him/her) in any order.
@@ -234,6 +237,17 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
     """
     year, party = parse_year_party_filters(filters)
 
+    # Count-only shortcut (avoids loading full records when no employer filter)
+    if count and not employer:
+        click.echo(records.count_records(
+            year=year,
+            party=party,
+            type_filter=type_filter,
+            include_discarded=show_discarded,
+            data_filter=data_filter
+        ))
+        return
+
     all_records = records.list_records(
         year=year,
         party=party,
@@ -250,6 +264,11 @@ def records_list(filters: Tuple[str, ...], type_filter: Optional[str], employer:
             if employer_lower in (r.get("data", {}).get("employer") or "").lower()
             or employer_lower in (r.get("data", {}).get("employer_name") or "").lower()
         ]
+
+    # Count with employer filter (had to load records for filtering)
+    if count:
+        click.echo(len(all_records))
+        return
 
     if output_format == "json":
         # Strip internal _path field
