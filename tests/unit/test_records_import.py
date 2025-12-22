@@ -19,24 +19,51 @@ import pytest
 
 
 def make_stub_data(pay_date: str, employer: str, gross: float, medicare_taxable: float):
-    """Create stub data structure."""
+    """Create stub data structure matching current schema."""
     return {
         "employer": employer,
         "pay_date": pay_date,
-        "pay_period_start": pay_date,
-        "pay_period_end": pay_date,
-        "pay_summary": {
-            "gross": gross,
-            "net_pay": gross * 0.7,
-            "fit_taxable_wages": gross,
+        "period": {
+            "start": pay_date,
+            "end": pay_date,
         },
+        "document_id": None,
+        "net_pay": gross * 0.7,
+        "earnings": [{"type": "Regular Pay", "current_amount": gross, "ytd_amount": gross}],
         "taxes": {
-            "federal": {"withheld": gross * 0.15},
-            "social_security": {"withheld": gross * 0.062, "taxable_wages": gross},
-            "medicare": {"withheld": gross * 0.0145, "taxable_wages": medicare_taxable},
+            "federal_income_tax": {
+                "taxable_wages": gross,
+                "current_withheld": gross * 0.15,
+                "ytd_withheld": gross * 0.15,
+            },
+            "social_security": {
+                "taxable_wages": gross,
+                "current_withheld": gross * 0.062,
+                "ytd_withheld": gross * 0.062,
+            },
+            "medicare": {
+                "taxable_wages": medicare_taxable,
+                "current_withheld": gross * 0.0145,
+                "ytd_withheld": gross * 0.0145,
+            },
         },
-        "earnings": [{"type": "regular", "current_amount": gross, "ytd_amount": gross}],
         "deductions": [],
+        "pay_summary": {
+            "current": {
+                "gross": gross,
+                "fit_taxable_wages": gross,
+                "taxes": gross * 0.22,
+                "deductions": 0,
+                "net_pay": gross * 0.7,
+            },
+            "ytd": {
+                "gross": gross,
+                "fit_taxable_wages": gross,
+                "taxes": gross * 0.22,
+                "deductions": 0,
+                "net_pay": gross * 0.7,
+            },
+        },
     }
 
 
@@ -289,7 +316,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # Initial import of 3 files
             stats1 = records.import_from_folder_auto(FOLDER_ID)
@@ -331,7 +358,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # Initial import
             stats1 = records.import_from_folder_auto(FOLDER_ID)
@@ -369,7 +396,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # Initial import: file_a imports, file_c's stub skipped as duplicate
             stats1 = records.import_from_folder_auto(FOLDER_ID)
@@ -406,7 +433,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # Initial import
             stats1 = records.import_from_folder_auto(FOLDER_ID)
@@ -444,7 +471,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # Initial import via folder
             stats1 = records.import_from_folder_auto(FOLDER_ID)
@@ -496,7 +523,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # === FIRST IMPORT ===
             stats1 = records.import_from_folder_auto(FOLDER_ID, callback=capture_callback)
@@ -567,7 +594,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # First import - valid stub imports, unknown_party file discarded
             stats1 = records.import_from_folder_auto(FOLDER_ID, callback=capture_callback)
@@ -636,7 +663,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # Import file_a
             stats1 = records.import_from_folder_auto(FOLDER_ID)
@@ -683,7 +710,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # First import: file_a imports, file_e's stub skipped as duplicate
             stats1 = records.import_from_folder_auto(FOLDER_ID)
@@ -724,7 +751,7 @@ class TestImportEfficiency:
         with patch("subprocess.run", drive.subprocess_run), \
              patch("paycalc.sdk.records._get_pdf_page_count", mock_get_pdf_page_count), \
              patch("paycalc.sdk.records._split_pdf_pages", mock_split_pdf_pages), \
-             patch("gemini_client.process_file", ocr.process_file):
+             patch("paycalc.gemini_client.process_file", ocr.process_file):
 
             # Initial import - gross=5000
             records.import_from_folder_auto(FOLDER_ID)
@@ -732,7 +759,7 @@ class TestImportEfficiency:
             # Assert before: 1 record with gross=5000
             recs_before = records.find_all_by_drive_id(FILE_A_ID)
             assert len(recs_before) == 1, f"Expected 1 record, got {len(recs_before)}"
-            gross_before = recs_before[0]["data"]["pay_summary"]["gross"]
+            gross_before = recs_before[0]["data"]["pay_summary"]["current"]["gross"]
             assert gross_before == 5000, f"Expected gross=5000, got {gross_before}"
 
             # Change file content to gross=6000
@@ -748,6 +775,6 @@ class TestImportEfficiency:
             recs_after = records.find_all_by_drive_id(FILE_A_ID)
             assert len(recs_after) == 1, \
                 f"Expected 1 record (overwrite), got {len(recs_after)} (duplicate created)"
-            gross_after = recs_after[0]["data"]["pay_summary"]["gross"]
+            gross_after = recs_after[0]["data"]["pay_summary"]["current"]["gross"]
             assert gross_after == 6000, \
                 f"Expected gross=6000 (overwritten), got {gross_after} (skipped or wrong content)"

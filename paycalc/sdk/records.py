@@ -759,14 +759,15 @@ def add_record(meta: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Path:
     if record_type in ("discarded", "unrelated"):
         target_dir = records_dir / "_tracking"
     else:
-        # Need year and party for stubs/W-2s
+        # Validate year and party exist in meta (needed for filtering/display)
         year = meta.get("year")
         party = meta.get("party")
 
         if not year or not party:
             raise ValueError(f"meta.year and meta.party required for type={record_type}")
 
-        target_dir = records_dir / year / party
+        # Save flat - year/party stored in meta, not directory structure
+        target_dir = records_dir
 
     target_dir.mkdir(parents=True, exist_ok=True)
 
@@ -901,12 +902,9 @@ def find_duplicate_stub(
         Matching record dict if found, None otherwise
     """
     records_dir = get_records_dir()
-    search_dir = records_dir / year / party
 
-    if not search_dir.exists():
-        return None
-
-    for json_file in search_dir.glob("*.json"):
+    # Scan flat directory and filter by year/party from meta
+    for json_file in records_dir.glob("*.json"):
         try:
             with open(json_file) as f:
                 record = json.load(f)
@@ -916,6 +914,12 @@ def find_duplicate_stub(
 
             # Only check stubs (not W-2s or discarded)
             if rec_meta.get("type") != "stub":
+                continue
+
+            # Filter by year and party (stored in meta)
+            if str(rec_meta.get("year", "")) != str(year):
+                continue
+            if rec_meta.get("party", "") != party:
                 continue
 
             # Primary match: document_id (most reliable)

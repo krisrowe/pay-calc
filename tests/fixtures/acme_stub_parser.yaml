@@ -1,0 +1,100 @@
+# Test YAML parser for Acme Corp stubs
+# Used by test_records_e2e.py for E2E import testing
+# Note: PDF text extraction produces \$ for dollar signs
+
+defaults:
+  flags: IGNORECASE
+
+qualifier:
+  description: "Acme Corp test stub format"
+  patterns:
+    - regex: 'EARNINGS STATEMENT'
+      note: "Header marker"
+    - regex: 'Pay Date:\s*\d{4}-\d{2}-\d{2}'
+      note: "ISO date format"
+    - regex: 'Employer:\s*Acme'
+      note: "Acme employer"
+  min_matches: 2
+
+type: stub
+
+employer_extraction:
+  normalize: true
+  patterns:
+    - regex: 'Employer:\s*(.+?)\s*$'
+      flags: MULTILINE
+
+fields:
+  pay_date:
+    patterns:
+      - regex: 'Pay Date:\s*(\d{4}-\d{2}-\d{2})'
+  period_start:
+    patterns:
+      - regex: 'Period Start:\s*(\d{4}-\d{2}-\d{2})'
+  period_end:
+    patterns:
+      - regex: 'Period End:\s*(\d{4}-\d{2}-\d{2})'
+  net_pay:
+    patterns:
+      # Use [^\d]* to match any non-digits (including \$) before amounts
+      - regex: 'Net Pay:[^\d]*([\d,]+\.\d{2})'
+
+sections:
+  earnings:
+    start_patterns:
+      - regex: 'Gross Pay:'
+    end_patterns:
+      - regex: 'TAXES'
+    item_patterns:
+      # Match two amounts separated by whitespace, using [^\d]* for currency symbols
+      - regex: 'Gross Pay:[^\d]*([\d,]+\.\d{2})\s+[^\d]*([\d,]+\.\d{2})'
+        groups:
+          - name: type
+            index: 0
+          - name: current
+            index: 1
+          - name: ytd
+            index: 2
+
+  taxes:
+    items:
+      federal_income_tax:
+        patterns:
+          - regex: 'Federal Tax:[^\d]*([\d,]+\.\d{2})\s+[^\d]*([\d,]+\.\d{2})'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+      social_security:
+        patterns:
+          - regex: 'Social Security:[^\d]*([\d,]+\.\d{2})\s+[^\d]*([\d,]+\.\d{2})'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+      medicare:
+        patterns:
+          - regex: 'Medicare:[^\d]*([\d,]+\.\d{2})\s+[^\d]*([\d,]+\.\d{2})'
+            groups:
+              - name: current_withheld
+                index: 1
+              - name: ytd_withheld
+                index: 2
+
+  pay_summary:
+    patterns:
+      current:
+        regex: 'Gross Pay:[^\d]*([\d,]+\.\d{2})\s+[^\d]*([\d,]+\.\d{2}).*?Net Pay:[^\d]*([\d,]+\.\d{2})'
+        flags: [DOTALL]
+        groups:
+          - name: gross
+            index: 1
+          - name: net_pay
+            index: 3
+      ytd:
+        regex: 'Gross Pay:[^\d]*([\d,]+\.\d{2})\s+[^\d]*([\d,]+\.\d{2})'
+        groups:
+          - name: gross
+            index: 2
