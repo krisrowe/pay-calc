@@ -12,6 +12,11 @@ from typing import Dict, Any, List, Optional
 from .config import get_data_path, load_profile
 
 
+class MissingStockPriceError(Exception):
+    """Raised when RSU projection requires a stock price but none was provided."""
+    pass
+
+
 def is_rsus_enabled(party: str) -> bool:
     """Check if RSUs are enabled for a party in the profile.
 
@@ -323,25 +328,42 @@ def generate_projection(
     stock_projection = 0.0
     stock_info = {}
     rsu_warnings = []
+    stock_price_used = False
 
     # Use RSU SDK if party has RSUs enabled
     if party and is_rsus_enabled(party):
         # Pass latest stub date so we only project vests after that date
         last_stub_date = last_date.date() if hasattr(last_date, 'date') else last_date
         rsu_proj = get_rsu_projection(year, price=stock_price, after_date=last_stub_date)
-        stock_projection = rsu_proj.get("rsu_gross", 0)
+        rsu_shares = rsu_proj.get("rsu_shares", 0)
         rsu_warnings = rsu_proj.get("warnings", [])
 
-        if stock_projection > 0 or rsu_proj.get("rsu_shares", 0) > 0:
+        # FAIL if RSU shares pending but no stock price provided
+        if rsu_shares > 0 and not stock_price:
+            raise MissingStockPriceError(
+                f"RSU projection requires stock price: {rsu_shares} shares pending "
+                f"for {year} but no stock_price provided. Use --stock-price or "
+                f"get_stock_quote() to provide current price."
+            )
+
+        stock_projection = rsu_proj.get("rsu_gross", 0)
+        if stock_price and rsu_shares > 0:
+            stock_price_used = True
+            # Add volatility warning - stock price fluctuations affect projections
+            rsu_warnings.append(
+                f"* RSU projection: {rsu_shares} shares × ${stock_price:.2f} = ${stock_projection:,.0f} gross - "
+                f"actual value will vary with stock price"
+            )
+
+        if stock_projection > 0 or rsu_shares > 0:
             stock_info = {
                 "source": "rsu_sdk",
                 "frequency": "from_schedule",
                 "after_date": last_stub_date.isoformat() if hasattr(last_stub_date, 'isoformat') else str(last_stub_date),
-                "rsu_shares": rsu_proj.get("rsu_shares", 0),
+                "rsu_shares": rsu_shares,
                 "months_covered": rsu_proj.get("months_covered", []),
                 "price": stock_price,
                 "projected": stock_projection,
-                "warnings": rsu_warnings
             }
     else:
         # Fall back to stub-based inference if RSUs not configured
@@ -558,6 +580,21 @@ def generate_projection(
                     )
             except (ValueError, TypeError):
                 pass
+
+    # Propagate RSU warnings to config_warnings
+    if rsu_warnings:
+        config_warnings.extend(rsu_warnings)
+
+    # Warn if stock_price was provided but not used
+    if stock_price and not stock_price_used:
+        if party and is_rsus_enabled(party):
+            config_warnings.append(
+                f"Stock price ${stock_price:.2f} provided but no RSU shares pending for {year}"
+            )
+        else:
+            config_warnings.append(
+                f"Stock price ${stock_price:.2f} provided but RSUs not enabled for party '{party}'"
+            )
 
     return {
         "as_of_date": last_date_str,

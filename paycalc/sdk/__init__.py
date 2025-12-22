@@ -75,6 +75,7 @@ from .income_projection import (
     generate_income_projection,
     parse_pay_date,
     detect_employer_segments,
+    MissingStockPriceError,
 )
 
 from .analysis import (
@@ -165,6 +166,7 @@ __all__ = [
     "generate_income_projection",
     "parse_pay_date",
     "detect_employer_segments",
+    "MissingStockPriceError",
     # Records module
     "records",
 ]

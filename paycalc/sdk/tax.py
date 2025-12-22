@@ -766,7 +766,9 @@ def format_data_sources(data_sources: dict) -> str:
             proj_warnings = party_info.get("projection_warnings", [])
             if proj_warnings:
                 for w in proj_warnings:
-                    lines.append(f"  ⚠ {w}")
+                    # Strip leading "* " if present (redundant with ⚠)
+                    w_clean = w[2:] if w.startswith("* ") else w
+                    lines.append(f"    ⚠  {w_clean}")
         else:
             lines.append(f"{party_label}: no data")
 

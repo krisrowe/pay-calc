@@ -1203,11 +1203,6 @@ def _print_projection_report(proj: dict, analysis_data: dict):
             months = stock_info.get('months_covered', [])
             if months:
                 click.echo(f"    Months with vests: {', '.join(months)}")
-            warnings = stock_info.get('warnings', [])
-            if warnings:
-                click.echo(f"    Warnings:")
-                for w in warnings:
-                    click.echo(f"      - {w}")
         else:
             # Stub-inference format
             month_names = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec']
@@ -1221,9 +1216,11 @@ def _print_projection_report(proj: dict, analysis_data: dict):
     # Display config warnings (raise ignored, missing bonus, etc.)
     config_warnings = proj.get("config_warnings", [])
     if config_warnings:
-        click.echo(f"\n  Configuration Warnings:")
+        click.echo(f"\n  Warnings:")
         for w in config_warnings:
-            click.echo(f"    - {w}")
+            # Strip leading "* " if present (redundant with ⚠)
+            w_clean = w[2:] if w.startswith("* ") else w
+            click.echo(f"    ⚠  {w_clean}")
 
     click.echo("\n" + "=" * 60)
 
