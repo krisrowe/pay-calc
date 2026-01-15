@@ -1,0 +1,9 @@
+# Package-embedded defaults
+# These apply when no party-specific or year-specific config exists
+
+# Supplemental income withholding (bonuses, RSUs, etc.)
+# IRS minimum is 22% for supplemental wages under $1M
+supplemental_withholding_rate: 0.22
+
+# Pay frequency default
+pay_frequency: biweekly

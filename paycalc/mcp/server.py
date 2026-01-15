@@ -341,6 +341,116 @@ async def generate_tax_projection(
         return {"error": str(e)}
 
 
+@mcp.tool()
+async def get_first_regular_pay_date(
+    party: str = Field(description="Party identifier ('him' or 'her')"),
+    year: int | None = Field(default=None, description="Target year (defaults to current year)"),
+) -> dict[str, Any]:
+    """Get the first regular pay date of the year for a party.
+
+    Calculates based on the latest comp plan for the party and most recent
+    regular pay stub matching that employer, then works backwards to find
+    the first pay date of the year.
+
+    Returns success with date, frequency, employer, and reference date used.
+    On failure, returns error code and message.
+    """
+    try:
+        from paycalc.sdk.stub_model import get_first_regular_pay_date as sdk_get_first
+
+        return sdk_get_first(party=party, year=year)
+
+    except Exception as e:
+        logger.error(f"Error getting first pay date: {e}")
+        return {
+            "success": False,
+            "error": {
+                "code": "other",
+                "message": str(e),
+            },
+        }
+
+
+@mcp.tool()
+async def model_regular_401k_contribs(
+    year: int = Field(description="Tax year to model (e.g., 2025)"),
+    party: str = Field(description="Party identifier ('him' or 'her')"),
+    contribution_amount: float | None = Field(default=None, description="401k contribution amount per period"),
+    contribution_type: str = Field(default="absolute", description="'absolute' (fixed dollar) or 'percentage' (of gross, e.g. 0.10 for 10%)"),
+    starting_date: str | None = Field(default=None, description="Date to start 401k contributions (YYYY-MM-DD). Defaults to first pay date of year."),
+) -> dict[str, Any]:
+    """Model regular pay stubs with configurable 401k contributions.
+
+    Projects pay stubs for the full calendar year, calculating FIT, FICA, and
+    net pay for each period with the specified 401k contributions.
+
+    Pay schedule is auto-detected from the most recent stub in the prior year.
+
+    Returns stubs array with each period's breakdown plus YTD totals.
+    """
+    try:
+        from paycalc.sdk.stub_model import (
+            model_regular_401k_contribs as sdk_model_401k,
+            get_first_regular_pay_date,
+        )
+
+        # Resolve starting_date for 401k contributions if needed
+        effective_start = starting_date
+        if contribution_amount is not None and not effective_start:
+            first_pay_result = get_first_regular_pay_date(party, year)
+            if first_pay_result.get("success"):
+                effective_start = first_pay_result["date"]
+
+        # Build regular_401k_contribs config
+        regular_401k_contribs = None
+        if contribution_amount is not None:
+            regular_401k_contribs = {
+                "starting_date": effective_start or f"{year}-01-01",
+                "amount": contribution_amount,
+                "amount_type": contribution_type,
+            }
+
+        return sdk_model_401k(
+            year,
+            party,
+            regular_401k_contribs=regular_401k_contribs,
+        )
+
+    except Exception as e:
+        logger.error(f"Error modeling 401k contributions: {e}")
+        return {"error": str(e)}
+
+
+@mcp.tool()
+async def max_regular_401k_contribs(
+    year: int = Field(description="Tax year to model (e.g., 2025)"),
+    party: str = Field(description="Party identifier ('him' or 'her')"),
+    starting_date: str | None = Field(default=None, description="Date to start 401k contributions (YYYY-MM-DD). Defaults to first pay date of year."),
+) -> dict[str, Any]:
+    """Model regular pay stubs with max 401k contributions (100% of gross).
+
+    Projects pay stubs for the full calendar year with 401k contributions
+    set to maximum (capped at IRS limit). Useful for comparing net pay
+    between contributing $0 vs maxing out 401k.
+
+    Pay schedule is auto-detected from the most recent stub in the prior year.
+
+    Returns stubs array with each period's breakdown plus YTD totals.
+    """
+    try:
+        from paycalc.sdk.stub_model import max_regular_401k_contribs as sdk_max_401k
+
+        return sdk_max_401k(
+            year,
+            party,
+            starting_date=starting_date,
+        )
+
+    except Exception as e:
+        logger.error(f"Error modeling max 401k contributions: {e}")
+        return {"error": str(e)}
+
+
 # --- Resources (optional, for browsing) ---
 
 @mcp.resource("paycalc://records/years")

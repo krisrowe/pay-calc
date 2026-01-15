@@ -131,7 +131,7 @@
       "properties": {
         "taxable_wages": { "type": ["number", "null"] },
         "current_withheld": { "type": ["number", "null"] },
-        "ytd_withheld": { "type": "number", "exclusiveMinimum": 0, "description": "YTD withholding must be positive for W-2 generation" }
+        "ytd_withheld": { "type": "number", "minimum": 0, "description": "YTD withholding (can be $0 when maxing 401k)" }
       },
       "not": {
         "anyOf": [

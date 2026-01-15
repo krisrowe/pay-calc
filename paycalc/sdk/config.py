@@ -873,3 +873,95 @@ def validate_folder_id(value: str) -> tuple[bool, str]:
         return True, f"Warning: Folder ID seems long ({len(value)} chars). Google Drive IDs are typically 25-45 chars."
 
     return True, ""
+
+
+# =============================================================================
+# Deduction type normalization
+# =============================================================================
+
+_DEDUCTION_MAPPINGS: dict | None = None
+
+
+def _load_deduction_mappings() -> dict:
+    """Load deduction type mappings from mappings.yaml."""
+    global _DEDUCTION_MAPPINGS
+    if _DEDUCTION_MAPPINGS is not None:
+        return _DEDUCTION_MAPPINGS
+
+    mappings_path = Path(__file__).parent.parent / "config" / "mappings.yaml"
+    if mappings_path.exists():
+        with open(mappings_path) as f:
+            data = yaml.safe_load(f) or {}
+            _DEDUCTION_MAPPINGS = data.get("deduction_types", {})
+    else:
+        _DEDUCTION_MAPPINGS = {}
+
+    return _DEDUCTION_MAPPINGS
+
+
+def normalize_deduction_type(raw_type: str) -> str:
+    """Normalize a deduction type name to a canonical form.
+
+    Uses mappings.yaml to convert employer-specific deduction names
+    (like "401K Pre Tax", "Medical Insurance") to canonical types
+    (like "401k", "health").
+
+    Matching is case-insensitive substring matching.
+
+    Args:
+        raw_type: Raw deduction type from pay stub
+
+    Returns:
+        Canonical deduction type, or the original (lowercased) if no match
+    """
+    if not raw_type:
+        return ""
+
+    raw_lower = raw_type.lower()
+    mappings = _load_deduction_mappings()
+
+    # Check each pattern for substring match
+    for pattern, canonical in mappings.items():
+        if pattern.lower() in raw_lower:
+            return canonical
+
+    # No match - return original lowercased
+    return raw_lower
+
+
+def resolve_supplemental_rate(party: str, target_date) -> dict:
+    """Get the supplemental wage withholding rate for a party/date.
+
+    Supplemental wages (bonuses, RSUs, etc.) are taxed at a flat rate
+    rather than using W-4 brackets.
+
+    Args:
+        party: Party identifier ('him' or 'her')
+        target_date: Date to look up rate for
+
+    Returns:
+        Dict with:
+            - rate: The supplemental withholding rate (e.g., 0.22)
+            - source: Description of where rate came from
+    """
+    from .tax import load_tax_rules
+
+    # Get year from target_date
+    if hasattr(target_date, 'year'):
+        year = str(target_date.year)
+    else:
+        year = str(target_date)[:4]
+
+    try:
+        rules = load_tax_rules(year)
+        rate = rules.get("supplemental_rate", 0.22)
+        return {
+            "rate": rate,
+            "source": f"tax_rules/{year}.yaml",
+        }
+    except FileNotFoundError:
+        # Fall back to IRS standard rate
+        return {
+            "rate": 0.22,
+            "source": "IRS standard (no tax rules for year)",
+        }

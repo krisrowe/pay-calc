@@ -1,0 +1,50 @@
+# Field and type mappings for normalization
+# Used by SDK to standardize employer-specific naming conventions
+
+# Deduction type mappings
+# Maps employer-specific deduction names to canonical types
+# Format: "lowercase_pattern": "canonical_type"
+# Matching is case-insensitive substring unless exact: true
+deduction_types:
+  # 401k variations
+  "k pretax": "401k"
+  "401k": "401k"
+  "401(k)": "401k"
+  "retirement": "401k"
+  "pretax 401": "401k"
+
+  # Health insurance
+  "medical": "health"
+  "health": "health"
+  "health insurance": "health"
+  "medical insurance": "health"
+
+  # Dental
+  "dental": "dental"
+  "dental insurance": "dental"
+
+  # Vision
+  "vision": "vision"
+  "vision insurance": "vision"
+
+  # FSA
+  "fsa": "fsa"
+  "fsa health": "fsa"
+  "flex": "fsa"
+  "flexible spending": "fsa"
+
+  # HSA
+  "hsa": "hsa"
+  "health savings": "hsa"
+
+  # Life insurance
+  "life": "life"
+  "life insurance": "life"
+  "group term life": "life"
+
+  # Disability
+  "disability": "disability"
+  "ltd": "disability"
+  "std": "disability"
+  "long term disability": "disability"
+  "short term disability": "disability"
