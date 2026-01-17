@@ -6,7 +6,7 @@ typos in config files cause clear errors rather than silent ignoring.
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class CompPlanOverride(BaseModel):
@@ -30,7 +30,7 @@ class CompPlanOverride(BaseModel):
 
 
 class BenefitsOverride(BaseModel):
-    """Benefits/deductions override schema.
+    """Benefits/deductions override schema (legacy - for CLI overrides).
 
     Used for --benefits JSON file validation.
     All fields are optional since benefits vary by employer.
@@ -49,6 +49,83 @@ class BenefitsOverride(BaseModel):
     pretax_disability: Optional[float] = Field(default=None, ge=0, description="Disability insurance")
     pretax_imputed: Optional[float] = Field(default=None, ge=0, description="Imputed income offset (e.g., GTL)")
     pretax_other: Optional[float] = Field(default=None, ge=0, description="Other pretax deductions")
+
+
+class Benefits(BaseModel):
+    """Benefits/deductions schema (required input for model_stub).
+
+    At least one benefit field must be provided (can be zero).
+    This ensures benefits are explicitly specified, not accidentally omitted.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pretax_health: Optional[float] = Field(default=None, ge=0, description="Health insurance")
+    pretax_medical: Optional[float] = Field(default=None, ge=0, description="Medical insurance (alias for health)")
+    pretax_dental: Optional[float] = Field(default=None, ge=0, description="Dental insurance")
+    pretax_vision: Optional[float] = Field(default=None, ge=0, description="Vision insurance")
+    pretax_fsa: Optional[float] = Field(default=None, ge=0, description="FSA contribution")
+    pretax_hsa: Optional[float] = Field(default=None, ge=0, description="HSA contribution")
+    pretax_life: Optional[float] = Field(default=None, ge=0, description="Life insurance")
+    pretax_disability: Optional[float] = Field(default=None, ge=0, description="Disability insurance")
+    pretax_imputed: Optional[float] = Field(default=None, ge=0, description="Imputed income offset (e.g., GTL)")
+    pretax_other: Optional[float] = Field(default=None, ge=0, description="Other pretax deductions")
+
+    @model_validator(mode="after")
+    def at_least_one_benefit(self) -> "Benefits":
+        """Ensure at least one benefit field is explicitly set."""
+        values = self.model_dump(exclude_none=True)
+        if not values:
+            raise ValueError(
+                "At least one benefit field must be provided (can be zero). "
+                "Use pretax_health=0 if no benefits."
+            )
+        return self
+
+
+class PriorYtd(BaseModel):
+    """Prior YTD values schema.
+
+    Required input for model_stub - represents YTD totals from the
+    prior pay period. For period 1, pass all zeros.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    gross: float = Field(..., ge=0, description="YTD gross wages")
+    fit_taxable: float = Field(..., ge=0, description="YTD FIT taxable wages")
+    fit_withheld: float = Field(..., ge=0, description="YTD FIT withheld")
+    ss_wages: float = Field(..., ge=0, description="YTD Social Security wages")
+    ss_withheld: float = Field(..., ge=0, description="YTD Social Security withheld")
+    medicare_wages: float = Field(..., ge=0, description="YTD Medicare wages")
+    medicare_withheld: float = Field(..., ge=0, description="YTD Medicare withheld")
+    pretax_401k: float = Field(default=0, ge=0, description="YTD 401k contributions")
+
+    @model_validator(mode="after")
+    def validate_values_within_gross(self) -> "PriorYtd":
+        """Ensure all values are <= gross (can't withhold more than earned)."""
+        gross = self.gross
+        errors = []
+
+        if self.fit_taxable > gross:
+            errors.append(f"fit_taxable ({self.fit_taxable}) > gross ({gross})")
+        if self.fit_withheld > gross:
+            errors.append(f"fit_withheld ({self.fit_withheld}) > gross ({gross})")
+        if self.ss_wages > gross:
+            errors.append(f"ss_wages ({self.ss_wages}) > gross ({gross})")
+        if self.ss_withheld > gross:
+            errors.append(f"ss_withheld ({self.ss_withheld}) > gross ({gross})")
+        if self.medicare_wages > gross:
+            errors.append(f"medicare_wages ({self.medicare_wages}) > gross ({gross})")
+        if self.medicare_withheld > gross:
+            errors.append(f"medicare_withheld ({self.medicare_withheld}) > gross ({gross})")
+        if self.pretax_401k > gross:
+            errors.append(f"pretax_401k ({self.pretax_401k}) > gross ({gross})")
+
+        if errors:
+            raise ValueError("; ".join(errors))
+
+        return self
 
 
 class W4Override(BaseModel):
@@ -126,3 +203,19 @@ def validate_w4_override(data: dict) -> dict:
     """
     validated = W4Override.model_validate(data)
     return validated.model_dump(exclude_none=True)
+
+
+def validate_prior_ytd(data: dict) -> dict:
+    """Validate prior YTD data.
+
+    Args:
+        data: Dict with YTD values from prior period
+
+    Returns:
+        Validated dict with all required fields
+
+    Raises:
+        pydantic.ValidationError: If validation fails (missing fields, negative values)
+    """
+    validated = PriorYtd.model_validate(data)
+    return validated.model_dump()

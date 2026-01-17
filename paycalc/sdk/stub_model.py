@@ -39,6 +39,7 @@ from .schemas import (
     validate_comp_plan_override,
     validate_benefits_override,
     validate_w4_override,
+    validate_prior_ytd,
 )
 from pydantic import ValidationError
 
@@ -265,31 +266,31 @@ def model_stub(
     date: str,
     party: str,
     *,
+    prior_ytd: Dict[str, float],
+    benefits: Dict[str, Any],
     comp_plan_override: Optional[Dict[str, Any]] = None,
-    benefits_override: Optional[Dict[str, Any]] = None,
     w4_override: Optional[Dict[str, Any]] = None,
-    use_actuals: bool = False,
     pretax_401k: Optional[float] = None,
-    ytd_override: Optional[Dict[str, float]] = None,
     imputed_income: float = 0,
 ) -> Dict[str, Any]:
-    """Model a pay stub for a given date and party.
+    """Model a single pay stub given prior YTD values.
+
+    Calculates current period taxes and amounts, then adds to prior YTD.
 
     Resolution sources (in priority order):
     - Comp plan: override > registered (by effective date)
-    - Benefits: override > prior stub (same year) > registered (by year) > fallback
     - W-4: override > registered (by effective date) > defaults
-    - YTD: override > prior stub (if use_actuals) > calculated from period
 
     Args:
         date: Target pay date (YYYY-MM-DD)
         party: Party identifier ('him' or 'her')
+        prior_ytd: Prior period's YTD values (required). For period 1, pass all zeros.
+        benefits: Benefits/deductions dict (required). Must have at least one field
+            set (e.g., pretax_health=0 if no benefits).
         comp_plan_override: Override comp plan dict
-        benefits_override: Override benefits dict
         w4_override: Override W-4 dict
-        use_actuals: Use latest same-year stub for YTD baseline
         pretax_401k: Override 401k amount (e.g., 0 to model without 401k)
-        ytd_override: Override YTD values dict
+        imputed_income: Imputed income amount (e.g., Group Term Life)
 
     Returns:
         Dict with:
@@ -297,7 +298,7 @@ def model_stub(
             - party: Party identifier
             - period_number: Pay period within year
             - current: Current period amounts
-            - ytd: Year-to-date amounts
+            - ytd: Year-to-date amounts (prior + current)
             - sources: Provenance tracking for all inputs
             - warnings: List of warning messages
     """
@@ -305,14 +306,12 @@ def model_stub(
     year = str(target_date.year)
     warnings = []
 
-    # === VALIDATE OVERRIDES ===
+    # === VALIDATE INPUTS ===
     # Pydantic validation ensures unknown fields cause errors (no silent ignoring)
 
     try:
         if comp_plan_override:
             comp_plan_override = validate_comp_plan_override(comp_plan_override)
-        if benefits_override:
-            benefits_override = validate_benefits_override(benefits_override)
         if w4_override:
             w4_override = validate_w4_override(w4_override)
     except ValidationError as e:
@@ -324,6 +323,22 @@ def model_stub(
             errors.append(f"{loc}: {msg}")
         return {
             "error": f"Invalid override: {'; '.join(errors)}",
+            "validation_errors": e.errors(),
+        }
+
+    # Validate required benefits (must have at least one field set)
+    try:
+        from .schemas import Benefits
+        validated_benefits = Benefits.model_validate(benefits)
+        benefits = validated_benefits.model_dump(exclude_none=True)
+    except ValidationError as e:
+        errors = []
+        for err in e.errors():
+            loc = ".".join(str(x) for x in err["loc"])
+            msg = err["msg"]
+            errors.append(f"{loc}: {msg}")
+        return {
+            "error": f"Invalid benefits: {'; '.join(errors)}",
             "validation_errors": e.errors(),
         }
 
@@ -345,18 +360,7 @@ def model_stub(
             "sources": {"comp_plan": comp_result["source"]},
         }
 
-    # 2. Resolve benefits
-    if benefits_override:
-        benefits_result = {
-            "benefits": benefits_override,
-            "source": {"type": "override", "note": "Provided via parameter"},
-        }
-    else:
-        benefits_result = resolve_benefits(party, target_date, use_actuals=use_actuals)
-
-    benefits = benefits_result["benefits"]
-    if not benefits and benefits_result["source"]["type"] == "not_found":
-        warnings.append("No benefits configuration found; using zero deductions")
+    # 2. Benefits already validated above
 
     # 3. Resolve W-4
     if w4_override:
@@ -374,43 +378,20 @@ def model_stub(
     periods_per_year = get_pay_periods_per_year(frequency)
     period_number = calc_period_number(target_date, frequency)
 
-    # === RESOLVE YTD BASELINE ===
+    # === VALIDATE PRIOR YTD ===
 
-    ytd_baseline = {
-        "gross": 0,
-        "fit_taxable": 0,
-        "fit_withheld": 0,
-        "ss_wages": 0,
-        "ss_withheld": 0,
-        "medicare_wages": 0,
-        "medicare_withheld": 0,
-        "pretax_401k": 0,
-    }
-    ytd_source = {"type": "calculated", "note": "From period number × comp plan"}
-    periods_to_project = period_number
-
-    if ytd_override:
-        ytd_baseline = {**ytd_baseline, **ytd_override}
-        ytd_source = {"type": "override", "note": "Provided via parameter"}
-        periods_to_project = 1  # Only model current period
-
-    elif use_actuals:
-        result = find_latest_stub_for_year(party, target_date.year)
-        if result:
-            stub, stub_date = result
-            stub_date_obj = parse_date(stub_date)
-            if stub_date_obj < target_date:
-                ytd_baseline = get_ytd_from_stub(stub)
-                # Calculate periods from stub date to target date
-                stub_period = calc_period_number(stub_date_obj, frequency)
-                periods_to_project = period_number - stub_period
-                ytd_source = {
-                    "type": "prior_stub",
-                    "stub_date": stub_date,
-                    "periods_projected": periods_to_project,
-                }
-            else:
-                warnings.append(f"Latest stub ({stub_date}) is not before target date; using calculated YTD")
+    try:
+        ytd_baseline = validate_prior_ytd(prior_ytd)
+    except ValidationError as e:
+        errors = []
+        for err in e.errors():
+            loc = ".".join(str(x) for x in err["loc"])
+            msg = err["msg"]
+            errors.append(f"{loc}: {msg}")
+        return {
+            "error": f"Invalid prior_ytd: {'; '.join(errors)}",
+            "validation_errors": e.errors(),
+        }
 
     # === CALCULATE CURRENT PERIOD ===
 
@@ -490,46 +471,27 @@ def model_stub(
 
     # === BUILD YTD ===
 
-    # Project YTD by adding current to baseline (or multiplying if from scratch)
+    # Add current period to prior YTD baseline
     # Note: SS/Medicare wages use fica_taxable (gross - Section 125), not gross
-    # Note: Use capped fit_withheld, not raw taxes["fit_withheld"]
-    if ytd_source["type"] == "calculated":
-        # Pure projection: period_number × current
-        ytd = {
-            "gross": round(gross * period_number, 2),
-            "pretax_401k": round(pretax_401k * period_number, 2),
-            "fit_taxable": round(fit_taxable * period_number, 2),
-            "fit_withheld": round(fit_withheld * period_number, 2),
-            "ss_wages": round(min(fica_taxable * period_number, taxes["ss"]["wage_cap"]), 2),
-            "ss_withheld": round(taxes["ss"]["withheld"] * period_number, 2),
-            "medicare_wages": round(fica_taxable * period_number, 2),
-            "medicare_withheld": round(taxes["medicare"]["withheld"] * period_number, 2),
-        }
-    else:
-        # Add current to baseline
-        ytd = {
-            "gross": round(ytd_baseline["gross"] + gross * periods_to_project, 2),
-            "pretax_401k": round(ytd_baseline.get("pretax_401k", 0) + pretax_401k * periods_to_project, 2),
-            "fit_taxable": round(ytd_baseline["fit_taxable"] + fit_taxable * periods_to_project, 2),
-            "fit_withheld": round(ytd_baseline["fit_withheld"] + fit_withheld * periods_to_project, 2),
-            "ss_wages": round(min(
-                ytd_baseline["ss_wages"] + fica_taxable * periods_to_project,
-                taxes["ss"]["wage_cap"]
-            ), 2),
-            "ss_withheld": round(ytd_baseline["ss_withheld"] + taxes["ss"]["withheld"] * periods_to_project, 2),
-            "medicare_wages": round(ytd_baseline["medicare_wages"] + fica_taxable * periods_to_project, 2),
-            "medicare_withheld": round(
-                ytd_baseline["medicare_withheld"] + taxes["medicare"]["withheld"] * periods_to_project, 2
-            ),
-        }
+    ytd = {
+        "gross": round(ytd_baseline["gross"] + gross, 2),
+        "pretax_401k": round(ytd_baseline["pretax_401k"] + pretax_401k, 2),
+        "fit_taxable": round(ytd_baseline["fit_taxable"] + fit_taxable, 2),
+        "fit_withheld": round(ytd_baseline["fit_withheld"] + fit_withheld, 2),
+        "ss_wages": round(min(
+            ytd_baseline["ss_wages"] + fica_taxable,
+            taxes["ss"]["wage_cap"]
+        ), 2),
+        "ss_withheld": round(ytd_baseline["ss_withheld"] + taxes["ss"]["withheld"], 2),
+        "medicare_wages": round(ytd_baseline["medicare_wages"] + fica_taxable, 2),
+        "medicare_withheld": round(ytd_baseline["medicare_withheld"] + taxes["medicare"]["withheld"], 2),
+    }
 
     # === BUILD SOURCES ===
 
     sources = {
         "comp_plan": comp_result["source"],
-        "benefits": benefits_result["source"],
         "w4": w4_result["source"],
-        "ytd_baseline": ytd_source,
         "tax_rules": {"year": year, "path": f"tax-rules/{year}.yaml"},
     }
 
@@ -584,7 +546,7 @@ def model_stubs_in_sequence(
         comp_plan_history: List of comp plan entries with effective dates, sorted ascending.
             Each entry has: effective_date, gross_per_period. When provided, the correct
             gross is looked up for each pay date based on effective dates.
-        benefits_override: Override benefits dict
+        benefits_override: Override benefits dict (resolves from profile if not provided)
         w4_override: Override W-4 dict
         pretax_401k: Override 401k amount per period (applies to ALL periods)
         supplementals: List of supplemental pay stubs (bonuses, RSUs, etc.). Each object
@@ -642,6 +604,14 @@ def model_stubs_in_sequence(
             frequency = comp_result["plan"].get("pay_frequency", "biweekly")
         else:
             frequency = "biweekly"
+
+    # Resolve benefits if not provided
+    if benefits is None:
+        benefits_result = resolve_benefits(party, target, use_actuals=True)
+        benefits = benefits_result.get("benefits", {})
+        if not benefits:
+            # Use empty benefits with at least one field to satisfy validation
+            benefits = {"pretax_health": 0}
 
     # Generate all pay dates from start of year through target
     pay_dates = generate_pay_dates(target, frequency, ref_date)
@@ -715,8 +685,8 @@ def model_stubs_in_sequence(
     # Iterate through each event (regular pay or supplemental)
     for event_date, event_type, event_data in events:
         if event_type == "regular":
-            # Build YTD override from accumulated values
-            ytd_override = {
+            # Build prior YTD from accumulated values
+            prior_ytd = {
                 "gross": ytd_accum["gross"],
                 "fit_taxable": ytd_accum["fit_taxable"],
                 "fit_withheld": ytd_accum["fit_withheld"],
@@ -751,10 +721,10 @@ def model_stubs_in_sequence(
             result = model_stub(
                 date_str,
                 party,
+                prior_ytd=prior_ytd,
+                benefits=benefits,
                 comp_plan_override=period_comp_plan,
-                benefits_override=benefits_override,
                 w4_override=w4_override,
-                ytd_override=ytd_override,
                 pretax_401k=period_401k,
             )
 

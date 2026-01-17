@@ -37,3 +37,6 @@ working-*.txt
 
 # Sensitive data patterns (referenced from CLAUDE.md)
 SENSITIVE_PATTERNS.md
+
+# Temporary working files
+temp/
