@@ -669,10 +669,10 @@ class Test401kEvenDistribution:
 # === MAX 401K CAP HIT TEST ===
 
 
-class TestMax401kCapHitEarly:
-    """Test max 401k contributions hitting cap early in the year."""
+class TestMax401kMethods:
+    """Test max 401k SDK methods (frontload and spread evenly)."""
 
-    def test_max_401k_cap_hit_early(self, isolated_env, base_profile, tax_rules_2025):
+    def test_model_401k_max_frontload(self, isolated_env, base_profile, tax_rules_2025):
         """With $5000 gross, 401k cap is hit in ~5 periods, then $0 thereafter."""
         from paycalc.sdk.modeling import model_401k_max_frontload
 
@@ -772,6 +772,84 @@ class TestMax401kCapHitEarly:
         # Final YTD 401k should equal the cap
         ytd = result["ytd"]
         assert abs(ytd["pretax_401k"] - K401_LIMIT) < 0.01, (
+            f"YTD 401k ${ytd['pretax_401k']:.2f} should equal cap ${K401_LIMIT:.2f}"
+        )
+
+        # YTD 401k should equal sum of all stubs
+        sum_401k = sum(s["pretax_401k"] for s in regular_stubs)
+        assert abs(ytd["pretax_401k"] - sum_401k) < 0.01, (
+            f"YTD 401k ${ytd['pretax_401k']:.2f} should equal sum ${sum_401k:.2f}"
+        )
+
+    def test_model_401k_max_spread_evenly(self, isolated_env, base_profile, tax_rules_2025):
+        """Max 401k spread evenly across all 26 pay periods."""
+        from paycalc.sdk.modeling import model_401k_max_spread_evenly
+
+        write_profile(isolated_env["config_dir"], base_profile)
+        write_tax_rules(isolated_env["config_dir"], TEST_YEAR, tax_rules_2025)
+
+        # Create reference stub for schedule anchoring
+        create_reference_stub(
+            isolated_env["data_dir"],
+            year="2024",
+            party="testparty",
+            pay_date="2024-12-20",
+        )
+
+        # With $10,000 gross biweekly, spreading $23,500 over 26 periods
+        # gives ~$903.85/period (rounds up to ensure hitting target)
+        result = model_401k_max_spread_evenly(
+            TEST_YEAR,
+            "testparty",
+            comp_plan_override={
+                "gross_per_period": 10000.00,
+                "pay_frequency": "biweekly",
+            },
+            benefits_override={
+                "pretax_health": 200.00,
+            },
+            w4_override={
+                "filing_status": "mfj",
+                "step2c_multiple_jobs": True,
+            },
+        )
+
+        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+
+        stubs = result["stubs"]
+        regular_stubs = [s for s in stubs if s["type"] == "regular"]
+
+        # Should have 26 stubs
+        assert len(regular_stubs) == 26, f"Expected 26 stubs, got {len(regular_stubs)}"
+
+        # All or nearly all stubs should have 401k contributions (spread evenly)
+        stubs_with_401k = [s for s in regular_stubs if s["pretax_401k"] > 0]
+        assert len(stubs_with_401k) >= 25, (
+            f"Expected at least 25 periods with 401k (spread), got {len(stubs_with_401k)}"
+        )
+
+        # Get the per-period amounts
+        k401_amounts = [s["pretax_401k"] for s in regular_stubs]
+
+        # Most should be the same amount (evenly spread)
+        from collections import Counter
+        amount_counts = Counter(round(a, 2) for a in k401_amounts if a > 0)
+        most_common_amount, most_common_count = amount_counts.most_common(1)[0]
+
+        # At least 24 periods should have the same amount
+        assert most_common_count >= 24, (
+            f"Expected at least 24 periods with same 401k amount, got {most_common_count}"
+        )
+
+        # The common amount should be around $903-904 ($23,500 / 26)
+        expected_per_period = K401_LIMIT / 26  # ~$903.85
+        assert abs(most_common_amount - expected_per_period) < 2.00, (
+            f"Per-period amount ${most_common_amount:.2f} should be near ${expected_per_period:.2f}"
+        )
+
+        # Final YTD 401k should equal the cap
+        ytd = result["ytd"]
+        assert abs(ytd["pretax_401k"] - K401_LIMIT) < 1.00, (
             f"YTD 401k ${ytd['pretax_401k']:.2f} should equal cap ${K401_LIMIT:.2f}"
         )
 
