@@ -8,6 +8,8 @@ from mcp.server.fastmcp import FastMCP
 from pydantic import Field
 
 from paycalc.sdk import records as sdk_records
+from paycalc.sdk.employee.w4 import resolve_w4, merge_w4_with_defaults
+from paycalc.sdk.employee.config import derive_w4_from_stub as sdk_derive_w4
 
 logger = logging.getLogger(__name__)
 
@@ -449,6 +451,83 @@ async def max_regular_401k_contribs(
     except Exception as e:
         logger.error(f"Error modeling max 401k contributions: {e}")
         return {"error": str(e)}
+
+
+@mcp.tool()
+async def get_configured_w4(
+    party: str = Field(description="Party identifier ('him' or 'her')"),
+    date: str = Field(description="Date to check effective W4 for (YYYY-MM-DD)"),
+) -> dict[str, Any]:
+    """Get the effective W4 settings configured in this app for a party on a given date.
+
+    Resolves from registered W4 history in profile.yaml, falling back to
+    defaults if no W4 is registered for the party.
+
+    DIAGNOSTIC USE: When modeled pay stub outputs don't match actual stub values,
+    compare this tool's output with derive_w4_from_stub() results:
+    - This tool shows what W4 pay-calc THINKS is in effect (from config)
+    - derive_w4_from_stub shows what W4 the payroll system ACTUALLY used
+    - Differences indicate W4 config needs updating or a W4 change occurred
+
+    Returns W4 settings including filing_status, step2_checkbox, step3_dependents,
+    step4a_other_income, step4b_deductions, step4c_extra_withholding.
+    """
+    try:
+        from datetime import datetime
+
+        target_date = datetime.strptime(date, "%Y-%m-%d").date()
+        result = resolve_w4(party, target_date)
+
+        # Merge with defaults to get complete W4 structure
+        settings = merge_w4_with_defaults(result["settings"])
+
+        return {
+            "party": party,
+            "date": date,
+            "settings": settings,
+            "source": result["source"],
+        }
+
+    except ValueError as e:
+        return {"error": f"Invalid date format: {e}", "party": party, "date": date}
+    except Exception as e:
+        logger.error(f"Error getting effective W4: {e}")
+        return {"error": str(e), "party": party, "date": date}
+
+
+@mcp.tool()
+async def derive_w4_from_stub(
+    record_id: str = Field(description="Pay stub record ID (from list_records)"),
+    max_dependents: int = Field(default=8, description="Maximum number of dependents to try in search (default 8)"),
+) -> dict[str, Any]:
+    """Derive W4 settings from a pay stub's actual withholding.
+
+    Reverse-engineers the W4 configuration that would produce the stub's
+    actual FIT withholding by trying all combinations of filing status,
+    step2 checkbox, and dependent credits.
+
+    DIAGNOSTIC USE: When modeled pay stub outputs don't match actual stub values,
+    compare this tool's output with get_configured_w4() results:
+    - This tool shows what W4 the payroll system ACTUALLY used (derived from stub)
+    - get_configured_w4 shows what W4 pay-calc THINKS is in effect (from config)
+    - Differences indicate W4 config needs updating or a W4 change occurred
+
+    Use cases:
+    - Diagnosing FIT withholding discrepancies between model and actual
+    - Detecting when employer processed a W4 change
+    - Setting up accurate W4 history in profile.yaml for modeling
+
+    Returns derived W4 settings and all matching configurations.
+    """
+    try:
+        result = sdk_derive_w4(record_id, max_dependents=max_dependents)
+        return result
+
+    except ValueError as e:
+        return {"error": str(e), "record_id": record_id}
+    except Exception as e:
+        logger.error(f"Error deriving W4: {e}")
+        return {"error": str(e), "record_id": record_id}
 
 
 # --- Resources (optional, for browsing) ---
