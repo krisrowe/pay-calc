@@ -19,13 +19,17 @@ from typing import Optional, Dict, List, Any, Tuple
 import PyPDF2
 
 
+# Default parsers directory: relative to this module's location (repo root/parsers/)
+_DEFAULT_PARSERS_DIR = Path(__file__).parent.parent / "parsers"
+
+
 class ParserCache:
     """Cache for loaded YAML parser definitions."""
 
-    def __init__(self, parsers_dir: str = "parsers/"):
+    def __init__(self, parsers_dir: str | Path | None = None):
         self.parsers: List[Dict] = []
         self.qualifiers: List[List[re.Pattern]] = []
-        self.parsers_dir = Path(parsers_dir)
+        self.parsers_dir = Path(parsers_dir) if parsers_dir else _DEFAULT_PARSERS_DIR
         self._loaded = False
 
     def _get_flags(self, pattern_def: Dict, parser: Dict) -> int:
@@ -133,11 +137,12 @@ class ParserCache:
 _parser_cache: Optional[ParserCache] = None
 
 
-def get_parser_cache(parsers_dir: str = "parsers/") -> ParserCache:
+def get_parser_cache(parsers_dir: str | Path | None = None) -> ParserCache:
     """Get or create the global parser cache."""
     global _parser_cache
-    if _parser_cache is None or str(_parser_cache.parsers_dir) != parsers_dir:
-        _parser_cache = ParserCache(parsers_dir)
+    effective_dir = Path(parsers_dir) if parsers_dir else _DEFAULT_PARSERS_DIR
+    if _parser_cache is None or _parser_cache.parsers_dir != effective_dir:
+        _parser_cache = ParserCache(effective_dir)
     return _parser_cache
 
 
@@ -328,14 +333,19 @@ class YAMLParser:
         if not start_patterns:
             return text
 
-        # Find section start
-        start_match = self._try_patterns(text, start_patterns, f"{section_name}_start")
+        # Normalize text for pattern matching (collapse whitespace including newlines)
+        # This handles PDF format variations where newlines appear instead of spaces
+        # Use normalized text throughout since positions change after normalization
+        normalized = re.sub(r'\s+', ' ', text)
+
+        # Find section start on normalized text
+        start_match = self._try_patterns(normalized, start_patterns, f"{section_name}_start")
         if not start_match:
             return ""
 
-        section_text = text[start_match.start():]
+        section_text = normalized[start_match.start():]
 
-        # Find section end
+        # Find section end on normalized text
         if end_patterns:
             end_match = self._try_patterns(section_text, end_patterns, f"{section_name}_end")
             if end_match:
@@ -662,11 +672,11 @@ class YAMLParser:
 class YAMLProcessor:
     """Processor that uses YAML parser definitions."""
 
-    def __init__(self, parsers_dir: str = "parsers/"):
+    def __init__(self, parsers_dir: str | Path | None = None):
         self.cache = get_parser_cache(parsers_dir)
 
     @staticmethod
-    def process(pdf_path: str, employer_name: str, parsers_dir: str = "parsers/") -> Dict:
+    def process(pdf_path: str, employer_name: str, parsers_dir: str | Path | None = None) -> Dict:
         """
         Process a PDF using YAML parser definitions.
 
@@ -675,7 +685,7 @@ class YAMLProcessor:
         Args:
             pdf_path: Path to PDF file
             employer_name: Name of employer (for output, not matching)
-            parsers_dir: Directory containing YAML parser definitions
+            parsers_dir: Directory containing YAML parser definitions (default: repo parsers/)
 
         Returns:
             dict: Standardized document data structure

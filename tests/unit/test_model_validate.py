@@ -16,6 +16,7 @@ from pathlib import Path
 from paycalc.sdk.modeling import (
     validate_stub,
     validate_stub_in_sequence,
+    ValidateStubResult,
 )
 from paycalc.sdk.schemas import FicaRoundingBalance
 
@@ -174,16 +175,18 @@ def make_regular_stub_data(pay_date: str) -> dict:
     """Create a regular pay stub data structure for testing.
 
     This matches the structure expected by get_pay_stub / PayStub schema.
+    Uses current_amount/ytd_amount for deductions (not current/ytd).
     """
     return {
         "pay_date": pay_date,
         "employer": "Test Corp",
+        "net_pay": 7050.30,  # Top-level net_pay for get_pay_stub
         "earnings": [
-            {"type": "Regular", "current": 10000.00, "ytd": 20000.00},
+            {"type": "Regular", "current_amount": 10000.00, "ytd_amount": 20000.00},
         ],
         "deductions": [
-            {"type": "Health", "current": 200.00, "ytd": 400.00},
-            {"type": "401k", "current": 500.00, "ytd": 1000.00},
+            {"type": "Health", "current_amount": 200.00, "ytd_amount": 400.00},
+            {"type": "401k", "current_amount": 500.00, "ytd_amount": 1000.00},
         ],
         "taxes": {
             "federal_income_tax": {
@@ -218,6 +221,75 @@ def make_regular_stub_data(pay_date: str) -> dict:
     }
 
 
+def make_stub_with_post_tax(pay_date: str, post_tax_amount: float = 115.14) -> dict:
+    """Create a stub with post-tax deductions using correct field names.
+
+    get_pay_stub expects current_amount/ytd_amount, not current/ytd.
+    It classifies deductions and builds DeductionTotals automatically.
+    """
+    # Deduction breakdown:
+    # - health: 200 (fully_pretax)
+    # - 401k: 500 (retirement)
+    # - vol_life: 115.14 (post_tax)
+    #
+    # Tax calculations (this is what the model should produce):
+    # FIT taxable = gross - fully_pretax - retirement = 10000 - 200 - 500 = 9300
+    # FICA taxable = gross - fully_pretax = 10000 - 200 = 9800
+    gross = 10000.00
+    fully_pretax = 200.00  # health
+    retirement = 500.00    # 401k
+    post_tax = post_tax_amount  # vol_life
+
+    fit_taxable = gross - fully_pretax - retirement  # 9300
+    fica_taxable = gross - fully_pretax  # 9800
+
+    # Withholding (these are "actual" values the model should match)
+    fit_withheld = 1500.00
+    ss_withheld = 607.60
+    medicare_withheld = 142.10
+    total_withheld = fit_withheld + ss_withheld + medicare_withheld
+
+    # Net = gross - all deductions - all taxes
+    net_pay = gross - fully_pretax - retirement - post_tax - total_withheld
+
+    return {
+        "pay_date": pay_date,
+        "employer": "Test Corp",
+        "net_pay": net_pay,  # get_pay_stub reads this for current.net_pay
+        "earnings": [
+            {"type": "Regular", "current_amount": gross, "ytd_amount": gross * 2},
+        ],
+        "deductions": [
+            {"type": "Health Insurance", "current_amount": fully_pretax, "ytd_amount": fully_pretax * 2},
+            {"type": "401k", "current_amount": retirement, "ytd_amount": retirement * 2},
+            {"type": "Vol Life", "current_amount": post_tax, "ytd_amount": post_tax * 2},
+        ],
+        "taxes": {
+            "federal_income_tax": {
+                "taxable_wages": fit_taxable,
+                "current_withheld": fit_withheld,
+                "ytd_withheld": fit_withheld * 2,
+            },
+            "social_security": {
+                "taxable_wages": fica_taxable,
+                "ytd_wages": fica_taxable * 2,
+                "current_withheld": ss_withheld,
+                "ytd_withheld": ss_withheld * 2,
+            },
+            "medicare": {
+                "taxable_wages": fica_taxable,
+                "ytd_wages": fica_taxable * 2,
+                "current_withheld": medicare_withheld,
+                "ytd_withheld": medicare_withheld * 2,
+            },
+        },
+        "pay_summary": {
+            "current": {"gross": gross},
+            "ytd": {"gross": gross * 2},
+        },
+    }
+
+
 # === TESTS ===
 
 
@@ -225,7 +297,7 @@ class TestValidateStub:
     """Tests for validate_stub (non-iterative validation)."""
 
     def test_validate_stub_returns_result(self, isolated_env, base_profile, tax_rules_2025):
-        """validate_stub returns a result dict with expected keys."""
+        """validate_stub returns ValidateStubResult on success."""
         write_profile(isolated_env["config_dir"], base_profile)
         write_tax_rules(isolated_env["config_dir"], TEST_YEAR, tax_rules_2025)
 
@@ -237,16 +309,60 @@ class TestValidateStub:
         # Call validate_stub
         result = validate_stub(record_id, FicaRoundingBalance.none())
 
-        # Should return dict with expected keys
-        assert isinstance(result, dict)
-        assert "record_id" in result or "error" in result
+        # Should return ValidateStubResult on success, dict with "error" on failure
+        if isinstance(result, dict):
+            assert "error" in result, "Dict result should contain 'error' key"
+        else:
+            # ValidateStubResult - check expected fields
+            assert isinstance(result, ValidateStubResult)
+            assert result.record_id == record_id
+            assert result.party == "testparty"
+            assert result.pay_date is not None
 
-        if "error" not in result:
-            assert result["record_id"] == record_id
-            assert "party" in result
-            assert "pay_date" in result
-            assert "match" in result
-            assert "discrepancies" in result
+    def test_validate_stub_deductions_match(self, isolated_env, base_profile, tax_rules_2025):
+        """validate_stub should produce no deduction discrepancies.
+
+        The stub has deduction line items that get_pay_stub classifies into:
+        - fully_pretax (health: $200)
+        - retirement (401k: $500)
+        - post_tax (vol_life: $115.14)
+
+        get_pay_stub correctly builds stub.current.deductions with all three.
+        validate_stub should pass these to model_stub and get matching values.
+
+        This test FAILS because validate_stub calls extract_inputs_from_stub
+        which ignores post_tax deductions, causing model to output post_tax=0
+        while actual stub has post_tax=115.14. The fix is to pass
+        stub.current.deductions directly instead of destructuring/reconstructing.
+        """
+        write_profile(isolated_env["config_dir"], base_profile)
+        write_tax_rules(isolated_env["config_dir"], TEST_YEAR, tax_rules_2025)
+
+        # Create a stub with all three deduction types
+        record_id = "posttax1"
+        stub_data = make_stub_with_post_tax(f"{TEST_YEAR}-01-17", post_tax_amount=115.14)
+        create_stub_record(isolated_env["data_dir"], record_id, "testparty", stub_data)
+
+        # Validate the stub
+        result = validate_stub(record_id, FicaRoundingBalance.none())
+
+        # Should succeed without error
+        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+
+        # Extract discrepancies for analysis
+        current_discrepancies = {d.field: d for d in result.current.discrepancies}
+
+        # All deduction fields should match (no discrepancies)
+        assert "deductions.fully_pretax" not in current_discrepancies, (
+            f"fully_pretax mismatch: {current_discrepancies['deductions.fully_pretax']}"
+        )
+        assert "deductions.retirement" not in current_discrepancies, (
+            f"retirement mismatch: {current_discrepancies['deductions.retirement']}"
+        )
+        assert "deductions.post_tax" not in current_discrepancies, (
+            f"post_tax mismatch: modeled={current_discrepancies['deductions.post_tax'].modeled}, "
+            f"actual={current_discrepancies['deductions.post_tax'].actual}"
+        )
 
     def test_validate_stub_not_found(self, isolated_env, base_profile, tax_rules_2025):
         """validate_stub returns error for non-existent record."""
@@ -283,17 +399,15 @@ class TestValidateStubInSequence:
         # Call validate_stub_in_sequence
         result = validate_stub_in_sequence(record_id)
 
-        # Should return dict with expected keys
-        assert isinstance(result, dict)
-        assert "record_id" in result or "error" in result
+        # Must not return an error
+        assert "error" not in result, f"Unexpected error: {result.get('error')}"
 
-        if "error" not in result:
-            assert result["record_id"] == record_id
-            assert "party" in result
-            assert "pay_date" in result
-            assert "match" in result
-            assert "discrepancies" in result
-            assert "periods_modeled" in result
+        # Should return result with expected keys
+        assert isinstance(result, (dict, ValidateStubResult))
+        assert result.record_id == record_id
+        assert result.party == "testparty"
+        assert result.pay_date is not None
+        assert result.periods_modeled is not None
 
     def test_validate_stub_in_sequence_not_found(self, isolated_env, base_profile, tax_rules_2025):
         """validate_stub_in_sequence returns error for non-existent record."""

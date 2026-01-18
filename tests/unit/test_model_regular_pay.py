@@ -22,7 +22,7 @@ from paycalc.sdk.modeling import (
     model_stubs_in_sequence,
     model_regular_401k_contribs,
 )
-from paycalc.sdk.modeling.schemas import RetirementElectionHistory
+from paycalc.sdk.modeling.schemas import RetirementElectionHistory, StubSequenceResult
 
 
 # === TEST CONSTANTS ===
@@ -148,6 +148,14 @@ def create_reference_stub(data_dir: Path, year: str, party: str, pay_date: str):
     return stub_file
 
 
+def assert_no_error(result):
+    """Assert result is StubSequenceResult (not error dict)."""
+    if isinstance(result, dict):
+        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+    else:
+        assert isinstance(result, StubSequenceResult)
+
+
 # === HAPPY PATH TEST ===
 
 
@@ -189,27 +197,27 @@ class TestModelRegularPayHappyPath:
             ),
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
         # Sum up all current values from stubs
-        sum_gross = sum(s["gross"] for s in result["stubs"])
-        sum_401k = sum(s["pretax_401k"] for s in result["stubs"])
-        sum_fit_taxable = sum(s["fit_taxable"] for s in result["stubs"])
-        sum_fit_withheld = sum(s["fit_withheld"] for s in result["stubs"])
-        sum_ss_withheld = sum(s["ss_withheld"] for s in result["stubs"])
-        sum_medicare_withheld = sum(s["medicare_withheld"] for s in result["stubs"])
-        sum_net_pay = sum(s["net_pay"] for s in result["stubs"])
+        sum_gross = sum(s.current.gross for s in result.stubs)
+        sum_401k = sum(s.current.deductions.retirement for s in result.stubs)
+        sum_fit_taxable = sum(s.current.taxable.fit for s in result.stubs)
+        sum_fit_withheld = sum(s.current.withheld.fit for s in result.stubs)
+        sum_ss_withheld = sum(s.current.withheld.ss for s in result.stubs)
+        sum_medicare_withheld = sum(s.current.withheld.medicare for s in result.stubs)
+        sum_net_pay = sum(s.current.net_pay for s in result.stubs)
 
-        ytd = result["ytd"]
+        ytd = result.ytd
 
         # YTD should equal sum of current values (within rounding tolerance)
-        assert abs(ytd["gross"] - sum_gross) < 0.01, f"Gross mismatch: YTD={ytd['gross']}, sum={sum_gross}"
-        assert abs(ytd["pretax_401k"] - sum_401k) < 0.01, f"401k mismatch: YTD={ytd['pretax_401k']}, sum={sum_401k}"
-        assert abs(ytd["fit_taxable"] - sum_fit_taxable) < 0.01
-        assert abs(ytd["fit_withheld"] - sum_fit_withheld) < 0.01
-        assert abs(ytd["ss_withheld"] - sum_ss_withheld) < 0.01
-        assert abs(ytd["medicare_withheld"] - sum_medicare_withheld) < 0.01
-        assert abs(ytd["net_pay"] - sum_net_pay) < 0.01
+        assert abs(ytd.gross - sum_gross) < 0.01, f"Gross mismatch: YTD={ytd.gross}, sum={sum_gross}"
+        assert abs(ytd.deductions.retirement - sum_401k) < 0.01, f"401k mismatch: YTD={ytd.deductions.retirement}, sum={sum_401k}"
+        assert abs(ytd.taxable.fit - sum_fit_taxable) < 0.01
+        assert abs(ytd.withheld.fit - sum_fit_withheld) < 0.01
+        assert abs(ytd.withheld.ss - sum_ss_withheld) < 0.01
+        assert abs(ytd.withheld.medicare - sum_medicare_withheld) < 0.01
+        assert abs(ytd.net_pay - sum_net_pay) < 0.01
 
     def test_net_pay_equals_gross_minus_deductions(self, isolated_env, base_profile, tax_rules_2025):
         """For each stub, gross - deductions = net pay."""
@@ -247,24 +255,24 @@ class TestModelRegularPayHappyPath:
             ),
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
-        for i, stub in enumerate(result["stubs"]):
-            if stub["type"] != "regular":
+        for i, stub in enumerate(result.stubs):
+            if stub.type != "regular":
                 continue
 
-            gross = stub["gross"]
-            pretax_401k = stub["pretax_401k"]
-            fit_withheld = stub["fit_withheld"]
-            ss_withheld = stub["ss_withheld"]
-            medicare_withheld = stub["medicare_withheld"]
-            net_pay = stub["net_pay"]
+            gross = stub.current.gross
+            pretax_401k = stub.current.deductions.retirement
+            fit_withheld = stub.current.withheld.fit
+            ss_withheld = stub.current.withheld.ss
+            medicare_withheld = stub.current.withheld.medicare
+            net_pay = stub.current.net_pay
 
             # Net = Gross - 401k - Benefits - FIT - SS - Medicare
             expected_net = round(gross - pretax_401k - benefits_total - fit_withheld - ss_withheld - medicare_withheld, 2)
 
             assert abs(net_pay - expected_net) < 0.01, (
-                f"Stub {i} ({stub['date']}): net_pay={net_pay}, expected={expected_net}"
+                f"Stub {i} ({stub.pay_date}): net_pay={net_pay}, expected={expected_net}"
             )
 
     def test_effective_fit_rate_reasonable(self, isolated_env, base_profile, tax_rules_2025):
@@ -301,10 +309,10 @@ class TestModelRegularPayHappyPath:
             ),
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
-        ytd = result["ytd"]
-        effective_fit_rate = ytd["fit_withheld"] / ytd["fit_taxable"]
+        ytd = result.ytd
+        effective_fit_rate = ytd.withheld.fit / ytd.taxable.fit
 
         # For MFJ with ~$247k FIT taxable ($260k gross - $13k 401k - $6.5k benefits),
         # effective withholding rate should be in a reasonable range.
@@ -356,10 +364,10 @@ class TestSocialSecurityWageCap:
             # No retirement_elections = no 401k, keeps FICA taxable = gross - benefits
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
         # Extract SS withheld for each stub
-        ss_withheld_list = [s["ss_withheld"] for s in result["stubs"] if s["type"] == "regular"]
+        ss_withheld_list = [s.current.withheld.ss for s in result.stubs if s.type == "regular"]
 
         # Full SS withholding = $10,000 * 0.062 = $620
         # (Actually, FICA taxable = gross - benefits = $10,000 - $250 = $9,750)
@@ -395,16 +403,16 @@ class TestSocialSecurityWageCap:
             )
 
         # Final YTD SS wages should equal the cap
-        ytd = result["ytd"]
+        ytd = result.ytd
 
-        assert abs(ytd["ss_wages"] - SS_WAGE_CAP) < 0.01, (
-            f"YTD SS wages should equal cap: got {ytd['ss_wages']}, expected {SS_WAGE_CAP}"
+        assert abs(ytd.taxable.ss - SS_WAGE_CAP) < 0.01, (
+            f"YTD SS wages should equal cap: got {ytd.taxable.ss}, expected {SS_WAGE_CAP}"
         )
 
         # Total SS withheld should be cap * rate
         expected_ss_withheld = round(SS_WAGE_CAP * SS_TAX_RATE, 2)
-        assert abs(ytd["ss_withheld"] - expected_ss_withheld) < 0.01, (
-            f"YTD SS withheld should be {expected_ss_withheld}, got {ytd['ss_withheld']}"
+        assert abs(ytd.withheld.ss - expected_ss_withheld) < 0.01, (
+            f"YTD SS withheld should be {expected_ss_withheld}, got {ytd.withheld.ss}"
         )
 
     def test_ss_cap_with_high_earner(self, isolated_env, base_profile, tax_rules_2025):
@@ -441,10 +449,10 @@ class TestSocialSecurityWageCap:
             # No retirement_elections = no 401k
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
         # Count periods with non-zero SS withholding
-        stubs_with_ss = [s for s in result["stubs"] if s["type"] == "regular" and s["ss_withheld"] > 0]
+        stubs_with_ss = [s for s in result.stubs if s.type == "regular" and s.current.withheld.ss > 0]
 
         # Should hit cap around period 7-8 (7 full + 1 partial = 8 with SS)
         assert len(stubs_with_ss) <= 8, (
@@ -455,8 +463,8 @@ class TestSocialSecurityWageCap:
         )
 
         # Final YTD SS wages should be the cap
-        ytd = result["ytd"]
-        assert abs(ytd["ss_wages"] - SS_WAGE_CAP) < 0.01
+        ytd = result.ytd
+        assert abs(ytd.taxable.ss - SS_WAGE_CAP) < 0.01
 
 
 # === 401K CAP TEST ===
@@ -498,18 +506,18 @@ class Test401kCap:
             w4_override={"filing_status": "mfj"},
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
-        ytd = result["ytd"]
+        ytd = result.ytd
 
         # Final YTD 401k should be the cap
-        assert abs(ytd["pretax_401k"] - K401_LIMIT) < 0.01, (
-            f"YTD 401k should equal cap: got {ytd['pretax_401k']}, expected {K401_LIMIT}"
+        assert abs(ytd.deductions.retirement - K401_LIMIT) < 0.01, (
+            f"YTD 401k should equal cap: got {ytd.deductions.retirement}, expected {K401_LIMIT}"
         )
 
         # After cap, remaining stubs should have $0 401k
-        stubs = result["stubs"]
-        non_zero_401k_count = sum(1 for s in stubs if s["pretax_401k"] > 0)
+        stubs = result.stubs
+        non_zero_401k_count = sum(1 for s in stubs if s.current.deductions.retirement > 0)
 
         # With $10k gross and $23.5k limit, should have 3 periods max with 401k
         # (2 full at $10k + 1 partial at $3.5k)
@@ -564,22 +572,22 @@ class TestSupplementalBonusSSCap:
             ],
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
         # Check first 13 regular stubs all have full SS withholding
-        regular_stubs = [s for s in result["stubs"] if s["type"] == "regular"]
+        regular_stubs = [s for s in result.stubs if s.type == "regular"]
         full_ss = round(6000.00 * SS_TAX_RATE, 2)  # $372 per period
 
         # First ~13 periods should have full SS withholding
         for i in range(min(13, len(regular_stubs))):
-            assert abs(regular_stubs[i]["ss_withheld"] - full_ss) < 1.0, (
+            assert abs(regular_stubs[i].current.withheld.ss - full_ss) < 1.0, (
                 f"Period {i+1} should have full SS withholding of ${full_ss}"
             )
 
         # Final YTD SS wages should equal the cap (capped at $176,100)
-        ytd = result["ytd"]
-        assert abs(ytd["ss_wages"] - SS_WAGE_CAP) < 0.01, (
-            f"YTD SS wages should equal cap: got {ytd['ss_wages']}, expected {SS_WAGE_CAP}"
+        ytd = result.ytd
+        assert abs(ytd.taxable.ss - SS_WAGE_CAP) < 0.01, (
+            f"YTD SS wages should equal cap: got {ytd.taxable.ss}, expected {SS_WAGE_CAP}"
         )
 
 
@@ -623,15 +631,15 @@ class Test401kEvenDistribution:
             ),
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
         # Should have 26 stubs for biweekly pay
-        stubs = result["stubs"]
-        regular_stubs = [s for s in stubs if s["type"] == "regular"]
+        stubs = result.stubs
+        regular_stubs = [s for s in stubs if s.type == "regular"]
         assert len(regular_stubs) == 26, f"Expected 26 regular stubs, got {len(regular_stubs)}"
 
         # Get 401k amounts from each stub
-        k401_amounts = [s["pretax_401k"] for s in regular_stubs]
+        k401_amounts = [s.current.deductions.retirement for s in regular_stubs]
 
         # Find the most common amount (should be all but one, or all the same)
         from collections import Counter
@@ -654,7 +662,7 @@ class Test401kEvenDistribution:
 
         # Final YTD 401k should equal sum of all current 401k amounts
         sum_401k = sum(k401_amounts)
-        ytd_401k = result["ytd"]["pretax_401k"]
+        ytd_401k = result.ytd.deductions.retirement
 
         assert abs(ytd_401k - sum_401k) < 0.01, (
             f"YTD 401k ${ytd_401k:.2f} should equal sum of stubs ${sum_401k:.2f}"
@@ -710,17 +718,17 @@ class TestMax401kMethods:
             },
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
-        stubs = result["stubs"]
-        regular_stubs = [s for s in stubs if s["type"] == "regular"]
+        stubs = result.stubs
+        regular_stubs = [s for s in stubs if s.type == "regular"]
 
         # Should have 26 stubs
         assert len(regular_stubs) == 26, f"Expected 26 stubs, got {len(regular_stubs)}"
 
         # Separate stubs by 401k contribution
-        stubs_with_401k = [s for s in regular_stubs if s["pretax_401k"] > 0]
-        stubs_without_401k = [s for s in regular_stubs if s["pretax_401k"] == 0]
+        stubs_with_401k = [s for s in regular_stubs if s.current.deductions.retirement > 0]
+        stubs_without_401k = [s for s in regular_stubs if s.current.deductions.retirement == 0]
 
         # Calculate expected max 401k per period
         gross = 5000.00
@@ -738,14 +746,14 @@ class TestMax401kMethods:
 
         # First 5 should be full ~$4,432.80 contributions
         for i in range(5):
-            assert abs(stubs_with_401k[i]["pretax_401k"] - max_401k_per_period) < 0.01, (
-                f"Period {i+1} should have full ${max_401k_per_period:.2f} 401k, got ${stubs_with_401k[i]['pretax_401k']:.2f}"
+            assert abs(stubs_with_401k[i].current.deductions.retirement - max_401k_per_period) < 0.01, (
+                f"Period {i+1} should have full ${max_401k_per_period:.2f} 401k, got ${stubs_with_401k[i].current.deductions.retirement:.2f}"
             )
 
         # 6th should be partial (remainder): $23,500 - (5 × $4,432.80) = $1,336.00
         full_periods_total = 5 * max_401k_per_period
         expected_partial = K401_LIMIT - full_periods_total
-        partial_401k = stubs_with_401k[5]["pretax_401k"]
+        partial_401k = stubs_with_401k[5].current.deductions.retirement
         assert abs(partial_401k - expected_partial) < 0.01, (
             f"Partial 401k should be ${expected_partial:.2f}, got ${partial_401k:.2f}"
         )
@@ -755,30 +763,22 @@ class TestMax401kMethods:
             f"Expected 20 periods with $0 401k, got {len(stubs_without_401k)}"
         )
 
-        # Verify that stubs after cap hit have higher net pay
-        # (since no 401k is being deducted)
-        last_401k_stub = stubs_with_401k[-1]  # Period 6 (partial)
-        first_no_401k_stub = stubs_without_401k[0]  # Period 7
-
-        # Net pay without 401k should be higher than net pay with partial 401k
-        # (unless SS cap causes differences)
-        # Actually, the net pay increase isn't guaranteed to be exact because
-        # FIT is different, so just verify $0 401k
+        # Verify that stubs after cap hit have $0 401k
         for stub in stubs_without_401k:
-            assert stub["pretax_401k"] == 0, (
-                f"Stub {stub['date']} should have $0 401k"
+            assert stub.current.deductions.retirement == 0, (
+                f"Stub {stub.pay_date} should have $0 401k"
             )
 
         # Final YTD 401k should equal the cap
-        ytd = result["ytd"]
-        assert abs(ytd["pretax_401k"] - K401_LIMIT) < 0.01, (
-            f"YTD 401k ${ytd['pretax_401k']:.2f} should equal cap ${K401_LIMIT:.2f}"
+        ytd = result.ytd
+        assert abs(ytd.deductions.retirement - K401_LIMIT) < 0.01, (
+            f"YTD 401k ${ytd.deductions.retirement:.2f} should equal cap ${K401_LIMIT:.2f}"
         )
 
         # YTD 401k should equal sum of all stubs
-        sum_401k = sum(s["pretax_401k"] for s in regular_stubs)
-        assert abs(ytd["pretax_401k"] - sum_401k) < 0.01, (
-            f"YTD 401k ${ytd['pretax_401k']:.2f} should equal sum ${sum_401k:.2f}"
+        sum_401k = sum(s.current.deductions.retirement for s in regular_stubs)
+        assert abs(ytd.deductions.retirement - sum_401k) < 0.01, (
+            f"YTD 401k ${ytd.deductions.retirement:.2f} should equal sum ${sum_401k:.2f}"
         )
 
     def test_model_401k_max_spread_evenly(self, isolated_env, base_profile, tax_rules_2025):
@@ -814,22 +814,22 @@ class TestMax401kMethods:
             },
         )
 
-        assert "error" not in result, f"Unexpected error: {result.get('error')}"
+        assert_no_error(result)
 
-        stubs = result["stubs"]
-        regular_stubs = [s for s in stubs if s["type"] == "regular"]
+        stubs = result.stubs
+        regular_stubs = [s for s in stubs if s.type == "regular"]
 
         # Should have 26 stubs
         assert len(regular_stubs) == 26, f"Expected 26 stubs, got {len(regular_stubs)}"
 
         # All or nearly all stubs should have 401k contributions (spread evenly)
-        stubs_with_401k = [s for s in regular_stubs if s["pretax_401k"] > 0]
+        stubs_with_401k = [s for s in regular_stubs if s.current.deductions.retirement > 0]
         assert len(stubs_with_401k) >= 25, (
             f"Expected at least 25 periods with 401k (spread), got {len(stubs_with_401k)}"
         )
 
         # Get the per-period amounts
-        k401_amounts = [s["pretax_401k"] for s in regular_stubs]
+        k401_amounts = [s.current.deductions.retirement for s in regular_stubs]
 
         # Most should be the same amount (evenly spread)
         from collections import Counter
@@ -848,15 +848,15 @@ class TestMax401kMethods:
         )
 
         # Final YTD 401k should equal the cap
-        ytd = result["ytd"]
-        assert abs(ytd["pretax_401k"] - K401_LIMIT) < 1.00, (
-            f"YTD 401k ${ytd['pretax_401k']:.2f} should equal cap ${K401_LIMIT:.2f}"
+        ytd = result.ytd
+        assert abs(ytd.deductions.retirement - K401_LIMIT) < 1.00, (
+            f"YTD 401k ${ytd.deductions.retirement:.2f} should equal cap ${K401_LIMIT:.2f}"
         )
 
         # YTD 401k should equal sum of all stubs
-        sum_401k = sum(s["pretax_401k"] for s in regular_stubs)
-        assert abs(ytd["pretax_401k"] - sum_401k) < 0.01, (
-            f"YTD 401k ${ytd['pretax_401k']:.2f} should equal sum ${sum_401k:.2f}"
+        sum_401k = sum(s.current.deductions.retirement for s in regular_stubs)
+        assert abs(ytd.deductions.retirement - sum_401k) < 0.01, (
+            f"YTD 401k ${ytd.deductions.retirement:.2f} should equal sum ${sum_401k:.2f}"
         )
 
 

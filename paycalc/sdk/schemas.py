@@ -118,6 +118,17 @@ class PaySummary(BaseModel):
 
         return self
 
+    @classmethod
+    def zero(cls) -> "PaySummary":
+        """Create a zero PaySummary (for period 1 or initialization)."""
+        return cls(
+            gross=0,
+            deductions=DeductionTotals(fully_pretax=0, retirement=0, post_tax=0),
+            taxable=TaxAmounts(fit=0, ss=0, medicare=0),
+            withheld=TaxAmounts(fit=0, ss=0, medicare=0),
+            net_pay=0,
+        )
+
 
 class PayLineItem(BaseModel):
     """Single earning or deduction line item."""

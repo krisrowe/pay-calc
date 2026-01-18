@@ -781,6 +781,13 @@ def add_record(meta: Dict[str, Any], data: Optional[Dict[str, Any]]) -> Path:
     if "imported_at" not in meta:
         meta["imported_at"] = datetime.now().isoformat()
 
+    # Record the paycalc version used for import (for provenance tracking)
+    try:
+        from importlib.metadata import version
+        meta["paycalc_version"] = version("paycalc")
+    except Exception:
+        pass  # Skip if package not installed properly
+
     # Generate record ID from content
     record_id = _generate_record_id(meta, data)
 
@@ -2465,42 +2472,39 @@ def import_from_drive_file(
         if callback:
             callback(event, data or {})
 
-    # Get file metadata from Drive
-    try:
-        # Use gwsa to get file info (we need the filename)
-        result = subprocess.run(
-            ["gwsa", "drive", "get", file_id],
-            capture_output=True, text=True
-        )
-        if result.returncode != 0:
-            # Fallback: just use the file_id as name
-            filename = f"{file_id}.pdf"
-        else:
-            file_info = json.loads(result.stdout)
-            filename = file_info.get("name", f"{file_id}.pdf")
-    except (FileNotFoundError, json.JSONDecodeError):
-        filename = f"{file_id}.pdf"
-
     emit("start", {"source": file_id, "file_count": 1})
-    emit("file", {"name": filename})
 
-    # Download to temp directory
+    # Download to temp directory and get filename from response
     with tempfile.TemporaryDirectory() as tmp_dir:
         tmp_path = Path(tmp_dir)
-        local_path = tmp_path / filename
+        # Download to temp path first, then rename once we know the real filename
+        temp_download = tmp_path / f"{file_id}.pdf"
 
         try:
-            subprocess.run(
-                ["gwsa", "drive", "download", file_id, str(local_path)],
+            result = subprocess.run(
+                ["gwsa", "drive", "download", file_id, str(temp_download)],
                 capture_output=True, text=True, check=True
             )
+            # Extract real filename from download response
+            try:
+                download_info = json.loads(result.stdout)
+                filename = download_info.get("name", f"{file_id}.pdf")
+            except json.JSONDecodeError:
+                filename = f"{file_id}.pdf"
         except subprocess.CalledProcessError as e:
-            emit("error", {"name": filename, "error": str(e)})
+            emit("error", {"name": file_id, "error": str(e)})
             stats["errors"] += 1
             emit("done", stats)
             return stats
         except FileNotFoundError:
             raise RuntimeError("gwsa not installed - required for Drive imports")
+
+        emit("file", {"name": filename})
+
+        # Rename to real filename for better source tracking
+        local_path = tmp_path / filename
+        if temp_download != local_path:
+            temp_download.rename(local_path)
 
         # Import file (overwrites existing record if same file ID)
         results = import_file_auto_all(local_path, drive_file_id=file_id)

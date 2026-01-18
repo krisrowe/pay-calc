@@ -44,11 +44,19 @@ from .stub_modeler import (
     model_401k_max_spread_evenly,
 )
 
-from .schemas import ModelResult
+from .schemas import (
+    Discrepancy,
+    ModelResult,
+    PeriodComparison,
+    ValidateStubResult,
+)
 
 __all__ = [
     # Schemas
+    "Discrepancy",
     "ModelResult",
+    "PeriodComparison",
+    "ValidateStubResult",
     # Validation
     "validate_stub",
     "validate_stub_in_sequence",

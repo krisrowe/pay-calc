@@ -4,11 +4,65 @@ These schemas are used by the modeling layer and depend on core schemas
 from paycalc.sdk.schemas.
 """
 
-from typing import List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from ..schemas import FicaRoundingBalance, PaySummary
+
+
+class Discrepancy(BaseModel):
+    """A single field discrepancy between modeled and actual values."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    field: str = Field(..., description="Field name (e.g., 'withheld.fit')")
+    modeled: float = Field(..., description="Modeled value")
+    actual: float = Field(..., description="Actual value from stub")
+    diff: float = Field(..., description="Difference (modeled - actual)")
+
+
+class PeriodComparison(BaseModel):
+    """Comparison of modeled vs actual for a single period (current or ytd)."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    modeled: PaySummary = Field(..., description="Modeled PaySummary")
+    actual: PaySummary = Field(..., description="Actual PaySummary from stub")
+    discrepancies: List[Discrepancy] = Field(
+        default_factory=list, description="Field-level differences"
+    )
+
+    @property
+    def match(self) -> bool:
+        """True if no discrepancies."""
+        return len(self.discrepancies) == 0
+
+
+class ValidateStubResult(BaseModel):
+    """Result of validate_stub or validate_stub_in_sequence.
+
+    Contains comparison of modeled vs actual PaySummary values,
+    with discrepancies already computed for current and ytd periods.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    record_id: str = Field(..., description="Validated record ID")
+    party: str = Field(..., description="Party identifier")
+    pay_date: str = Field(..., description="Pay date from stub")
+    model: str = Field(..., description="Model used (e.g., 'model_stub')")
+    inputs: Dict[str, Any] = Field(..., description="Extracted inputs from stub")
+    current: PeriodComparison = Field(..., description="Current period comparison")
+    ytd: PeriodComparison = Field(..., description="Year-to-date comparison")
+    periods_modeled: Optional[int] = Field(
+        None, description="Number of periods modeled (iterative only)"
+    )
+
+    @property
+    def match(self) -> bool:
+        """True if both current and ytd match."""
+        return self.current.match and self.ytd.match
 
 
 class RetirementElectionItem(BaseModel):
@@ -109,4 +163,40 @@ class ModelResult(BaseModel):
     )
     warnings: List[str] = Field(
         default_factory=list, description="Diagnostic warnings (caps reached, etc.)"
+    )
+
+
+class StubResult(BaseModel):
+    """Single stub output from model_stubs_in_sequence.
+
+    Wraps a PaySummary with date and type metadata for sequence modeling.
+    Used for both regular and supplemental pay stubs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    pay_date: str = Field(..., description="Pay date (YYYY-MM-DD)")
+    type: Literal["regular", "supplemental"] = Field(..., description="Stub type")
+    current: PaySummary = Field(..., description="Current period amounts")
+
+
+class StubSequenceResult(BaseModel):
+    """Output of model_stubs_in_sequence.
+
+    Contains all modeled stubs for a calendar year (regular + supplemental),
+    plus accumulated YTD totals and diagnostic info.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    party: str = Field(..., description="Party identifier")
+    year: int = Field(..., description="Calendar year")
+    stubs: List[StubResult] = Field(..., description="All stubs in date order")
+    ytd: PaySummary = Field(..., description="Year-to-date accumulated totals")
+    periods_modeled: int = Field(..., description="Number of regular pay periods")
+    supplementals_included: int = Field(
+        ..., description="Number of supplemental stubs processed"
+    )
+    warnings: List[str] = Field(
+        default_factory=list, description="Aggregated warnings from all periods"
     )

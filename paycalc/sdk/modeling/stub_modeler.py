@@ -18,7 +18,6 @@ from typing import Any, Dict, List, Optional
 from ..employee.comp_plan import (
     resolve_comp_plan,
     calc_period_number,
-    calc_401k_for_period,
     get_pay_periods_per_year,
 )
 from ..employee.benefits import (
@@ -37,15 +36,19 @@ from ..taxes.withholding import (
 from ..taxes.other import load_tax_rules
 from ..schemas import (
     validate_comp_plan_override,
-    validate_benefits_override,
     validate_w4_override,
-    validate_prior_ytd,
     FicaRoundingBalance,
     PaySummary,
     TaxAmounts,
     DeductionTotals,
 )
-from .schemas import ModelResult, RetirementElectionHistory, RetirementElectionItem
+from .schemas import (
+    ModelResult,
+    RetirementElectionHistory,
+    RetirementElectionItem,
+    StubResult,
+    StubSequenceResult,
+)
 from pydantic import ValidationError
 
 
@@ -271,45 +274,74 @@ def model_stub(
     date: str,
     party: str,
     *,
-    prior_ytd: Dict[str, float],
-    benefits: Dict[str, Any],
+    prior_ytd: PaySummary,
+    current_deductions: DeductionTotals,
     comp_plan_override: Optional[Dict[str, Any]] = None,
     w4_override: Optional[Dict[str, Any]] = None,
-    pretax_401k: Optional[float] = None,
-    imputed_income: float = 0,
     fica_balance: Optional[FicaRoundingBalance] = None,
-) -> Dict[str, Any]:
-    """Model a single pay stub given prior YTD values.
+) -> "ModelResult":
+    """Model a single pay stub: calculate taxes from gross and deductions.
 
-    Calculates current period taxes and amounts, then adds to prior YTD.
+    INPUTS (facts - not calculated, passed in):
+        - gross (from comp_plan_override)
+        - current_deductions (fully_pretax, retirement, post_tax)
+        - prior_ytd (for YTD accumulation and SS wage cap tracking)
+        - W-4 settings (filing status, dependents, adjustments)
 
-    Resolution sources (in priority order):
-    - Comp plan: override > registered (by effective date)
-    - W-4: override > registered (by effective date) > defaults
+    OUTPUTS (calculated by this function using tax rules):
+        - taxable wages (FIT, SS, Medicare) - derived from gross and deductions
+        - withholding (FIT, SS, Medicare) - derived from taxable wages and W4
+        - net_pay - gross minus deductions minus withholding
+
+    TAX CALCULATIONS:
+
+    1. Taxable Wages:
+        - FIT taxable = gross - fully_pretax - retirement
+        - FICA taxable = gross - fully_pretax (retirement doesn't reduce FICA)
+        - SS taxable is capped at annual wage base ($176,100 in 2025)
+        - Medicare taxable has no cap
+
+    2. Social Security Withholding:
+        - 6.2% of SS taxable wages
+        - Stops when YTD SS wages reach annual cap
+
+    3. Medicare Withholding:
+        - 1.45% base rate on all Medicare taxable wages
+        - Additional 0.9% on wages over $200,000 YTD (withholding threshold)
+        - Note: The 0.9% additional tax actually applies at $250,000 for MFJ
+          on tax return, but withholding starts at $200,000 regardless of
+          filing status per IRS rules
+
+    4. FIT Withholding (IRS Publication 15-T percentage method):
+        - Start with FIT taxable wages for the period
+        - Annualize: multiply by pay periods per year
+        - Apply W-4 adjustments:
+            - Add step 4(a) other income
+            - Subtract step 4(b) deductions (or standard deduction if not specified)
+        - Look up tax in brackets based on filing status (10%, 12%, 22%, 24%...)
+        - Subtract step 3 dependents credit
+        - Add step 4(c) extra withholding
+        - De-annualize: divide by pay periods per year
+
+    Use cases:
+        - Validation: Pass actual stub's gross/deductions, compare calculated
+          outputs against stub's actual taxable/withheld/net_pay values.
+        - Projection: Pass expected gross/deductions, get projected taxes.
 
     Args:
         date: Target pay date (YYYY-MM-DD)
         party: Party identifier ('him' or 'her')
-        prior_ytd: Prior period's YTD values (required). For period 1, pass all zeros.
-        benefits: Benefits/deductions dict (required). Must have at least one field
-            set (e.g., pretax_health=0 if no benefits).
-        comp_plan_override: Override comp plan dict
-        w4_override: Override W-4 dict
-        pretax_401k: Override 401k amount (e.g., 0 to model without 401k)
-        imputed_income: Imputed income amount (e.g., Group Term Life)
-        fica_balance: FICA rounding balance from prior period. If None, defaults
-            to FicaRoundingBalance.none() (zero remainder, no auto-adjust).
+        prior_ytd: Prior period's YTD values. For period 1, use PaySummary.zero().
+        current_deductions: This period's deductions (inputs, not calculated):
+            - fully_pretax: Section 125 (health, dental, FSA, HSA)
+            - retirement: Traditional 401k/403b
+            - post_tax: Roth, after-tax, vol life, imputed income offset
+        comp_plan_override: Must contain gross_per_period and pay_frequency
+        w4_override: Override W-4 settings for withholding calculation
+        fica_balance: FICA rounding remainder from prior period
 
     Returns:
-        Dict with:
-            - pay_date: Target date
-            - party: Party identifier
-            - period_number: Pay period within year
-            - current: Current period amounts
-            - ytd: Year-to-date amounts (prior + current)
-            - fica_balance: FicaRoundingBalance to pass to next period
-            - sources: Provenance tracking for all inputs
-            - warnings: List of warning messages
+        ModelResult with calculated current, ytd, fica_balance, warnings
     """
     target_date = parse_date(date)
     year = str(target_date.year)
@@ -335,22 +367,6 @@ def model_stub(
             "validation_errors": e.errors(),
         }
 
-    # Validate required benefits (must have at least one field set)
-    try:
-        from ..schemas import Benefits
-        validated_benefits = Benefits.model_validate(benefits)
-        benefits = validated_benefits.model_dump(exclude_none=True)
-    except ValidationError as e:
-        errors = []
-        for err in e.errors():
-            loc = ".".join(str(x) for x in err["loc"])
-            msg = err["msg"]
-            errors.append(f"{loc}: {msg}")
-        return {
-            "error": f"Invalid benefits: {'; '.join(errors)}",
-            "validation_errors": e.errors(),
-        }
-
     # === RESOLVE INPUTS ===
 
     # 1. Resolve comp plan
@@ -369,9 +385,7 @@ def model_stub(
             "sources": {"comp_plan": comp_result["source"]},
         }
 
-    # 2. Benefits already validated above
-
-    # 3. Resolve W-4
+    # 2. Resolve W-4
     if w4_override:
         w4_result = {
             "settings": w4_override,
@@ -387,60 +401,31 @@ def model_stub(
     periods_per_year = get_pay_periods_per_year(frequency)
     period_number = calc_period_number(target_date, frequency)
 
-    # === VALIDATE PRIOR YTD ===
-
-    try:
-        ytd_baseline = validate_prior_ytd(prior_ytd)
-    except ValidationError as e:
-        errors = []
-        for err in e.errors():
-            loc = ".".join(str(x) for x in err["loc"])
-            msg = err["msg"]
-            errors.append(f"{loc}: {msg}")
-        return {
-            "error": f"Invalid prior_ytd: {'; '.join(errors)}",
-            "validation_errors": e.errors(),
-        }
-
     # === CALCULATE CURRENT PERIOD ===
 
     gross = comp_plan["gross_per_period"]
 
-    # 401k contribution target (use override if provided, otherwise calculate)
-    if pretax_401k is None:
-        pretax_401k_target = calc_401k_for_period(gross, comp_plan, ytd_baseline.get("pretax_401k", 0), year)
-    else:
-        pretax_401k_target = pretax_401k
-
-    # Benefits deductions (Section 125 cafeteria plan)
-    # Note: Benefits amounts may vary slightly across periods due to rounding or
-    # annual enrollment timing. If exact match is needed, extract from actual stubs
-    # rather than using benefits_plan which stores typical per-period amounts.
-    pretax_benefits = get_total_pretax_deductions(benefits)
-
-    # Imputed income (e.g., Group Term Life > $50k) - added to gross for tax purposes
-    # but not real cash. Use from benefits if not explicitly provided.
-    if imputed_income == 0:
-        imputed_income = benefits.get("imputed_income", 0)
+    # Extract deductions from current_deductions
+    pretax_benefits = current_deductions.fully_pretax
+    pretax_401k_requested = current_deductions.retirement
+    post_tax_deductions = current_deductions.post_tax
 
     # FICA taxable wages (gross minus Section 125 only, NOT 401k)
     # 401k reduces FIT but not FICA; Section 125 reduces both
     fica_taxable = gross - pretax_benefits
 
     # === CALCULATE FICA FIRST (doesn't depend on 401k) ===
-    # This allows us to cap 401k at available cash before calculating FIT
+    # Need this before 401k capping to know available cash
 
-    ss_result = calc_ss_withholding(fica_taxable, ytd_baseline["ss_wages"], year)
-    medicare_result = calc_medicare_withholding(fica_taxable, ytd_baseline["medicare_wages"], year)
+    ss_result = calc_ss_withholding(fica_taxable, prior_ytd.taxable.ss, year)
+    medicare_result = calc_medicare_withholding(fica_taxable, prior_ytd.taxable.medicare, year)
 
     # Apply FICA rounding compensation (IRS Form 941 line 7 / Form 944 line 6)
-    # Payroll systems track fractional cents to minimize cumulative rounding error.
     if fica_balance is None:
         fica_balance = FicaRoundingBalance.none()
 
     # Calculate raw (unrounded) FICA amounts
     raw_ss = ss_result["taxable"] * ss_result["rate"]
-    # Medicare: base (1.45%) + additional (0.9% over threshold) on full taxable
     raw_medicare_base = medicare_result["taxable"] * 0.0145
     raw_medicare_additional = medicare_result.get("additional_withheld", 0)
     raw_medicare = raw_medicare_base + raw_medicare_additional
@@ -452,60 +437,70 @@ def model_stub(
     # Build new fica_balance for next period
     new_fica_balance = FicaRoundingBalance(ss=new_ss_remainder, medicare=new_medicare_remainder)
 
-    # === CAP 401k AT IRS ANNUAL LIMIT ===
-    annual_401k_limit = load_tax_rules(year).retirement_401k.employee_elective_limit
-    ytd_401k = ytd_baseline.get("pretax_401k", 0)
-    remaining_irs_limit = max(0, annual_401k_limit - ytd_401k)
-    pretax_401k = min(pretax_401k_target, remaining_irs_limit)
+    # === CAP 401K ===
+    # 1. Cap at IRS annual limit
+    tax_rules = load_tax_rules(year)
+    k401_limit = tax_rules.retirement_401k.employee_elective_limit
+    ytd_401k = prior_ytd.deductions.retirement
+    remaining_401k_limit = max(0, k401_limit - ytd_401k)
+    pretax_401k = min(pretax_401k_requested, remaining_401k_limit)
 
-    if pretax_401k < pretax_401k_target and remaining_irs_limit < pretax_401k_target:
-        warnings.append(f"401k capped at IRS limit (${annual_401k_limit:,.0f} annual, ${remaining_irs_limit:,.2f} remaining)")
+    # 2. Cap at available cash (must reserve for FIT too)
+    # Available cash = gross - benefits - FICA - post_tax - FIT
+    # But FIT depends on 401k (circular), so iterate to find max 401k
+    fica_withheld = ss_withheld + medicare_withheld
 
-    # === CAP 401k AT AVAILABLE CASH ===
-    # Payroll systems prevent 401k from exceeding available funds after FICA
-    available_for_401k = gross - pretax_benefits - ss_withheld - medicare_withheld - imputed_income
-    pretax_401k_after_irs = pretax_401k
-    pretax_401k = min(pretax_401k, max(0, available_for_401k))
+    # Start with naive max (no FIT reserve)
+    max_401k_no_fit = max(0, gross - pretax_benefits - fica_withheld - post_tax_deductions)
+    pretax_401k = min(pretax_401k, max_401k_no_fit)
+
+    # Iterate: check if FIT makes net negative, reduce 401k if needed
+    for _ in range(10):  # At most 10 iterations (usually converges in 1-2)
+        fit_taxable = gross - pretax_401k - pretax_benefits
+        fit_for_this_401k = calc_withholding_per_period(fit_taxable, w4, year)
+        fit_for_this_401k = round(fit_for_this_401k, 2)
+
+        # Net pay with this 401k
+        total_taxes = fit_for_this_401k + fica_withheld
+        total_deductions = pretax_benefits + pretax_401k + post_tax_deductions
+        trial_net_pay = gross - total_deductions - total_taxes
+
+        if trial_net_pay >= 0:
+            break  # Found valid 401k
+
+        # Reduce 401k by the deficit (round up to ensure we don't undershoot)
+        deficit = -trial_net_pay
+        pretax_401k = max(0, pretax_401k - deficit)
+        pretax_401k = round(pretax_401k, 2)
+
     pretax_401k = round(pretax_401k, 2)
 
-    if pretax_401k < pretax_401k_after_irs:
-        shortfall = round(pretax_401k_after_irs - pretax_401k, 2)
-        warnings.append(f"401k capped at ${pretax_401k:.2f} (${shortfall:.2f} exceeds available cash)")
+    # Update current_deductions with capped value
+    current_deductions = DeductionTotals(
+        fully_pretax=pretax_benefits,
+        retirement=pretax_401k,
+        post_tax=post_tax_deductions,
+    )
 
-    # === CALCULATE FIT WITH CAPPED 401k ===
+    # === CALCULATE FIT ===
+    # Deductions are passed in directly - no capping here.
+    # Callers handle IRS limits and available cash checks if needed.
     fit_taxable = gross - pretax_401k - pretax_benefits
     fit_withheld_raw = calc_withholding_per_period(fit_taxable, w4, year)
     fit_withheld_raw = round(fit_withheld_raw, 2)
 
-    # Cap FIT at remaining available cash
-    available_for_fit = gross - pretax_401k - pretax_benefits - ss_withheld - medicare_withheld - imputed_income
-    fit_withheld = min(fit_withheld_raw, max(0, available_for_fit))
-    fit_withheld = round(fit_withheld, 2)
+    # Use calculated FIT withholding (no capping - deductions are actual values)
+    fit_withheld = fit_withheld_raw
 
-    if fit_withheld < fit_withheld_raw:
-        fit_shortfall = round(fit_withheld_raw - fit_withheld, 2)
-        warnings.append(f"FIT capped at ${fit_withheld:.2f} (${fit_shortfall:.2f} couldn't be withheld - no cash available)")
-
-    # Recalculate total taxes with capped FIT and compensated FICA
+    # Net pay = gross - deductions - taxes
     total_taxes = fit_withheld + ss_withheld + medicare_withheld
-
-    # Net pay (imputed income is added to gross but offset - not real cash)
-    total_deductions = pretax_401k + pretax_benefits + total_taxes + imputed_income
-    net_pay = gross - total_deductions
+    net_pay = gross - current_deductions.total - total_taxes
 
     # === BUILD CURRENT PERIOD ===
 
-    # Post-tax deductions: imputed income offset (GTL) is the main one
-    # Other post-tax (Roth 401k, after-tax 401k) not currently modeled
-    post_tax_deductions = imputed_income
-
     current = PaySummary(
         gross=round(gross, 2),
-        deductions=DeductionTotals(
-            fully_pretax=round(pretax_benefits, 2),
-            retirement=round(pretax_401k, 2),
-            post_tax=round(post_tax_deductions, 2),
-        ),
+        deductions=current_deductions,
         taxable=TaxAmounts(
             fit=round(fit_taxable, 2),
             ss=round(ss_result["taxable"], 2),
@@ -521,50 +516,29 @@ def model_stub(
 
     # === BUILD YTD ===
 
-    # YTD deduction tracking - prior_ytd doesn't have breakdown, so derive from prior totals
-    # Prior fully_pretax = prior gross - prior fit_taxable - prior retirement
-    # This works because: fit_taxable = gross - fully_pretax - retirement
-    prior_retirement = ytd_baseline.get("pretax_401k", 0)
-    prior_fully_pretax = ytd_baseline["gross"] - ytd_baseline["fit_taxable"] - prior_retirement
-    # Prior post_tax not tracked, assume 0 for now
-    prior_post_tax = 0
-
-    ytd_gross = round(ytd_baseline["gross"] + gross, 2)
-    ytd_retirement = round(prior_retirement + pretax_401k, 2)
-    ytd_fully_pretax = round(prior_fully_pretax + pretax_benefits, 2)
-    ytd_post_tax = round(prior_post_tax + post_tax_deductions, 2)
-    ytd_fit_taxable = round(ytd_baseline["fit_taxable"] + fit_taxable, 2)
-    ytd_ss_wages = round(min(
-        ytd_baseline["ss_wages"] + fica_taxable,
-        ss_result["wage_cap"]
-    ), 2)
-    ytd_medicare_wages = round(ytd_baseline["medicare_wages"] + fica_taxable, 2)
-    ytd_fit_withheld = round(ytd_baseline["fit_withheld"] + fit_withheld, 2)
-    ytd_ss_withheld = round(ytd_baseline["ss_withheld"] + ss_withheld, 2)
-    ytd_medicare_withheld = round(ytd_baseline["medicare_withheld"] + medicare_withheld, 2)
-
-    # Calculate YTD net pay
-    ytd_total_deductions = ytd_fully_pretax + ytd_retirement + ytd_post_tax
-    ytd_total_withheld = ytd_fit_withheld + ytd_ss_withheld + ytd_medicare_withheld
-    ytd_net_pay = round(ytd_gross - ytd_total_deductions - ytd_total_withheld, 2)
+    ytd_deductions = DeductionTotals(
+        fully_pretax=round(prior_ytd.deductions.fully_pretax + current_deductions.fully_pretax, 2),
+        retirement=round(prior_ytd.deductions.retirement + current_deductions.retirement, 2),
+        post_tax=round(prior_ytd.deductions.post_tax + current_deductions.post_tax, 2),
+    )
+    ytd_taxable = TaxAmounts(
+        fit=round(prior_ytd.taxable.fit + fit_taxable, 2),
+        ss=round(min(prior_ytd.taxable.ss + fica_taxable, ss_result["wage_cap"]), 2),
+        medicare=round(prior_ytd.taxable.medicare + fica_taxable, 2),
+    )
+    ytd_withheld = TaxAmounts(
+        fit=round(prior_ytd.withheld.fit + fit_withheld, 2),
+        ss=round(prior_ytd.withheld.ss + ss_withheld, 2),
+        medicare=round(prior_ytd.withheld.medicare + medicare_withheld, 2),
+    )
+    ytd_gross = round(prior_ytd.gross + gross, 2)
+    ytd_net_pay = round(ytd_gross - ytd_deductions.total - ytd_withheld.fit - ytd_withheld.ss - ytd_withheld.medicare, 2)
 
     ytd = PaySummary(
         gross=ytd_gross,
-        deductions=DeductionTotals(
-            fully_pretax=ytd_fully_pretax,
-            retirement=ytd_retirement,
-            post_tax=ytd_post_tax,
-        ),
-        taxable=TaxAmounts(
-            fit=ytd_fit_taxable,
-            ss=ytd_ss_wages,
-            medicare=ytd_medicare_wages,
-        ),
-        withheld=TaxAmounts(
-            fit=ytd_fit_withheld,
-            ss=ytd_ss_withheld,
-            medicare=ytd_medicare_withheld,
-        ),
+        deductions=ytd_deductions,
+        taxable=ytd_taxable,
+        withheld=ytd_withheld,
         net_pay=ytd_net_pay,
     )
 
@@ -595,7 +569,7 @@ def model_stubs_in_sequence(
     supplementals: Optional[List[Dict[str, Any]]] = None,
     retirement_elections: Optional["RetirementElectionHistory"] = None,
     return_last_stub_only: bool = False,
-) -> Dict[str, Any]:
+) -> StubSequenceResult:
     """Model all pay stubs for a calendar year.
 
     Models the full calendar year, automatically finding a reference pay date
@@ -694,15 +668,13 @@ def model_stubs_in_sequence(
         else:
             frequency = "biweekly"
 
-    # Resolve benefits if not provided
+    # Resolve benefits if not provided, then calculate fully_pretax total
     if benefits_override is None:
         benefits_result = resolve_benefits(party, target, use_actuals=True)
         benefits = benefits_result.get("benefits", {})
-        if not benefits:
-            # Use empty benefits with at least one field to satisfy validation
-            benefits = {"pretax_health": 0}
     else:
         benefits = benefits_override
+    fully_pretax = get_total_pretax_deductions(benefits) if benefits else 0.0
 
     # Generate all pay dates from start of year through target
     pay_dates = generate_pay_dates(target, frequency, ref_date)
@@ -730,18 +702,8 @@ def model_stubs_in_sequence(
     # Sort events by date
     events.sort(key=lambda e: e[0])
 
-    # Initialize YTD accumulator
-    ytd_accum = {
-        "gross": 0.0,
-        "fit_taxable": 0.0,
-        "fit_withheld": 0.0,
-        "ss_wages": 0.0,
-        "ss_withheld": 0.0,
-        "medicare_wages": 0.0,
-        "medicare_withheld": 0.0,
-        "pretax_401k": 0.0,
-        "net_pay": 0.0,
-    }
+    # Initialize YTD accumulator as PaySummary
+    ytd_accum = PaySummary.zero()
 
     # Initialize FICA rounding balance (starts fresh each calendar year)
     fica_balance = FicaRoundingBalance.none()
@@ -753,18 +715,6 @@ def model_stubs_in_sequence(
     # Iterate through each event (regular pay or supplemental)
     for event_date, event_type, event_data in events:
         if event_type == "regular":
-            # Build prior YTD from accumulated values
-            prior_ytd = {
-                "gross": ytd_accum["gross"],
-                "fit_taxable": ytd_accum["fit_taxable"],
-                "fit_withheld": ytd_accum["fit_withheld"],
-                "ss_wages": ytd_accum["ss_wages"],
-                "ss_withheld": ytd_accum["ss_withheld"],
-                "medicare_wages": ytd_accum["medicare_wages"],
-                "medicare_withheld": ytd_accum["medicare_withheld"],
-                "pretax_401k": ytd_accum["pretax_401k"],
-            }
-
             # Build period-specific comp_plan_override
             # If comp_plan_history provided, look up gross for this date
             date_str = event_date.strftime("%Y-%m-%d")
@@ -777,8 +727,8 @@ def model_stubs_in_sequence(
                     "gross_per_period": history_gross,
                 }
 
-            # Determine desired 401k for this period from retirement elections
-            period_401k = None  # Default: let model_stub use comp plan
+            # Determine 401k for this period from retirement elections
+            period_401k = 0.0  # Default: no contribution
             election = get_retirement_election(event_date, "regular")
             if election:
                 # Get gross for calculating percentage
@@ -793,37 +743,33 @@ def model_stubs_in_sequence(
                 else:
                     period_401k = election.amount
 
-            # Model this single period
+            # Build deductions for this period
+            period_deductions = DeductionTotals(
+                fully_pretax=fully_pretax,
+                retirement=period_401k,
+                post_tax=0,  # No post-tax in projections
+            )
+
+            # Model this single period (ytd_accum is already PaySummary)
             result = model_stub(
                 date_str,
                 party,
-                prior_ytd=prior_ytd,
-                benefits=benefits,
+                prior_ytd=ytd_accum,
+                current_deductions=period_deductions,
                 comp_plan_override=period_comp_plan,
                 w4_override=w4_override,
-                pretax_401k=period_401k,
                 fica_balance=fica_balance,
             )
 
-            # model_stub returns dict with "error" on failure, ModelResult on success
+            # model_stub returns ModelResult on success
             if isinstance(result, dict) and "error" in result:
                 return result
 
             # Chain FICA rounding balance to next period
             fica_balance = result.fica_balance
 
-            # Accumulate current period into YTD using PaySummary fields
-            current = result.current
-
-            ytd_accum["gross"] += current.gross
-            ytd_accum["fit_taxable"] += current.taxable.fit
-            ytd_accum["fit_withheld"] += current.withheld.fit
-            ytd_accum["ss_withheld"] += current.withheld.ss
-            ytd_accum["medicare_withheld"] += current.withheld.medicare
-            ytd_accum["pretax_401k"] += current.deductions.retirement
-            ytd_accum["ss_wages"] += current.taxable.ss
-            ytd_accum["medicare_wages"] += current.taxable.medicare
-            ytd_accum["net_pay"] += current.net_pay
+            # Update YTD accumulator with result's ytd (already computed by model_stub)
+            ytd_accum = result.ytd
 
             # Collect warnings
             if result.warnings:
@@ -832,17 +778,11 @@ def model_stubs_in_sequence(
                         all_warnings.append(w)
 
             # Track stub with values from model_stub
-            all_stubs.append({
-                "date": date_str,
-                "type": "regular",
-                "gross": current.gross,
-                "pretax_401k": current.deductions.retirement,
-                "fit_taxable": current.taxable.fit,
-                "fit_withheld": current.withheld.fit,
-                "ss_withheld": current.withheld.ss,
-                "medicare_withheld": current.withheld.medicare,
-                "net_pay": current.net_pay,
-            })
+            all_stubs.append(StubResult(
+                pay_date=date_str,
+                type="regular",
+                current=result.current,
+            ))
             regular_periods += 1
 
         elif event_type == "supplemental":
@@ -866,14 +806,14 @@ def model_stubs_in_sequence(
             # SS: get taxable amount and rate (respecting cap)
             ss_result = calc_ss_withholding(
                 supp_fica_taxable,
-                ytd_accum["ss_wages"],
+                ytd_accum.taxable.ss,
                 str(event_date.year),
             )
 
             # Medicare: get taxable amount and rates
             medicare_result = calc_medicare_withholding(
                 supp_fica_taxable,
-                ytd_accum["medicare_wages"],
+                ytd_accum.taxable.medicare,
                 str(event_date.year),
             )
 
@@ -884,18 +824,29 @@ def model_stubs_in_sequence(
             supp_medicare_withheld, new_medicare_remainder = round_with_compensation(raw_medicare, fica_balance.medicare)
             fica_balance = FicaRoundingBalance(ss=new_ss_remainder, medicare=new_medicare_remainder)
 
-            # Accumulate supplemental into YTD
-            ytd_accum["gross"] += supp_gross
-            ytd_accum["fit_taxable"] += supp_fit_taxable
-            ytd_accum["fit_withheld"] += supp_fit
-            ytd_accum["ss_wages"] += ss_result["taxable"]
-            ytd_accum["ss_withheld"] += supp_ss_withheld
-            ytd_accum["medicare_wages"] += medicare_result["taxable"]
-            ytd_accum["medicare_withheld"] += supp_medicare_withheld
-            ytd_accum["pretax_401k"] += supp_401k
             # Supplemental net pay = gross - 401k - all taxes
             supp_net = supp_gross - supp_401k - supp_fit - supp_ss_withheld - supp_medicare_withheld
-            ytd_accum["net_pay"] += supp_net
+
+            # Accumulate supplemental into YTD (build new PaySummary)
+            ytd_accum = PaySummary(
+                gross=round(ytd_accum.gross + supp_gross, 2),
+                deductions=DeductionTotals(
+                    fully_pretax=ytd_accum.deductions.fully_pretax,  # No change for supplemental
+                    retirement=round(ytd_accum.deductions.retirement + supp_401k, 2),
+                    post_tax=ytd_accum.deductions.post_tax,  # No change for supplemental
+                ),
+                taxable=TaxAmounts(
+                    fit=round(ytd_accum.taxable.fit + supp_fit_taxable, 2),
+                    ss=round(min(ytd_accum.taxable.ss + ss_result["taxable"], ss_result["wage_cap"]), 2),
+                    medicare=round(ytd_accum.taxable.medicare + medicare_result["taxable"], 2),
+                ),
+                withheld=TaxAmounts(
+                    fit=round(ytd_accum.withheld.fit + supp_fit, 2),
+                    ss=round(ytd_accum.withheld.ss + supp_ss_withheld, 2),
+                    medicare=round(ytd_accum.withheld.medicare + supp_medicare_withheld, 2),
+                ),
+                net_pay=round(ytd_accum.net_pay + supp_net, 2),
+            )
 
             # Add warning about SS cap if reached
             if ss_result["capped"]:
@@ -904,43 +855,46 @@ def model_stubs_in_sequence(
                     all_warnings.append(cap_warning)
 
             # Track supplemental stub (with compensated FICA values)
-            all_stubs.append({
-                "date": event_date.strftime("%Y-%m-%d"),
-                "type": "supplemental",
-                "gross": supp_gross,
-                "pretax_401k": supp_401k,
-                "fit_taxable": supp_fit_taxable,
-                "fit_withheld": supp_fit,
-                "ss_withheld": supp_ss_withheld,
-                "medicare_withheld": supp_medicare_withheld,
-                "net_pay": supp_net,
-            })
+            supp_current = PaySummary(
+                gross=supp_gross,
+                deductions=DeductionTotals(
+                    fully_pretax=0,  # Supplementals don't have Section 125
+                    retirement=supp_401k,
+                    post_tax=0,
+                ),
+                taxable=TaxAmounts(
+                    fit=supp_fit_taxable,
+                    ss=ss_result["taxable"],
+                    medicare=medicare_result["taxable"],
+                ),
+                withheld=TaxAmounts(
+                    fit=supp_fit,
+                    ss=supp_ss_withheld,
+                    medicare=supp_medicare_withheld,
+                ),
+                net_pay=supp_net,
+            )
+            all_stubs.append(StubResult(
+                pay_date=event_date.strftime("%Y-%m-%d"),
+                type="supplemental",
+                current=supp_current,
+            ))
 
     # Sort stubs by date (events were already sorted, but be explicit)
-    all_stubs.sort(key=lambda s: s["date"])
+    all_stubs.sort(key=lambda s: s.pay_date)
 
     # Build return structure
     stubs_to_return = [all_stubs[-1]] if return_last_stub_only and all_stubs else all_stubs
 
-    return {
-        "party": party,
-        "year": year,
-        "stubs": stubs_to_return,
-        "ytd": {
-            "gross": round(ytd_accum["gross"], 2),
-            "fit_taxable": round(ytd_accum["fit_taxable"], 2),
-            "fit_withheld": round(ytd_accum["fit_withheld"], 2),
-            "ss_wages": round(ytd_accum["ss_wages"], 2),
-            "ss_withheld": round(ytd_accum["ss_withheld"], 2),
-            "medicare_wages": round(ytd_accum["medicare_wages"], 2),
-            "medicare_withheld": round(ytd_accum["medicare_withheld"], 2),
-            "pretax_401k": round(ytd_accum["pretax_401k"], 2),
-            "net_pay": round(ytd_accum["net_pay"], 2),
-        },
-        "periods_modeled": regular_periods,
-        "supplementals_included": supplementals_count,
-        "all_warnings": all_warnings,
-    }
+    return StubSequenceResult(
+        party=party,
+        year=year,
+        stubs=stubs_to_return,
+        ytd=ytd_accum,
+        periods_modeled=regular_periods,
+        supplementals_included=supplementals_count,
+        warnings=all_warnings,
+    )
 
 
 def model_regular_401k_contribs(

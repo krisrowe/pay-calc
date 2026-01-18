@@ -38,11 +38,12 @@ Usage:
         print(f"Discrepancies: {result['discrepancies']}")
 """
 
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 from ..records import get_record, list_records
 from ..employee.records import get_pay_stub
-from ..schemas import FicaRoundingBalance, PayStub, PaySummary
+from ..schemas import FicaRoundingBalance, PayStub, PaySummary, DeductionTotals, TaxAmounts
+from .schemas import Discrepancy, PeriodComparison, ValidateStubResult, StubSequenceResult
 from .stub_modeler import model_stub, model_stubs_in_sequence
 
 
@@ -281,24 +282,24 @@ def compare_pay_summaries(
     modeled: PaySummary,
     actual: PaySummary,
     prefix: str = "",
-) -> List[Dict[str, Any]]:
+) -> List[Discrepancy]:
     """Compare modeled vs actual PaySummary values.
 
     Returns:
-        List of dicts with field, modeled, actual, diff for mismatches
+        List of Discrepancy objects for mismatches
     """
-    diffs = []
+    diffs: List[Discrepancy] = []
 
     def add_diff(name: str, mod_val: float, act_val: float):
         diff = round(mod_val - act_val, 2)
         if abs(diff) >= 0.01:
             field_name = f"{prefix}{name}" if prefix else name
-            diffs.append({
-                "field": field_name,
-                "modeled": mod_val,
-                "actual": act_val,
-                "diff": diff,
-            })
+            diffs.append(Discrepancy(
+                field=field_name,
+                modeled=mod_val,
+                actual=act_val,
+                diff=diff,
+            ))
 
     # Compare top-level fields
     add_diff("gross", modeled.gross, actual.gross)
@@ -325,7 +326,7 @@ def compare_pay_summaries(
 def validate_stub(
     record_id: str,
     fica_rounding_balance: FicaRoundingBalance,
-) -> Dict[str, Any]:
+) -> Union[ValidateStubResult, Dict[str, Any]]:
     """Validate a pay stub model against an actual stub record (non-iterative).
 
     Self-contained validation that uses only data from the stub itself.
@@ -337,17 +338,7 @@ def validate_stub(
             Use FicaRoundingBalance.none() if unknown.
 
     Returns:
-        Dict with:
-            - record_id: The validated record ID
-            - party: Party identifier
-            - pay_date: Pay date from stub
-            - model: "model_stub" (always)
-            - inputs: Extracted inputs from stub
-            - modeled: Model output PaySummary objects
-            - actual: Actual PaySummary objects from stub
-            - discrepancies: List of field differences
-            - match: True if no discrepancies
-            - error: Error message if validation failed
+        ValidateStubResult on success, or dict with "error" and "match": False on failure.
     """
     # Load the stub
     try:
@@ -355,39 +346,41 @@ def validate_stub(
     except ValueError as e:
         return {"error": str(e), "match": False}
 
-    # Extract inputs from stub
-    inputs = extract_inputs_from_stub(stub)
-    current_401k, ytd_401k = extract_ytd_401k(stub)
+    # Compute prior YTD by subtracting current from YTD
+    prior_ytd = PaySummary(
+        gross=stub.ytd.gross - stub.current.gross,
+        deductions=DeductionTotals(
+            fully_pretax=stub.ytd.deductions.fully_pretax - stub.current.deductions.fully_pretax,
+            retirement=stub.ytd.deductions.retirement - stub.current.deductions.retirement,
+            post_tax=stub.ytd.deductions.post_tax - stub.current.deductions.post_tax,
+        ),
+        taxable=TaxAmounts(
+            fit=stub.ytd.taxable.fit - stub.current.taxable.fit,
+            ss=stub.ytd.taxable.ss - stub.current.taxable.ss,
+            medicare=stub.ytd.taxable.medicare - stub.current.taxable.medicare,
+        ),
+        withheld=TaxAmounts(
+            fit=stub.ytd.withheld.fit - stub.current.withheld.fit,
+            ss=stub.ytd.withheld.ss - stub.current.withheld.ss,
+            medicare=stub.ytd.withheld.medicare - stub.current.withheld.medicare,
+        ),
+        net_pay=stub.ytd.net_pay - stub.current.net_pay,
+    )
 
-    # Compute prior YTD by subtracting current values from YTD values
-    prior_ytd = {
-        "gross": stub.ytd.gross - stub.current.gross,
-        "fit_taxable": stub.ytd.taxable.fit - stub.current.taxable.fit,
-        "fit_withheld": stub.ytd.withheld.fit - stub.current.withheld.fit,
-        "ss_wages": stub.ytd.taxable.ss - stub.current.taxable.ss,
-        "ss_withheld": stub.ytd.withheld.ss - stub.current.withheld.ss,
-        "medicare_wages": stub.ytd.taxable.medicare - stub.current.taxable.medicare,
-        "medicare_withheld": stub.ytd.withheld.medicare - stub.current.withheld.medicare,
-        "pretax_401k": ytd_401k - current_401k,
-    }
-
-    # Build overrides for model
-    comp_plan_override = {
-        "gross_per_period": inputs["gross"],
-        "pay_frequency": inputs["pay_frequency"],
-    }
-
-    # Use empty benefits dict if none extracted (model_stub will validate)
-    benefits_input = inputs["benefits"] if inputs["benefits"] else {"pretax_health": 0}
-
-    # Run model
+    # Run model with stub's input facts (gross, deductions)
+    # Model calculates outputs (taxable, withheld, net_pay)
     result = model_stub(
         stub.pay_date,
         stub.party,
         prior_ytd=prior_ytd,
-        benefits=benefits_input,
-        comp_plan_override=comp_plan_override,
-        pretax_401k=inputs["pretax_401k"],
+        current_deductions=stub.current.deductions,
+        comp_plan_override={
+            "gross_per_period": stub.current.gross,
+            # TODO: Infer pay_frequency from stub.period_end - stub.period_start
+            # (13-14 days = biweekly, ~30 = monthly, 6-7 = weekly)
+            # PayStub schema requires these dates, so always available.
+            "pay_frequency": "biweekly",
+        },
         fica_balance=fica_rounding_balance,
     )
 
@@ -395,22 +388,27 @@ def validate_stub(
     if isinstance(result, dict) and "error" in result:
         return {"error": f"Model error: {result['error']}", "match": False}
 
-    # Compare PaySummary objects directly
-    current_diffs = compare_pay_summaries(result.current, stub.current, "current.")
-    ytd_diffs = compare_pay_summaries(result.ytd, stub.ytd, "ytd.")
-    discrepancies = current_diffs + ytd_diffs
+    # Compare model's calculated outputs against actual stub values
+    current_diffs = compare_pay_summaries(result.current, stub.current)
+    ytd_diffs = compare_pay_summaries(result.ytd, stub.ytd)
 
-    return {
-        "record_id": record_id,
-        "party": stub.party,
-        "pay_date": stub.pay_date,
-        "model": "model_stub",
-        "inputs": inputs,
-        "modeled": {"current": result.current, "ytd": result.ytd},
-        "actual": {"current": stub.current, "ytd": stub.ytd},
-        "discrepancies": discrepancies,
-        "match": len(discrepancies) == 0,
-    }
+    return ValidateStubResult(
+        record_id=record_id,
+        party=stub.party,
+        pay_date=stub.pay_date,
+        model="model_stub",
+        inputs={"gross": stub.current.gross, "deductions": stub.current.deductions.model_dump()},
+        current=PeriodComparison(
+            modeled=result.current,
+            actual=stub.current,
+            discrepancies=current_diffs,
+        ),
+        ytd=PeriodComparison(
+            modeled=result.ytd,
+            actual=stub.ytd,
+            discrepancies=ytd_diffs,
+        ),
+    )
 
 
 def validate_stub_in_sequence(
@@ -418,7 +416,7 @@ def validate_stub_in_sequence(
     auto_history: bool = True,
     supplementals: Optional[List[Dict[str, Any]]] = None,
     special_deductions: Optional[List[Dict[str, Any]]] = None,
-) -> Dict[str, Any]:
+) -> Union[ValidateStubResult, Dict[str, Any]]:
     """Validate a pay stub by modeling all stubs in sequence (iterative).
 
     Models all pay periods from year start through the target date, computing
@@ -431,18 +429,7 @@ def validate_stub_in_sequence(
         special_deductions: Optional list of per-date 401k overrides
 
     Returns:
-        Dict with:
-            - record_id: The validated record ID
-            - party: Party identifier
-            - pay_date: Pay date from stub
-            - model: "model_stubs_in_sequence" (always)
-            - periods_modeled: Number of pay periods modeled
-            - inputs: Extracted inputs from stub
-            - modeled: Model output PaySummary objects
-            - actual: Actual PaySummary objects from stub
-            - discrepancies: List of field differences
-            - match: True if no discrepancies
-            - error: Error message if validation failed
+        ValidateStubResult on success, or dict with "error" and "match": False on failure.
     """
     # Load the stub
     try:
@@ -480,88 +467,50 @@ def validate_stub_in_sequence(
         comp_plan_override=comp_plan_override,
         comp_plan_history=comp_plan_history,
         benefits_override=benefits_override,
-        pretax_401k=inputs["pretax_401k"],
         supplementals=supplementals,
-        special_deductions=special_deductions,
     )
 
-    if "error" in result:
+    # model_stubs_in_sequence returns StubSequenceResult on success, or dict with "error" on failure
+    if isinstance(result, dict) and "error" in result:
         return {"error": f"Model error: {result['error']}", "match": False}
 
     # Find the modeled stub matching the target pay_date
-    # model_stubs_in_sequence returns ModelResult objects in stubs list
-    target_modeled = None
-    if result.get("stubs"):
-        for modeled_stub in result["stubs"]:
-            stub_date = modeled_stub.get("date") if isinstance(modeled_stub, dict) else getattr(modeled_stub, "date", None)
-            if stub_date == stub.pay_date:
-                target_modeled = modeled_stub
-                break
-        if target_modeled is None:
-            target_modeled = result["stubs"][-1]  # Fallback to last stub
+    target_stub = None
+    for modeled_stub in result.stubs:
+        if modeled_stub.pay_date == stub.pay_date:
+            target_stub = modeled_stub
+            break
 
-    # Handle both dict and ModelResult return types during transition
-    if isinstance(target_modeled, dict):
-        # Legacy dict format - create PaySummary for comparison
-        from ..schemas import DeductionTotals, TaxAmounts
-        modeled_current = PaySummary(
-            gross=target_modeled.get("gross", 0),
-            deductions=DeductionTotals(
-                fully_pretax=target_modeled.get("pretax_fica", 0),
-                retirement=target_modeled.get("pretax_401k", 0),
-                post_tax=0,
-            ),
-            taxable=TaxAmounts(
-                fit=target_modeled.get("fit_taxable", 0),
-                ss=target_modeled.get("ss_taxable", target_modeled.get("gross", 0)),
-                medicare=target_modeled.get("medicare_taxable", target_modeled.get("gross", 0)),
-            ),
-            withheld=TaxAmounts(
-                fit=target_modeled.get("fit_withheld", 0),
-                ss=target_modeled.get("ss_withheld", 0),
-                medicare=target_modeled.get("medicare_withheld", 0),
-            ),
-            net_pay=target_modeled.get("net_pay", 0),
-        )
-        ytd_data = result.get("ytd", {})
-        modeled_ytd = PaySummary(
-            gross=ytd_data.get("gross", 0),
-            deductions=DeductionTotals(
-                fully_pretax=ytd_data.get("pretax_fica", 0),
-                retirement=ytd_data.get("pretax_401k", 0),
-                post_tax=0,
-            ),
-            taxable=TaxAmounts(
-                fit=ytd_data.get("fit_taxable", 0),
-                ss=ytd_data.get("ss_wages", ytd_data.get("gross", 0)),
-                medicare=ytd_data.get("medicare_wages", ytd_data.get("gross", 0)),
-            ),
-            withheld=TaxAmounts(
-                fit=ytd_data.get("fit_withheld", 0),
-                ss=ytd_data.get("ss_withheld", 0),
-                medicare=ytd_data.get("medicare_withheld", 0),
-            ),
-            net_pay=0,
-        )
-    else:
-        # ModelResult format - use PaySummary directly
-        modeled_current = target_modeled.current
-        modeled_ytd = target_modeled.ytd
+    if target_stub is None:
+        # Target date not in modeled sequence - use last stub as fallback
+        if result.stubs:
+            target_stub = result.stubs[-1]
+        else:
+            return {"error": "No stubs modeled in sequence", "match": False}
+
+    # StubResult has .current (PaySummary), StubSequenceResult has .ytd (PaySummary)
+    modeled_current = target_stub.current
+    modeled_ytd = result.ytd
 
     # Compare PaySummary objects directly
-    current_diffs = compare_pay_summaries(modeled_current, stub.current, "current.")
-    ytd_diffs = compare_pay_summaries(modeled_ytd, stub.ytd, "ytd.")
-    discrepancies = current_diffs + ytd_diffs
+    current_diffs = compare_pay_summaries(modeled_current, stub.current)
+    ytd_diffs = compare_pay_summaries(modeled_ytd, stub.ytd)
 
-    return {
-        "record_id": record_id,
-        "party": stub.party,
-        "pay_date": stub.pay_date,
-        "model": "model_stubs_in_sequence",
-        "periods_modeled": result.get("periods_modeled"),
-        "inputs": inputs,
-        "modeled": {"current": modeled_current, "ytd": modeled_ytd},
-        "actual": {"current": stub.current, "ytd": stub.ytd},
-        "discrepancies": discrepancies,
-        "match": len(discrepancies) == 0,
-    }
+    return ValidateStubResult(
+        record_id=record_id,
+        party=stub.party,
+        pay_date=stub.pay_date,
+        model="model_stubs_in_sequence",
+        inputs=inputs,
+        current=PeriodComparison(
+            modeled=modeled_current,
+            actual=stub.current,
+            discrepancies=current_diffs,
+        ),
+        ytd=PeriodComparison(
+            modeled=modeled_ytd,
+            actual=stub.ytd,
+            discrepancies=ytd_diffs,
+        ),
+        periods_modeled=result.periods_modeled,
+    )

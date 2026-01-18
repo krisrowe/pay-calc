@@ -48,10 +48,10 @@ fields:
   period_start:
     description: "Pay period start date"
     patterns:
-      - regex: 'Period\s+Star\s*t\s+Date\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
-        example_match: "Period Star t Date 01/01/2024"
-        note: "Handles OCR space in 'Start'"
-      - regex: 'Period\s+Start\s+Date\s+(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+      - regex: 'Period\s+Star\s*t\s+Date\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
+        example_match: "Period Star t Date12/29/2025"
+        note: "Handles OCR space in 'Start' and missing space before date (2026 format)"
+      - regex: 'Period\s+Start\s+Date\s*(\d{1,2}[/-]\d{1,2}[/-]\d{4})'
         example_match: "Period Start Date 01/01/2024"
         note: "Clean version"
 
@@ -184,10 +184,14 @@ sections:
     end_patterns:
       - regex: 'Taxes'
     strip_headers:
+      # 2024 format: spaces between all words
       - regex: 'Deductions?\s+Deduction\s+Employee\s+Current\s+Employee\s+YTD\s+Employer\s+Current\s+Employer\s+YTD\s*'
+      # 2026 format: some words merged (DeductionEmployee, CurrentEmployee, etc.)
+      - regex: 'Deductions?\s+Deduction\s*Employee\s+Current\s*Employee\s+YTD\s*Employer\s+Current\s*Employer\s+YTD\s*'
     item_patterns:
       # Pattern: Type, Employee Current, Employee YTD, Employer Current, Employer YTD
-      - regex: '([A-Za-z\s/]+?)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
+      # Allow optional space before $ to handle 2026 format where $ may be adjacent to type
+      - regex: '([A-Za-z][A-Za-z0-9\s/]*?)\s*\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)\s+\$?([\d,]+\.?\d*)'
         groups:
           - name: type
             index: 1
@@ -200,6 +204,7 @@ sections:
           - name: employer_ytd
             index: 5
         example_match: "401k Pre-Tax $115.40 $230.80 $57.70 $115.40"
+        note: "Handles both spaced and non-spaced dollar formats"
 
   pay_summary:
     description: "Summary totals for current and YTD"

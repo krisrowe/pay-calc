@@ -307,4 +307,4 @@ def get_total_pretax_deductions(benefits: Dict[str, Any]) -> float:
     for key, value in benefits.items():
         if key.startswith("pretax_") and isinstance(value, (int, float)):
             total += value
-    return total
+    return round(total, 2)

@@ -10,25 +10,18 @@ import yaml
 from pathlib import Path
 
 from paycalc.sdk.modeling import model_stub
+from paycalc.sdk.schemas import DeductionTotals, PaySummary
 
 
 # Zero YTD for period 1 tests
-ZERO_YTD = {
-    "gross": 0,
-    "fit_taxable": 0,
-    "fit_withheld": 0,
-    "ss_wages": 0,
-    "ss_withheld": 0,
-    "medicare_wages": 0,
-    "medicare_withheld": 0,
-    "pretax_401k": 0,
-}
+ZERO_YTD = PaySummary.zero()
 
-# Default benefits for tests (matching base_profile)
-DEFAULT_BENEFITS = {
-    "pretax_health": 200.00,
-    "pretax_dental": 25.00,
-}
+# Default deductions for tests (health=200, dental=25, 401k=500)
+DEFAULT_DEDUCTIONS = DeductionTotals(
+    fully_pretax=225.00,  # health + dental
+    retirement=500.00,    # 401k
+    post_tax=0,
+)
 
 
 # === FIXTURES ===
@@ -91,19 +84,23 @@ def write_profile(config_dir: Path, profile_data: dict):
 
 
 def test_model_first_period_all_registered(isolated_env, base_profile):
-    """Model period 1 with comp, benefits, w4 all from registered profile."""
+    """Model period 1 with comp, w4 from profile, deductions passed directly."""
     from paycalc.sdk.modeling.schemas import ModelResult
 
     write_profile(isolated_env["config_dir"], base_profile)
 
-    result = model_stub("2026-01-10", "him", prior_ytd=ZERO_YTD, benefits=DEFAULT_BENEFITS)
+    result = model_stub(
+        "2026-01-10", "him",
+        prior_ytd=ZERO_YTD,
+        current_deductions=DEFAULT_DEDUCTIONS,
+    )
 
     # Should succeed (ModelResult, not error dict)
     assert isinstance(result, ModelResult), f"Unexpected error: {result.get('error') if isinstance(result, dict) else result}"
 
     # Check calculations via PaySummary structure
     assert result.current.gross == 5000.00
-    assert result.current.deductions.retirement == 500.00  # 10% 401k
+    assert result.current.deductions.retirement == 500.00  # 401k
     assert result.current.deductions.fully_pretax == 225.00  # health + dental
     assert result.current.taxable.fit == 4275.00  # 5000 - 500 - 225
     assert result.current.net_pay > 0
@@ -122,25 +119,33 @@ class TestCompPlanOverride:
         write_profile(isolated_env["config_dir"], base_profile)
 
         # Without override - uses profile (gross=5000)
-        without = model_stub("2026-01-10", "him", prior_ytd=ZERO_YTD, benefits=DEFAULT_BENEFITS)
+        without = model_stub(
+            "2026-01-10", "him",
+            prior_ytd=ZERO_YTD,
+            current_deductions=DEFAULT_DEDUCTIONS,
+        )
         assert isinstance(without, ModelResult), f"Error: {without.get('error') if isinstance(without, dict) else without}"
         assert without.current.gross == 5000.00
-        assert without.current.deductions.retirement == 500.00  # 10% of 5000
+        assert without.current.deductions.retirement == 500.00
 
-        # With override - different gross
+        # With override - different gross, different deductions
+        override_deductions = DeductionTotals(
+            fully_pretax=225.00,
+            retirement=400.00,  # different 401k
+            post_tax=0,
+        )
         with_override = model_stub(
             "2026-01-10", "him",
             prior_ytd=ZERO_YTD,
-            benefits=DEFAULT_BENEFITS,
+            current_deductions=override_deductions,
             comp_plan_override={
                 "gross_per_period": 8000.00,
                 "pay_frequency": "biweekly",
-                "target_401k_pct": 0.05,
             }
         )
         assert isinstance(with_override, ModelResult), f"Error: {with_override.get('error') if isinstance(with_override, dict) else with_override}"
         assert with_override.current.gross == 8000.00
-        assert with_override.current.deductions.retirement == 400.00  # 5% of 8000
+        assert with_override.current.deductions.retirement == 400.00
 
         # Verify they're different
         assert without.current.gross != with_override.current.gross
@@ -153,7 +158,7 @@ class TestCompPlanOverride:
         result = model_stub(
             "2026-01-10", "him",
             prior_ytd=ZERO_YTD,
-            benefits=DEFAULT_BENEFITS,
+            current_deductions=DEFAULT_DEDUCTIONS,
             comp_plan_override={
                 "gross_per_period": 5000.00,
                 "typo_field": 123,  # Unknown field
@@ -165,34 +170,38 @@ class TestCompPlanOverride:
         assert "validation_errors" in result
 
 
-# === BENEFITS TESTS ===
+# === DEDUCTIONS TESTS ===
 
 
-class TestBenefits:
-    """Tests for benefits validation."""
+class TestDeductions:
+    """Tests for deduction inputs affecting tax calculations."""
 
-    def test_different_benefits_change_deductions(self, isolated_env, base_profile):
-        """Different benefits values change pretax deductions and FIT taxable."""
+    def test_different_deductions_change_taxable(self, isolated_env, base_profile):
+        """Different deduction values change FIT taxable wages."""
         from paycalc.sdk.modeling.schemas import ModelResult
 
         write_profile(isolated_env["config_dir"], base_profile)
 
-        # With default benefits (health=200, dental=25)
-        with_default = model_stub("2026-01-10", "him", prior_ytd=ZERO_YTD, benefits=DEFAULT_BENEFITS)
+        # With default deductions
+        with_default = model_stub(
+            "2026-01-10", "him",
+            prior_ytd=ZERO_YTD,
+            current_deductions=DEFAULT_DEDUCTIONS,
+        )
         assert isinstance(with_default, ModelResult), f"Error: {with_default.get('error') if isinstance(with_default, dict) else with_default}"
         assert with_default.current.deductions.fully_pretax == 225.00
         assert with_default.current.taxable.fit == 4275.00  # 5000 - 500 - 225
 
-        # With higher benefits
-        higher_benefits = {
-            "pretax_health": 500.00,
-            "pretax_dental": 50.00,
-            "pretax_fsa": 200.00,
-        }
+        # With higher deductions
+        higher_deductions = DeductionTotals(
+            fully_pretax=750.00,  # higher pretax
+            retirement=500.00,
+            post_tax=0,
+        )
         with_higher = model_stub(
             "2026-01-10", "him",
             prior_ytd=ZERO_YTD,
-            benefits=higher_benefits,
+            current_deductions=higher_deductions,
         )
         assert isinstance(with_higher, ModelResult), f"Error: {with_higher.get('error') if isinstance(with_higher, dict) else with_higher}"
         assert with_higher.current.deductions.fully_pretax == 750.00
@@ -202,22 +211,38 @@ class TestBenefits:
         assert with_default.current.deductions.fully_pretax != with_higher.current.deductions.fully_pretax
         assert with_default.current.taxable.fit != with_higher.current.taxable.fit
 
-    def test_benefits_rejects_unknown_field(self, isolated_env, base_profile):
-        """Unknown field in benefits causes validation error."""
+    def test_post_tax_deductions_affect_net_not_taxable(self, isolated_env, base_profile):
+        """Post-tax deductions reduce net pay but not taxable wages."""
+        from paycalc.sdk.modeling.schemas import ModelResult
+
         write_profile(isolated_env["config_dir"], base_profile)
 
-        result = model_stub(
+        # Without post-tax
+        without_post_tax = model_stub(
             "2026-01-10", "him",
             prior_ytd=ZERO_YTD,
-            benefits={
-                "pretax_health": 200.00,
-                "pretax_typo": 50.00,  # Unknown field
-            }
+            current_deductions=DEFAULT_DEDUCTIONS,
         )
+        assert isinstance(without_post_tax, ModelResult)
 
-        assert "error" in result
-        assert "pretax_typo" in result["error"]
-        assert "validation_errors" in result
+        # With post-tax
+        with_post_tax = DeductionTotals(
+            fully_pretax=225.00,
+            retirement=500.00,
+            post_tax=100.00,  # adds post-tax deduction
+        )
+        with_post_tax_result = model_stub(
+            "2026-01-10", "him",
+            prior_ytd=ZERO_YTD,
+            current_deductions=with_post_tax,
+        )
+        assert isinstance(with_post_tax_result, ModelResult)
+
+        # Taxable wages should be the same (post-tax doesn't affect them)
+        assert without_post_tax.current.taxable.fit == with_post_tax_result.current.taxable.fit
+
+        # Net pay should be lower by the post-tax amount
+        assert with_post_tax_result.current.net_pay == without_post_tax.current.net_pay - 100.00
 
 
 # === W4 OVERRIDE TESTS ===
@@ -232,8 +257,12 @@ class TestW4Override:
 
         write_profile(isolated_env["config_dir"], base_profile)
 
-        # Without override - uses profile or defaults
-        without = model_stub("2026-01-10", "him", prior_ytd=ZERO_YTD, benefits=DEFAULT_BENEFITS)
+        # Without override - uses profile W-4 (MFJ with $4000 dependents credit)
+        without = model_stub(
+            "2026-01-10", "him",
+            prior_ytd=ZERO_YTD,
+            current_deductions=DEFAULT_DEDUCTIONS,
+        )
         assert isinstance(without, ModelResult), f"Error: {without.get('error') if isinstance(without, dict) else without}"
         fit_without = without.current.withheld.fit
 
@@ -241,7 +270,7 @@ class TestW4Override:
         with_override = model_stub(
             "2026-01-10", "him",
             prior_ytd=ZERO_YTD,
-            benefits=DEFAULT_BENEFITS,
+            current_deductions=DEFAULT_DEDUCTIONS,
             w4_override={
                 "filing_status": "single",
                 "step3_dependents": 0,
@@ -260,7 +289,7 @@ class TestW4Override:
         result = model_stub(
             "2026-01-10", "him",
             prior_ytd=ZERO_YTD,
-            benefits=DEFAULT_BENEFITS,
+            current_deductions=DEFAULT_DEDUCTIONS,
             w4_override={
                 "filing_status": "mfj",
                 "allowances": 5,  # Old W-4 field, not valid in 2020+ schema

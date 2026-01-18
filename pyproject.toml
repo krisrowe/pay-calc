@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "paycalc"
-version = "0.2.0"
+version = "0.3.0"
 description = "Personal pay and tax projection tools - SDK, CLI, and MCP server"
 readme = "README.md"
 requires-python = ">=3.10"

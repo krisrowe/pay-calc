@@ -22,6 +22,7 @@ from paycalc.sdk.modeling import (
     validate_stub_in_sequence,
     is_supplemental_stub,
     extract_inputs_from_stub,
+    ValidateStubResult,
 )
 from paycalc.sdk.schemas import FicaRoundingBalance
 from paycalc.sdk.config import normalize_deduction_type
@@ -256,6 +257,64 @@ def compare_values(
     return results
 
 
+def build_full_comparison(result: "ValidateStubResult") -> List[Tuple[str, float, float, float]]:
+    """Build full comparison table from ValidateStubResult.
+
+    Compares all PaySummary fields between modeled and actual for both
+    current and ytd periods.
+
+    Args:
+        result: ValidateStubResult from SDK validation
+
+    Returns:
+        List of (field_name, modeled, actual, diff) tuples
+    """
+    comparisons = []
+
+    def add_comparisons(prefix: str, modeled, actual):
+        """Add comparisons for a PaySummary pair."""
+        # Top-level
+        comparisons.append((f"{prefix}gross", modeled.gross, actual.gross,
+                           round(modeled.gross - actual.gross, 2)))
+        comparisons.append((f"{prefix}net_pay", modeled.net_pay, actual.net_pay,
+                           round(modeled.net_pay - actual.net_pay, 2)))
+        # Deductions
+        comparisons.append((f"{prefix}deductions.fully_pretax",
+                           modeled.deductions.fully_pretax, actual.deductions.fully_pretax,
+                           round(modeled.deductions.fully_pretax - actual.deductions.fully_pretax, 2)))
+        comparisons.append((f"{prefix}deductions.retirement",
+                           modeled.deductions.retirement, actual.deductions.retirement,
+                           round(modeled.deductions.retirement - actual.deductions.retirement, 2)))
+        comparisons.append((f"{prefix}deductions.post_tax",
+                           modeled.deductions.post_tax, actual.deductions.post_tax,
+                           round(modeled.deductions.post_tax - actual.deductions.post_tax, 2)))
+        # Taxable
+        comparisons.append((f"{prefix}taxable.fit",
+                           modeled.taxable.fit, actual.taxable.fit,
+                           round(modeled.taxable.fit - actual.taxable.fit, 2)))
+        comparisons.append((f"{prefix}taxable.ss",
+                           modeled.taxable.ss, actual.taxable.ss,
+                           round(modeled.taxable.ss - actual.taxable.ss, 2)))
+        comparisons.append((f"{prefix}taxable.medicare",
+                           modeled.taxable.medicare, actual.taxable.medicare,
+                           round(modeled.taxable.medicare - actual.taxable.medicare, 2)))
+        # Withheld
+        comparisons.append((f"{prefix}withheld.fit",
+                           modeled.withheld.fit, actual.withheld.fit,
+                           round(modeled.withheld.fit - actual.withheld.fit, 2)))
+        comparisons.append((f"{prefix}withheld.ss",
+                           modeled.withheld.ss, actual.withheld.ss,
+                           round(modeled.withheld.ss - actual.withheld.ss, 2)))
+        comparisons.append((f"{prefix}withheld.medicare",
+                           modeled.withheld.medicare, actual.withheld.medicare,
+                           round(modeled.withheld.medicare - actual.withheld.medicare, 2)))
+
+    add_comparisons("current.", result.current.modeled, result.current.actual)
+    add_comparisons("ytd.", result.ytd.modeled, result.ytd.actual)
+
+    return comparisons
+
+
 def print_comparison_table(
     comparisons: List[Tuple[str, float, float, float]],
     diffs_only: bool = False,
@@ -403,60 +462,8 @@ def validate(
         with open(special_deductions) as f:
             special_ded_data = json.load(f)
 
-    # Load the record
-    record = get_record(record_id)
-    if not record:
-        raise click.ClickException(f"Record '{record_id}' not found")
-
-    meta = record.get("meta", {})
-    if meta.get("type") != "stub":
-        raise click.ClickException(f"Record '{record_id}' is not a stub (type={meta.get('type')})")
-
-    data = record.get("data", {})
-    pay_date = data.get("pay_date", "unknown")
-    party = meta.get("party", "unknown")
-
-    # Check if this is a supplemental stub (not regular pay)
-    if is_supplemental_stub(data):
-        gross = data.get("pay_summary", {}).get("current", {}).get("gross", 0)
-        raise click.ClickException(
-            f"Record '{record_id}' is a supplemental stub (bonus/RSU), not regular pay.\n"
-            f"  Pay date: {pay_date}\n"
-            f"  Gross: ${gross:,.2f}\n"
-            f"Use a regular pay stub record ID for validation."
-        )
-
-    if verbose:
-        click.echo(f"Record: {record_id}")
-        click.echo(f"Party: {party}")
-        click.echo(f"Pay date: {pay_date}")
-        click.echo()
-
-    # Extract inputs from stub
-    inputs = extract_inputs_from_stub(data)
-
-    if verbose:
-        click.echo("Extracted inputs:")
-        click.echo(f"  Gross: ${inputs['gross']:,.2f}")
-        click.echo(f"  Pay frequency: {inputs['pay_frequency']}")
-        click.echo(f"  401k: ${inputs['pretax_401k']:,.2f}")
-        click.echo(f"  Benefits: {inputs['benefits']}")
-        if inputs.get('imputed_income'):
-            click.echo(f"  Imputed income (GTL): ${inputs['imputed_income']:,.2f}")
-        click.echo()
-
-    # Build overrides for model
-    comp_plan_override = {
-        "gross_per_period": inputs["gross"],
-        "pay_frequency": inputs["pay_frequency"],
-    }
-
-    benefits_override = inputs["benefits"] if inputs["benefits"] else None
-    imputed_income = inputs.get("imputed_income", 0)
-
-    # Call validation (iterative or non-iterative)
+    # Call SDK validation (handles loading stub, extracting inputs, modeling)
     if iterative:
-        # Iterative: use validate_stub_in_sequence (always models full sequence)
         if verbose:
             click.echo("Using iterative model (validate_stub_in_sequence)...")
 
@@ -466,63 +473,67 @@ def validate(
             supplementals=supp_data,
             special_deductions=special_ded_data,
         )
-
-        if sdk_result.get("error"):
-            raise click.ClickException(sdk_result["error"])
-
-        modeled = sdk_result["modeled"]
-        actuals = sdk_result["actual"]
-        model_name = sdk_result["model"]
-
-        if verbose:
-            click.echo(f"  Periods modeled: {sdk_result.get('periods_modeled', 'N/A')}")
     else:
-        # Non-iterative: call validate_stub with FicaRoundingBalance.none()
         sdk_result = validate_stub(record_id, FicaRoundingBalance.none())
 
-        if sdk_result.get("error"):
-            raise click.ClickException(sdk_result["error"])
+    # Check for error (dict) vs success (ValidateStubResult)
+    if isinstance(sdk_result, dict):
+        raise click.ClickException(sdk_result.get("error", "Unknown error"))
 
-        modeled = sdk_result["modeled"]
-        actuals = sdk_result["actual"]
-        model_name = sdk_result["model"]
+    result: ValidateStubResult = sdk_result
 
-    # Build comparisons from SDK result
-    comparisons = [
-        (d["field"], d["modeled"], d["actual"], d["diff"])
-        for d in sdk_result.get("discrepancies", [])
-    ]
+    if verbose:
+        click.echo(f"Record: {result.record_id}")
+        click.echo(f"Party: {result.party}")
+        click.echo(f"Pay date: {result.pay_date}")
+        if result.periods_modeled:
+            click.echo(f"Periods modeled: {result.periods_modeled}")
+        click.echo("Extracted inputs:")
+        click.echo(f"  Gross: ${result.inputs.get('gross', 0):,.2f}")
+        click.echo(f"  Pay frequency: {result.inputs.get('pay_frequency', 'unknown')}")
+        click.echo(f"  401k: ${result.inputs.get('pretax_401k', 0):,.2f}")
+        click.echo(f"  Benefits: {result.inputs.get('benefits', {})}")
+        click.echo()
+
+    # Build comparisons from current and ytd discrepancies
+    # Add "current." and "ytd." prefixes for display
+    comparisons = []
+    for d in result.current.discrepancies:
+        comparisons.append((f"current.{d.field}", d.modeled, d.actual, d.diff))
+    for d in result.ytd.discrepancies:
+        comparisons.append((f"ytd.{d.field}", d.modeled, d.actual, d.diff))
+
     if not diffs_only:
-        # SDK only returns discrepancies; for full comparison, build from modeled/actual
-        comparisons = compare_values(modeled, actuals, diffs_only=False)
+        # Build full comparison table from PaySummary objects
+        comparisons = build_full_comparison(result)
 
     if output_json:
         output = {
-            "record_id": record_id,
-            "party": party,
-            "pay_date": pay_date,
-            "model": model_name,
-            "periods_modeled": sdk_result.get("periods_modeled"),
-            "inputs": sdk_result.get("inputs"),
-            "modeled": modeled,
-            "actual": actuals,
-            "discrepancies": [
-                {"field": f, "modeled": m, "actual": a, "diff": d}
-                for f, m, a, d in comparisons
-                if abs(d) >= 0.01  # Only include actual discrepancies in JSON
-            ],
-            "match": not any(abs(d) >= 0.01 for _, _, _, d in comparisons),
+            "record_id": result.record_id,
+            "party": result.party,
+            "pay_date": result.pay_date,
+            "model": result.model,
+            "periods_modeled": result.periods_modeled,
+            "inputs": result.inputs,
+            "current": {
+                "modeled": result.current.modeled.model_dump(),
+                "actual": result.current.actual.model_dump(),
+                "discrepancies": [d.model_dump() for d in result.current.discrepancies],
+            },
+            "ytd": {
+                "modeled": result.ytd.modeled.model_dump(),
+                "actual": result.ytd.actual.model_dump(),
+                "discrepancies": [d.model_dump() for d in result.ytd.discrepancies],
+            },
+            "match": result.match,
         }
         click.echo(json.dumps(output, indent=2))
     else:
-        periods = sdk_result.get('periods_modeled')
-        mode_info = f", {periods} periods" if periods else ""
-        click.echo(f"Validating stub {record_id} ({party}, {pay_date}{mode_info})")
+        periods_info = f", {result.periods_modeled} periods" if result.periods_modeled else ""
+        click.echo(f"Validating stub {result.record_id} ({result.party}, {result.pay_date}{periods_info})")
         print_comparison_table(comparisons, diffs_only=diffs_only)
 
-        # Check for actual discrepancies (not just comparison rows)
-        has_diffs = any(abs(d) >= 0.01 for _, _, _, d in comparisons)
-        if has_diffs:
+        if not result.match:
             if iterative:
                 click.echo("\nPossible causes for discrepancies:")
                 click.echo("  - Gaps in prior stub history (missing imported stubs)")

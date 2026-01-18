@@ -199,7 +199,10 @@ def get_pay_stub(record_id: str) -> PayStub:
         ss.get("ytd_withheld", 0) +
         med.get("ytd_withheld", 0)
     )
-    computed_ytd_net = ytd_gross - ytd_ded["fully_pretax"] - ytd_ded["retirement"] - ytd_ded["post_tax"] - ytd_withheld_total
+    computed_ytd_net = round(
+        ytd_gross - ytd_ded["fully_pretax"] - ytd_ded["retirement"] - ytd_ded["post_tax"] - ytd_withheld_total,
+        2,
+    )
 
     # Build PaySummary objects
     current = PaySummary(
