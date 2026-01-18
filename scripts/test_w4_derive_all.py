@@ -9,7 +9,7 @@ import json
 from collections import defaultdict
 
 from paycalc.sdk.records import list_records
-from paycalc.sdk.party_config import derive_w4_from_stub
+from paycalc.sdk.employee.config import derive_w4_from_stub
 
 
 def is_regular_pay_stub(data: dict) -> bool:

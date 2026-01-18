@@ -23,9 +23,9 @@ sys.path.insert(0, str(project_root))
 from rich.console import Console
 from rich.table import Table
 
-from paycalc.sdk.stub_model import (
+from paycalc.sdk.modeling import (
     get_first_regular_pay_date,
-    max_regular_401k_contribs,
+    model_401k_max_frontload,
     model_stubs_in_sequence,
 )
 
@@ -58,7 +58,7 @@ def main():
     console.print()
 
     # Model A: Max 401k from first pay date
-    result_max = max_regular_401k_contribs(
+    result_max = model_401k_max_frontload(
         args.year,
         args.party,
         starting_date=first_pay_date,

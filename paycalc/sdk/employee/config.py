@@ -14,7 +14,7 @@ from typing import Optional
 
 import yaml
 
-from .config import get_config_dir
+from ..config import get_config_dir
 
 
 # =============================================================================
@@ -517,8 +517,8 @@ def derive_w4_from_stub(
             - all_matches: All W-4 configs that match within tolerance
             - analysis: Calculation breakdown
     """
-    from .records import get_record
-    from .withholding import calc_withholding_per_period
+    from ..records import get_record
+    from ..taxes.withholding import calc_withholding_per_period
 
     # IRS 2024+ W-4 credits:
     # - $2000 per qualifying child under 17

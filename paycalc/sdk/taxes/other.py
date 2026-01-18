@@ -1,4 +1,28 @@
-"""Tax projection calculations and output generation."""
+"""Mixed tax utilities - NEEDS MODULARIZATION.
+
+This module contains multiple concerns that should be split:
+
+Planned modules:
+- rules.py: Tax rules loading (load_tax_rules, get_tax_rule, brackets)
+- calculations.py: Pure tax math (calculate_federal_income_tax, etc.)
+- projection.py: Tax projections (generate_projection, CSV output)
+- w2.py: W-2 loading and generation (load_party_w2_data, etc.)
+
+Current contents:
+- Tax rules loading from config/tax_rules/{year}.yaml
+- Federal income tax bracket calculations
+- Additional Medicare tax calculations
+- SS overpayment calculations
+- Tax projection generation
+- CSV output formatting
+- W-2 data loading
+
+Caching:
+    Tax rules are cached per year for life of process. All public functions
+    (load_tax_rules, get_tax_rule, get_ss_wage_cap) use the same cache -
+    first access for a year reads from disk, subsequent accesses return
+    the cached instance.
+"""
 
 import csv
 import io
@@ -9,10 +33,17 @@ from typing import Any, Literal, Optional, Union
 
 import yaml
 
+from .schemas import TaxRules
+
+
+# =============================================================================
+# Tax Rules Loading (Cached)
+# =============================================================================
+
 
 def _get_tax_rules_dir() -> Path:
     """Get the tax-rules directory path."""
-    package_root = Path(__file__).parent.parent.parent  # sdk -> paycalc -> project root
+    package_root = Path(__file__).parent.parent.parent.parent  # taxes -> sdk -> paycalc -> project root
     return package_root / "tax-rules"
 
 
@@ -23,18 +54,51 @@ def _get_available_years() -> list[int]:
     return sorted(years, reverse=True)
 
 
-def load_tax_rules(year: str) -> dict:
-    """Load tax rules for a specific year from tax-rules/YYYY.yaml."""
+# Module-level cache for validated tax rules
+_TAX_RULES_CACHE: dict[str, TaxRules] = {}
+_TAX_RULES_RAW_CACHE: dict[str, dict] = {}  # For legacy get_tax_rule
+
+
+def load_tax_rules(year: str) -> TaxRules:
+    """Load and validate tax rules for a specific year.
+
+    Args:
+        year: Tax year (e.g., "2025")
+
+    Returns:
+        Validated TaxRules object with typed access to all fields
+    """
+    if year in _TAX_RULES_CACHE:
+        return _TAX_RULES_CACHE[year]
+
     config_file = _get_tax_rules_dir() / f"{year}.yaml"
     if not config_file.exists():
         raise FileNotFoundError(f"Tax rules file not found for year {year}: {config_file}")
 
     with open(config_file, "r") as f:
-        return yaml.safe_load(f)
+        raw = yaml.safe_load(f)
+
+    rules = TaxRules.model_validate(raw)
+    _TAX_RULES_CACHE[year] = rules
+    _TAX_RULES_RAW_CACHE[year] = raw  # Keep raw for legacy access
+    return rules
+
+
+def _load_tax_rules_raw(year: str) -> dict:
+    """Load raw tax rules dict (for legacy get_tax_rule)."""
+    if year in _TAX_RULES_RAW_CACHE:
+        return _TAX_RULES_RAW_CACHE[year]
+
+    # Loading via load_tax_rules populates both caches
+    load_tax_rules(year)
+    return _TAX_RULES_RAW_CACHE[year]
 
 
 def get_tax_rule(year: str, key: str, nested_key: str = None) -> Any:
     """Get a tax rule value with fallback to prior years.
+
+    DEPRECATED: Prefer using load_tax_rules(year) and accessing typed fields directly.
+    Example: load_tax_rules("2025").social_security.wage_cap
 
     Looks for the key in the requested year's rules. If not found, falls back
     to prior years in descending order until a value is found.
@@ -50,7 +114,6 @@ def get_tax_rule(year: str, key: str, nested_key: str = None) -> Any:
     Raises:
         KeyError: If no year has the requested key defined
     """
-    rules_dir = _get_tax_rules_dir()
     available_years = _get_available_years()
     target_year = int(year)
 
@@ -62,12 +125,10 @@ def get_tax_rule(year: str, key: str, nested_key: str = None) -> Any:
         candidate_years = available_years
 
     for check_year in candidate_years:
-        config_file = rules_dir / f"{check_year}.yaml"
-        if not config_file.exists():
+        try:
+            rules = _load_tax_rules_raw(str(check_year))
+        except FileNotFoundError:
             continue
-
-        with open(config_file, "r") as f:
-            rules = yaml.safe_load(f)
 
         if nested_key:
             if key in rules and isinstance(rules[key], dict) and nested_key in rules[key]:
@@ -79,8 +140,19 @@ def get_tax_rule(year: str, key: str, nested_key: str = None) -> Any:
     # No year has this value defined
     if nested_key:
         raise KeyError(f"Tax rule '{key}.{nested_key}' not defined in any tax-rules/*.yaml file")
-    else:
-        raise KeyError(f"Tax rule '{key}' not defined in any tax-rules/*.yaml file")
+    raise KeyError(f"Tax rule '{key}' not defined in any tax-rules/*.yaml file")
+
+
+def get_ss_wage_cap(year: str) -> float:
+    """Get Social Security wage cap for a year (cached).
+
+    Args:
+        year: Tax year (e.g., "2025")
+
+    Returns:
+        SS wage base (max taxable wages for the year)
+    """
+    return load_tax_rules(year).social_security.wage_cap
 
 
 def _round_to_dollar(amount: float) -> int:
@@ -211,7 +283,7 @@ def calculate_additional_medicare_withheld(medicare_wages: float, year: str) -> 
     Returns:
         Additional Medicare tax withheld amount
     """
-    threshold = get_tax_rule(year, "additional_medicare_withholding_threshold")
+    threshold = load_tax_rules(year).additional_medicare_withholding_threshold
     if medicare_wages <= threshold:
         return 0.0
     return (medicare_wages - threshold) * 0.009

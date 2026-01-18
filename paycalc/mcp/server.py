@@ -320,7 +320,7 @@ async def generate_tax_projection(
     Requires W-2 or analysis data to exist for both parties.
     """
     try:
-        from paycalc.sdk.tax import generate_tax_projection as sdk_tax_projection
+        from paycalc.sdk.taxes.other import generate_tax_projection as sdk_tax_projection
 
         result = sdk_tax_projection(
             year,
@@ -356,7 +356,7 @@ async def get_first_regular_pay_date(
     On failure, returns error code and message.
     """
     try:
-        from paycalc.sdk.stub_model import get_first_regular_pay_date as sdk_get_first
+        from paycalc.sdk.modeling import get_first_regular_pay_date as sdk_get_first
 
         return sdk_get_first(party=party, year=year)
 
@@ -389,7 +389,7 @@ async def model_regular_401k_contribs(
     Returns stubs array with each period's breakdown plus YTD totals.
     """
     try:
-        from paycalc.sdk.stub_model import (
+        from paycalc.sdk.modeling import (
             model_regular_401k_contribs as sdk_model_401k,
             get_first_regular_pay_date,
         )
@@ -438,7 +438,7 @@ async def max_regular_401k_contribs(
     Returns stubs array with each period's breakdown plus YTD totals.
     """
     try:
-        from paycalc.sdk.stub_model import max_regular_401k_contribs as sdk_max_401k
+        from paycalc.sdk.modeling import model_401k_max_frontload as sdk_max_401k
 
         return sdk_max_401k(
             year,

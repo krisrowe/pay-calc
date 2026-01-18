@@ -7,7 +7,7 @@ analysis tools.
 
 import math
 from typing import Dict, Any, Optional
-from .tax import load_tax_rules, get_tax_rule
+from .other import load_tax_rules
 
 
 def truncate_cents(amount: float) -> float:
@@ -210,9 +210,10 @@ def calc_ss_withholding(
             - rate: SS tax rate used
             - capped: Whether wage cap was reached
     """
-    # Load SS wage cap from tax rules
-    ss_wage_cap = get_tax_rule(year, "social_security", "wage_cap") or 184500.0
-    ss_rate = get_tax_rule(year, "social_security", "tax_rate") or 0.062
+    # Load SS rules (cached)
+    rules = load_tax_rules(year)
+    ss_wage_cap = rules.social_security.wage_cap
+    ss_rate = rules.social_security.tax_rate
 
     # Calculate taxable amount respecting cap
     remaining_cap = max(0, ss_wage_cap - ytd_ss_wages)
@@ -252,7 +253,8 @@ def calc_medicare_withholding(
     ADDITIONAL_RATE = 0.009
 
     # Additional Medicare threshold (for withholding, per-employee)
-    threshold = get_tax_rule(year, "additional_medicare_withholding_threshold") or 200000.0
+    rules = load_tax_rules(year)
+    threshold = rules.additional_medicare_withholding_threshold
 
     base_withheld = truncate_cents(gross * MEDICARE_RATE)
 

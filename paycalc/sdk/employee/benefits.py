@@ -17,7 +17,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-from .config import load_profile, get_data_path
+from ..config import load_profile, get_data_path
 
 
 def parse_date(date_str: str) -> date:

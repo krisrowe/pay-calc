@@ -60,6 +60,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Literal
 
 from .config import get_data_path
+from .schemas import PayStub
 
 # Configure logging based on LOG_LEVEL environment variable
 _log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
@@ -1021,6 +1022,34 @@ def get_record(record_id: str) -> Optional[Dict[str, Any]]:
             return None
 
     return None
+
+
+def get_stub(record_id: str) -> PayStub:
+    """Get a validated pay stub by record ID.
+
+    Args:
+        record_id: The 8-char record ID
+
+    Returns:
+        Validated PayStub model
+
+    Raises:
+        ValueError: If record not found or not a stub
+        pydantic.ValidationError: If stub data doesn't conform to PayStub schema.
+            This indicates either a bug in the upstream parser or a need for
+            a schema-on-read transformation. Do NOT modify the PayStub schema
+            to accommodate variant data - fix upstream instead.
+    """
+    record = get_record(record_id)
+    if not record:
+        raise ValueError(f"Record '{record_id}' not found")
+
+    if record.get("meta", {}).get("type") != "stub":
+        raise ValueError(
+            f"Record '{record_id}' is not a stub (type={record.get('meta', {}).get('type')})"
+        )
+
+    return PayStub.model_validate(record["data"])
 
 
 def list_discarded() -> List[Dict[str, Any]]:

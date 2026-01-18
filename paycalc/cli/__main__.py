@@ -380,7 +380,7 @@ def _format_tax_projection_text(proj: dict) -> str:
     # Data sources section - use SDK helper for consistent formatting
     data_sources = proj.get("data_sources", {})
     if data_sources:
-        from paycalc.sdk.tax import format_data_sources
+        from paycalc.sdk.taxes.other import format_data_sources
         lines.append("")
         lines.append("DATA SOURCES")
         lines.append("-" * 60)
@@ -452,7 +452,7 @@ def tax_project(year, output_format, data_dir, ytd_final, stock_price):
         raise click.BadParameter(f"Invalid year '{year}'. Must be 4 digits.")
 
     from paycalc.sdk import generate_tax_projection, get_data_path
-    from paycalc.sdk.tax import format_data_sources
+    from paycalc.sdk.taxes.other import format_data_sources
 
     data_path = Path(data_dir) if data_dir else get_data_path()
 
@@ -479,7 +479,7 @@ def tax_project(year, output_format, data_dir, ytd_final, stock_price):
             click.echo(json.dumps(projection, indent=2))
         else:  # csv
             # Get JSON for data sources, convert to CSV for output
-            from paycalc.sdk.tax import projection_to_csv_string
+            from paycalc.sdk.taxes.other import projection_to_csv_string
             projection = generate_tax_projection(
                 year, data_dir=data_path, output_format="json",
                 ytd_final_party=ytd_final_party, stock_price=stock_price

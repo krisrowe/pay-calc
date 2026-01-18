@@ -9,7 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .config import load_profile
+from ..config import load_profile
 
 
 def parse_date(date_str: str) -> date:
@@ -226,10 +226,10 @@ def calc_401k_for_period(
     Returns:
         401k contribution amount for the period
     """
-    from .tax import get_tax_rule
+    from ..taxes import load_tax_rules
 
     # Get annual limit
-    annual_limit = get_tax_rule(year, "401k", "employee_elective_limit") or 23500
+    annual_limit = load_tax_rules(year).retirement_401k.employee_elective_limit
 
     # Determine target contribution
     if "target_401k_amount" in plan:

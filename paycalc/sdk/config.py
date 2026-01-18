@@ -906,7 +906,8 @@ def normalize_deduction_type(raw_type: str) -> str:
     (like "401K Pre Tax", "Medical Insurance") to canonical types
     (like "401k", "health").
 
-    Matching is case-insensitive substring matching.
+    Matching is case-insensitive substring matching, with longer patterns
+    checked first to ensure specificity (e.g., "fsa health" before "health").
 
     Args:
         raw_type: Raw deduction type from pay stub
@@ -920,8 +921,11 @@ def normalize_deduction_type(raw_type: str) -> str:
     raw_lower = raw_type.lower()
     mappings = _load_deduction_mappings()
 
+    # Sort patterns by length (longest first) for specificity
+    sorted_patterns = sorted(mappings.items(), key=lambda x: len(x[0]), reverse=True)
+
     # Check each pattern for substring match
-    for pattern, canonical in mappings.items():
+    for pattern, canonical in sorted_patterns:
         if pattern.lower() in raw_lower:
             return canonical
 
@@ -944,24 +948,9 @@ def resolve_supplemental_rate(party: str, target_date) -> dict:
             - rate: The supplemental withholding rate (e.g., 0.22)
             - source: Description of where rate came from
     """
-    from .tax import load_tax_rules
-
-    # Get year from target_date
-    if hasattr(target_date, 'year'):
-        year = str(target_date.year)
-    else:
-        year = str(target_date)[:4]
-
-    try:
-        rules = load_tax_rules(year)
-        rate = rules.get("supplemental_rate", 0.22)
-        return {
-            "rate": rate,
-            "source": f"tax_rules/{year}.yaml",
-        }
-    except FileNotFoundError:
-        # Fall back to IRS standard rate
-        return {
-            "rate": 0.22,
-            "source": "IRS standard (no tax rules for year)",
-        }
+    # IRS standard flat rate for supplemental wages (bonuses, RSUs, etc.)
+    # This rate hasn't changed in years - hardcode rather than maintain in YAML
+    return {
+        "rate": 0.22,
+        "source": "IRS standard",
+    }

@@ -61,7 +61,7 @@ def suppl_rates():
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def suppl_rates_list(party, fmt):
     """List supplemental withholding rates for PARTY."""
-    from paycalc.sdk.party_config import list_suppl_rates
+    from paycalc.sdk.employee.config import list_suppl_rates
 
     rates = list_suppl_rates(party)
 
@@ -94,7 +94,7 @@ def suppl_rates_set(party, rate, effective_date, fmt):
 
     RATE is a decimal (e.g., 0.30 for 30%).
     """
-    from paycalc.sdk.party_config import set_suppl_rate
+    from paycalc.sdk.employee.config import set_suppl_rate
 
     try:
         result = set_suppl_rate(party, rate, effective_date)
@@ -115,7 +115,7 @@ def suppl_rates_set(party, rate, effective_date, fmt):
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def suppl_rates_delete(party, effective_date, fmt):
     """Delete a supplemental rate entry by effective date."""
-    from paycalc.sdk.party_config import delete_suppl_rate
+    from paycalc.sdk.employee.config import delete_suppl_rate
 
     result = delete_suppl_rate(party, effective_date)
 
@@ -154,7 +154,7 @@ def w4s():
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def w4s_list(party, fmt):
     """List W-4 configurations for PARTY."""
-    from paycalc.sdk.party_config import list_w4s
+    from paycalc.sdk.employee.config import list_w4s
 
     entries = list_w4s(party)
 
@@ -224,7 +224,7 @@ def w4s_set(party, effective_date, filing_status, allowances, extra_withholding,
         --dependents $(echo $DERIVED | jq '.derived.step3_dependents') \\
         --note "Derived from stub $STUB_ID"
     """
-    from paycalc.sdk.party_config import set_w4
+    from paycalc.sdk.employee.config import set_w4
 
     try:
         result = set_w4(
@@ -273,7 +273,7 @@ def w4s_derive(record_id, max_dependents, fmt):
       # Output as JSON for piping
       pay-calc config w4s derive f7e3eaf9 --format=json
     """
-    from paycalc.sdk.party_config import derive_w4_from_stub
+    from paycalc.sdk.employee.config import derive_w4_from_stub
     from rich.console import Console
     from rich.table import Table
 
@@ -371,7 +371,7 @@ def comp():
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def comp_list(party, fmt):
     """List compensation plans for PARTY."""
-    from paycalc.sdk.party_config import list_comp
+    from paycalc.sdk.employee.config import list_comp
 
     entries = list_comp(party)
 
@@ -407,7 +407,7 @@ def comp_list(party, fmt):
 @click.option("--format", "fmt", type=click.Choice(["text", "json"]), default="text")
 def comp_set(party, effective_date, gross_per_period, regular_pay, employer, source_record, fmt):
     """Set compensation plan for PARTY."""
-    from paycalc.sdk.party_config import set_comp
+    from paycalc.sdk.employee.config import set_comp
 
     try:
         result = set_comp(

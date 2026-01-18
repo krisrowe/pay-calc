@@ -11,21 +11,21 @@ from rich.console import Console
 from rich.table import Table
 
 from paycalc.sdk.records import get_record, list_records
-from paycalc.sdk.stub_model import (
+from paycalc.sdk.modeling import (
     model_stub,
     model_stubs_in_sequence,
     model_regular_401k_contribs,
-    max_regular_401k_contribs,
+    model_401k_max_frontload,
+    model_401k_max_spread_evenly,
     get_first_regular_pay_date,
-)
-from paycalc.sdk.config import normalize_deduction_type
-from paycalc.sdk.comp import identify_salary_changes
-from paycalc.sdk.modeling import (
     validate_stub,
+    validate_stub_in_sequence,
     is_supplemental_stub,
     extract_inputs_from_stub,
-    extract_actuals_from_stub,
 )
+from paycalc.sdk.schemas import FicaRoundingBalance
+from paycalc.sdk.config import normalize_deduction_type
+from paycalc.sdk.comp import identify_salary_changes
 
 
 def _is_supplemental_stub_UNUSED(data: Dict[str, Any]) -> bool:
@@ -454,126 +454,47 @@ def validate(
     benefits_override = inputs["benefits"] if inputs["benefits"] else None
     imputed_income = inputs.get("imputed_income", 0)
 
-    # Call model (iterative or single-period)
+    # Call validation (iterative or non-iterative)
     if iterative:
-        # Auto-build history from prior stubs if not disabled and not provided
-        auto_supplementals = None
-        auto_special_deductions = None
-        comp_plan_history = None
-        if not no_auto_history and supp_data is None and special_ded_data is None:
-            year = pay_date[:4]
-            auto_supplementals, auto_special_deductions, comp_plan_history = build_history_from_prior_stubs(
-                party, year, pay_date
-            )
-            # Write to temp files for debugging/inspection
-            tmp_dir = tempfile.mkdtemp(prefix="pay-calc-validate-")
-            if auto_supplementals:
-                supp_file = Path(tmp_dir) / "supplementals.json"
-                with open(supp_file, "w") as f:
-                    json.dump(auto_supplementals, f, indent=2)
-                supp_data = auto_supplementals
-                if verbose:
-                    click.echo(f"  Auto-built supplementals: {supp_file}")
-            if auto_special_deductions:
-                sd_file = Path(tmp_dir) / "special_deductions.json"
-                with open(sd_file, "w") as f:
-                    json.dump(auto_special_deductions, f, indent=2)
-                special_ded_data = auto_special_deductions
-                if verbose:
-                    click.echo(f"  Auto-built special_deductions: {sd_file}")
-            if comp_plan_history:
-                cph_file = Path(tmp_dir) / "comp_plan_history.json"
-                with open(cph_file, "w") as f:
-                    json.dump(comp_plan_history, f, indent=2)
-                if verbose:
-                    click.echo(f"  Auto-built comp_plan_history: {cph_file}")
-
-        # Fail if no comp plan history and no prior stubs allowed
-        if not comp_plan_history and not no_auto_history:
-            raise click.ClickException(
-                "No comp plan history could be derived from prior stubs.\n"
-                "Either provide --no-auto-history with explicit overrides, or ensure stubs exist."
-            )
-
+        # Iterative: use validate_stub_in_sequence (always models full sequence)
         if verbose:
-            click.echo("Using iterative model (model_stubs_in_sequence)...")
-            if supp_data:
-                click.echo(f"  Supplementals: {len(supp_data)} events")
-            if special_ded_data:
-                click.echo(f"  Special deductions: {len(special_ded_data)} dates")
-            if comp_plan_history:
-                click.echo(f"  Comp plan history: {len(comp_plan_history)} entries")
+            click.echo("Using iterative model (validate_stub_in_sequence)...")
 
-        # Extract year from pay_date for full-year modeling
-        year_int = int(pay_date[:4])
-
-        result = model_stubs_in_sequence(
-            year_int,
-            party,
-            comp_plan_override=comp_plan_override,
-            comp_plan_history=comp_plan_history,
-            benefits_override=benefits_override,
-            pretax_401k=inputs["pretax_401k"],
+        sdk_result = validate_stub_in_sequence(
+            record_id,
+            auto_history=not no_auto_history,
             supplementals=supp_data,
             special_deductions=special_ded_data,
         )
 
-        # Find the stub matching the target pay_date
-        if result.get("stubs"):
-            for stub in result["stubs"]:
-                if stub.get("date") == pay_date:
-                    result["current"] = stub
-                    break
-            else:
-                result["current"] = result["stubs"][-1]  # Fallback to last stub
-        else:
-            result["current"] = {}
-        model_name = "model_stubs_in_sequence"
+        if sdk_result.get("error"):
+            raise click.ClickException(sdk_result["error"])
+
+        modeled = sdk_result["modeled"]
+        actuals = sdk_result["actual"]
+        model_name = sdk_result["model"]
+
+        if verbose:
+            click.echo(f"  Periods modeled: {sdk_result.get('periods_modeled', 'N/A')}")
     else:
-        result = model_stub(
-            pay_date,
-            party,
-            comp_plan_override=comp_plan_override,
-            benefits_override=benefits_override,
-            pretax_401k=inputs["pretax_401k"],
-            imputed_income=imputed_income,
-        )
-        model_name = "model_stub"
+        # Non-iterative: call validate_stub with FicaRoundingBalance.none()
+        sdk_result = validate_stub(record_id, FicaRoundingBalance.none())
 
-    if "error" in result:
-        raise click.ClickException(f"Error from {model_name}: {result['error']}")
+        if sdk_result.get("error"):
+            raise click.ClickException(sdk_result["error"])
 
-    if verbose and iterative:
-        click.echo(f"  Periods modeled: {result.get('periods_modeled', 'N/A')}")
-        if result.get('supplementals_included'):
-            click.echo(f"  Supplementals included: {result.get('supplementals_included')}")
+        modeled = sdk_result["modeled"]
+        actuals = sdk_result["actual"]
+        model_name = sdk_result["model"]
 
-    # Extract actuals from stub
-    actuals = extract_actuals_from_stub(data)
-
-    # Build modeled values in same structure
-    # Note: ss_wages/medicare_wages excluded from YTD comparison since stubs
-    # don't reliably store YTD FICA wages (only current taxable_wages and ytd_withheld)
-    modeled = {
-        "current": {
-            "gross": result["current"]["gross"],
-            "fit_taxable": result["current"]["fit_taxable"],
-            "fit_withheld": result["current"]["fit_withheld"],
-            "ss_withheld": result["current"]["ss_withheld"],
-            "medicare_withheld": result["current"]["medicare_withheld"],
-            "net_pay": result["current"]["net_pay"],
-        },
-        "ytd": {
-            "gross": result["ytd"]["gross"],
-            "fit_taxable": result["ytd"]["fit_taxable"],
-            "fit_withheld": result["ytd"]["fit_withheld"],
-            "ss_withheld": result["ytd"]["ss_withheld"],
-            "medicare_withheld": result["ytd"]["medicare_withheld"],
-        },
-    }
-
-    # Compare
-    comparisons = compare_values(modeled, actuals, diffs_only=diffs_only)
+    # Build comparisons from SDK result
+    comparisons = [
+        (d["field"], d["modeled"], d["actual"], d["diff"])
+        for d in sdk_result.get("discrepancies", [])
+    ]
+    if not diffs_only:
+        # SDK only returns discrepancies; for full comparison, build from modeled/actual
+        comparisons = compare_values(modeled, actuals, diffs_only=False)
 
     if output_json:
         output = {
@@ -581,8 +502,8 @@ def validate(
             "party": party,
             "pay_date": pay_date,
             "model": model_name,
-            "periods_modeled": result.get("periods_modeled"),
-            "inputs": inputs,
+            "periods_modeled": sdk_result.get("periods_modeled"),
+            "inputs": sdk_result.get("inputs"),
             "modeled": modeled,
             "actual": actuals,
             "discrepancies": [
@@ -594,7 +515,8 @@ def validate(
         }
         click.echo(json.dumps(output, indent=2))
     else:
-        mode_info = f", {result.get('periods_modeled')} periods" if iterative else ""
+        periods = sdk_result.get('periods_modeled')
+        mode_info = f", {periods} periods" if periods else ""
         click.echo(f"Validating stub {record_id} ({party}, {pay_date}{mode_info})")
         print_comparison_table(comparisons, diffs_only=diffs_only)
 
@@ -889,49 +811,37 @@ def regular_pay(year: int, party: str, contrib_401k: float,
         console.print("\n[green]✓ Totals match YTD[/green]")
 
 
-@model.command("max-401k")
-@click.argument("year", type=int)
-@click.argument("party", type=click.Choice(["him", "her"]))
-@click.option("--compare/--no-compare", default=True,
-              help="Show comparison vs $0 401k (default: --compare)")
-@click.option("--format", "output_format", type=click.Choice(["table", "json"]), default="table",
-              help="Output format (default: table)")
-def max_401k(year: int, party: str, compare: bool, output_format: str):
-    """Model pay stubs with max 401k contributions.
+def _display_401k_max_model(
+    year: int,
+    party: str,
+    strategy: str,
+    result_max: Dict[str, Any],
+    compare: bool,
+    output_format: str,
+):
+    """Shared display logic for 401k max modeling commands.
 
-    Shows what happens if you contribute 100% to 401k (capped at IRS limit).
-    With --compare (default), also shows net pay difference vs $0 401k.
-
-    \b
-    Examples:
-      pay-calc model max-401k 2026 him
-      pay-calc model max-401k 2026 him --no-compare
-      pay-calc model max-401k 2026 him --format json
+    Args:
+        year: Calendar year
+        party: Party identifier
+        strategy: Strategy name for display (e.g., "Frontload", "Spread")
+        result_max: Result from SDK modeling function
+        compare: Whether to show comparison vs $0 401k
+        output_format: "table" or "json"
     """
     console = Console(width=140)
 
     # Get first pay date for display info
     first_pay_result = get_first_regular_pay_date(party, year)
-    if not first_pay_result.get("success"):
-        err = first_pay_result.get("error", {})
-        raise click.ClickException(err.get("message", "Could not determine first pay date"))
-
-    frequency = first_pay_result.get("frequency", "biweekly")
-    employer = first_pay_result.get("employer", "Unknown")
-
-    # Model max 401k scenario
-    result_max = max_regular_401k_contribs(year, party)
-
-    if "error" in result_max:
-        raise click.ClickException(result_max["error"])
+    frequency = first_pay_result.get("frequency", "biweekly") if first_pay_result.get("success") else "biweekly"
+    employer = first_pay_result.get("employer", "Unknown") if first_pay_result.get("success") else "Unknown"
 
     # JSON output
     if output_format == "json":
         if compare:
-            # Also model $0 401k for comparison
             result_zero = model_stubs_in_sequence(year, party)
             output = {
-                "max_401k": result_max,
+                f"max_401k_{strategy.lower()}": result_max,
                 "zero_401k": result_zero,
             }
         else:
@@ -939,17 +849,27 @@ def max_401k(year: int, party: str, compare: bool, output_format: str):
         click.echo(json.dumps(output, indent=2))
         return
 
-    # Rich table output
-    stubs = result_max.get("stubs", [])
+    # Filter stubs: periods with 401k + first zero period (if any)
+    all_stubs = result_max.get("stubs", [])
+    regular_stubs = [s for s in all_stubs if s.get("type") == "regular"]
+    display_stubs = []
+    found_first_zero = False
+    for stub in regular_stubs:
+        if stub.get("pretax_401k", 0) > 0:
+            display_stubs.append(stub)
+        elif not found_first_zero:
+            display_stubs.append(stub)
+            found_first_zero = True
+
     ytd = result_max.get("ytd", {})
 
-    console.print(f"\n[bold]Max 401k Model: {party} {year}[/bold]")
+    console.print(f"\n[bold]401k Max {strategy}: {party} {year}[/bold]")
     console.print(f"Employer: {employer}")
     console.print(f"Pay frequency: {frequency}")
-    console.print(f"Periods: {result_max.get('periods_modeled', len(stubs))}")
+    console.print(f"Periods: {result_max.get('periods_modeled', len(regular_stubs))} total, {len(display_stubs)} shown")
     console.print()
 
-    table = Table(title=f"Max 401k - Per Check Breakdown", expand=True)
+    table = Table(title=f"401k Max {strategy} - Per Check Breakdown", expand=True)
     table.add_column("Date", style="cyan")
     table.add_column("Gross", justify="right")
     table.add_column("401k", justify="right", style="green")
@@ -958,17 +878,16 @@ def max_401k(year: int, party: str, compare: bool, output_format: str):
     table.add_column("Medicare", justify="right")
     table.add_column("Net Pay", justify="right", style="yellow")
 
-    for stub in stubs:
-        if stub.get("type") == "regular":
-            table.add_row(
-                stub.get("date", ""),
-                f"${stub.get('gross', 0):,.2f}",
-                f"${stub.get('pretax_401k', 0):,.2f}",
-                f"${stub.get('fit_withheld', 0):,.2f}",
-                f"${stub.get('ss_withheld', 0):,.2f}",
-                f"${stub.get('medicare_withheld', 0):,.2f}",
-                f"${stub.get('net_pay', 0):,.2f}",
-            )
+    for stub in display_stubs:
+        table.add_row(
+            stub.get("date", ""),
+            f"${stub.get('gross', 0):,.2f}",
+            f"${stub.get('pretax_401k', 0):,.2f}",
+            f"${stub.get('fit_withheld', 0):,.2f}",
+            f"${stub.get('ss_withheld', 0):,.2f}",
+            f"${stub.get('medicare_withheld', 0):,.2f}",
+            f"${stub.get('net_pay', 0):,.2f}",
+        )
 
     # Add totals
     table.add_section()
@@ -989,7 +908,6 @@ def max_401k(year: int, party: str, compare: bool, output_format: str):
     if compare:
         console.print()
 
-        # Model $0 401k scenario
         result_zero = model_stubs_in_sequence(year, party)
         if "error" in result_zero:
             console.print(f"[red]Could not model $0 401k scenario: {result_zero['error']}[/red]")
@@ -998,7 +916,7 @@ def max_401k(year: int, party: str, compare: bool, output_format: str):
         ytd_zero = result_zero.get("ytd", {})
         ytd_max = result_max.get("ytd", {})
 
-        num_periods = result_max.get("periods_modeled", len(stubs))
+        num_periods = result_max.get("periods_modeled", len(regular_stubs))
 
         comp_table = Table(title=f"Comparison: {num_periods} Pay Periods", expand=False)
         comp_table.add_column("Scenario", style="cyan")
@@ -1013,7 +931,7 @@ def max_401k(year: int, party: str, compare: bool, output_format: str):
             f"${ytd_zero.get('net_pay', 0):,.2f}",
         )
         comp_table.add_row(
-            "B: Max 401k",
+            f"B: Max {strategy}",
             f"${ytd_max.get('gross', 0):,.2f}",
             f"${ytd_max.get('pretax_401k', 0):,.2f}",
             f"${ytd_max.get('net_pay', 0):,.2f}",
@@ -1040,3 +958,51 @@ def max_401k(year: int, party: str, compare: bool, output_format: str):
         console.print(f"  Net pay reduction: [red]${net_diff:,.2f}[/red]")
         tax_savings = ytd_max.get('pretax_401k', 0) - net_diff
         console.print(f"  Tax savings: [green]${tax_savings:,.2f}[/green]")
+
+
+@model.command("401k-max-frontload")
+@click.argument("year", type=int)
+@click.argument("party", type=click.Choice(["him", "her"]))
+@click.option("--compare/--no-compare", default=True,
+              help="Show comparison vs $0 401k (default: --compare)")
+@click.option("--format", "output_format", type=click.Choice(["table", "json"]), default="table",
+              help="Output format (default: table)")
+def cmd_401k_max_frontload(year: int, party: str, compare: bool, output_format: str):
+    """Model pay stubs with max 401k front-loaded (ASAP).
+
+    Contributes max each period until IRS limit hit, then $0.
+    With --compare (default), also shows net pay difference vs $0 401k.
+
+    \b
+    Examples:
+      pay-calc model 401k-max-frontload 2026 him
+      pay-calc model 401k-max-frontload 2026 him --no-compare
+    """
+    result = model_401k_max_frontload(year, party)
+    if "error" in result:
+        raise click.ClickException(result["error"])
+    _display_401k_max_model(year, party, "Frontload", result, compare, output_format)
+
+
+@model.command("401k-max-spread")
+@click.argument("year", type=int)
+@click.argument("party", type=click.Choice(["him", "her"]))
+@click.option("--compare/--no-compare", default=True,
+              help="Show comparison vs $0 401k (default: --compare)")
+@click.option("--format", "output_format", type=click.Choice(["table", "json"]), default="table",
+              help="Output format (default: table)")
+def cmd_401k_max_spread(year: int, party: str, compare: bool, output_format: str):
+    """Model pay stubs with max 401k spread evenly across all periods.
+
+    Divides IRS limit evenly across all pay periods for consistent deductions.
+    With --compare (default), also shows net pay difference vs $0 401k.
+
+    \b
+    Examples:
+      pay-calc model 401k-max-spread 2026 him
+      pay-calc model 401k-max-spread 2026 him --no-compare
+    """
+    result = model_401k_max_spread_evenly(year, party)
+    if "error" in result:
+        raise click.ClickException(result["error"])
+    _display_401k_max_model(year, party, "Spread", result, compare, output_format)

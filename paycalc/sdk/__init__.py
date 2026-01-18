@@ -34,7 +34,7 @@ from .config import (
     ensure_config_exists,
 )
 
-from .tax import (
+from .taxes.other import (
     generate_tax_projection,
     generate_projection,
     write_projection_csv,

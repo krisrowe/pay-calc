@@ -9,7 +9,7 @@ from datetime import date, datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .party_config import list_w4s
+from .config import list_w4s
 
 
 def parse_date(date_str: str) -> date:

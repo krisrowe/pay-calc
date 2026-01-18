@@ -30,7 +30,7 @@ class SupplementalValue:
 
 def _load_1040_for_year(year: str, data_dir: Path) -> Optional[dict]:
     """Load Form 1040 record for a given year if it exists."""
-    from .tax import load_form_1040
+    from .taxes.other import load_form_1040
     try:
         return load_form_1040(year, data_dir)
     except Exception:

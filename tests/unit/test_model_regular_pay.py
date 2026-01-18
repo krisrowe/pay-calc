@@ -18,10 +18,11 @@ import pytest
 import yaml
 from pathlib import Path
 
-from paycalc.sdk.stub_model import (
+from paycalc.sdk.modeling import (
     model_stubs_in_sequence,
     model_regular_401k_contribs,
 )
+from paycalc.sdk.modeling.schemas import RetirementElectionHistory
 
 
 # === TEST CONSTANTS ===
@@ -166,9 +167,7 @@ class TestModelRegularPayHappyPath:
             pay_date="2024-12-20",  # Late December Friday
         )
 
-        # Model full year with evenly split 401k
-        period_401k = K401_LIMIT / 26  # ~$903.85 per period
-
+        # Model full year with modest 401k (not testing cap, just need a value)
         result = model_stubs_in_sequence(
             TEST_YEAR,
             "testparty",
@@ -185,7 +184,9 @@ class TestModelRegularPayHappyPath:
                 "step2c_multiple_jobs": True,
                 "step3_dependents": 0,
             },
-            pretax_401k=period_401k,
+            retirement_elections=RetirementElectionHistory.regular_for_year(
+                TEST_YEAR, 500.00, "absolute"
+            ),
         )
 
         assert "error" not in result, f"Unexpected error: {result.get('error')}"
@@ -210,7 +211,7 @@ class TestModelRegularPayHappyPath:
         assert abs(ytd["medicare_withheld"] - sum_medicare_withheld) < 0.01
         assert abs(ytd["net_pay"] - sum_net_pay) < 0.01
 
-    def test_current_amounts_balance(self, isolated_env, base_profile, tax_rules_2025):
+    def test_net_pay_equals_gross_minus_deductions(self, isolated_env, base_profile, tax_rules_2025):
         """For each stub, gross - deductions = net pay."""
         write_profile(isolated_env["config_dir"], base_profile)
         write_tax_rules(isolated_env["config_dir"], TEST_YEAR, tax_rules_2025)
@@ -223,7 +224,6 @@ class TestModelRegularPayHappyPath:
             pay_date="2024-12-20",
         )
 
-        period_401k = K401_LIMIT / 26
         benefits_total = 250.00  # health + dental
 
         result = model_stubs_in_sequence(
@@ -242,7 +242,9 @@ class TestModelRegularPayHappyPath:
                 "step2c_multiple_jobs": True,
                 "step3_dependents": 0,
             },
-            pretax_401k=period_401k,
+            retirement_elections=RetirementElectionHistory.regular_for_year(
+                TEST_YEAR, 500.00, "absolute"
+            ),
         )
 
         assert "error" not in result, f"Unexpected error: {result.get('error')}"
@@ -278,8 +280,6 @@ class TestModelRegularPayHappyPath:
             pay_date="2024-12-20",
         )
 
-        period_401k = K401_LIMIT / 26
-
         result = model_stubs_in_sequence(
             TEST_YEAR,
             "testparty",
@@ -296,7 +296,9 @@ class TestModelRegularPayHappyPath:
                 "step2c_multiple_jobs": True,
                 "step3_dependents": 0,
             },
-            pretax_401k=period_401k,
+            retirement_elections=RetirementElectionHistory.regular_for_year(
+                TEST_YEAR, 500.00, "absolute"
+            ),
         )
 
         assert "error" not in result, f"Unexpected error: {result.get('error')}"
@@ -304,8 +306,8 @@ class TestModelRegularPayHappyPath:
         ytd = result["ytd"]
         effective_fit_rate = ytd["fit_withheld"] / ytd["fit_taxable"]
 
-        # For MFJ with ~$228,500 FIT taxable ($260k gross - $23.5k 401k - $6.5k benefits),
-        # the marginal rate is 22-24%, so effective withholding rate should be in a reasonable range.
+        # For MFJ with ~$247k FIT taxable ($260k gross - $13k 401k - $6.5k benefits),
+        # effective withholding rate should be in a reasonable range.
         assert 0.10 < effective_fit_rate < 0.30, (
             f"Effective FIT rate {effective_fit_rate:.2%} out of expected range (10-30%)"
         )
@@ -351,7 +353,7 @@ class TestSocialSecurityWageCap:
                 "step2c_multiple_jobs": True,
                 "step3_dependents": 0,
             },
-            pretax_401k=0,  # No 401k to keep FICA taxable = gross
+            # No retirement_elections = no 401k, keeps FICA taxable = gross - benefits
         )
 
         assert "error" not in result, f"Unexpected error: {result.get('error')}"
@@ -436,7 +438,7 @@ class TestSocialSecurityWageCap:
                 "step2c_multiple_jobs": True,
                 "step3_dependents": 0,
             },
-            pretax_401k=0,
+            # No retirement_elections = no 401k
         )
 
         assert "error" not in result, f"Unexpected error: {result.get('error')}"
@@ -553,7 +555,7 @@ class TestSupplementalBonusSSCap:
                 "step2c_multiple_jobs": True,
                 "step3_dependents": 0,
             },
-            pretax_401k=0,
+            # No retirement_elections = no 401k
             supplementals=[
                 {
                     "date": "2025-07-11",  # Around period 14 (mid-year)
@@ -600,9 +602,8 @@ class Test401kEvenDistribution:
             pay_date="2024-12-20",
         )
 
-        # Even distribution: $23,500 / 26 = $903.846... per period
-        period_401k = K401_LIMIT / 26
-
+        # Even distribution: $23,500 / 26 = $903.846...
+        # Round up to 903.85 so 26 periods slightly exceeds limit; IRS cap applies.
         result = model_stubs_in_sequence(
             TEST_YEAR,
             "testparty",
@@ -617,7 +618,9 @@ class Test401kEvenDistribution:
                 "filing_status": "mfj",
                 "step2c_multiple_jobs": True,
             },
-            pretax_401k=period_401k,
+            retirement_elections=RetirementElectionHistory.regular_for_year(
+                TEST_YEAR, 903.85, "absolute"
+            ),
         )
 
         assert "error" not in result, f"Unexpected error: {result.get('error')}"
@@ -671,7 +674,7 @@ class TestMax401kCapHitEarly:
 
     def test_max_401k_cap_hit_early(self, isolated_env, base_profile, tax_rules_2025):
         """With $5000 gross, 401k cap is hit in ~5 periods, then $0 thereafter."""
-        from paycalc.sdk.stub_model import max_regular_401k_contribs
+        from paycalc.sdk.modeling import model_401k_max_frontload
 
         write_profile(isolated_env["config_dir"], base_profile)
         write_tax_rules(isolated_env["config_dir"], TEST_YEAR, tax_rules_2025)
@@ -684,11 +687,14 @@ class TestMax401kCapHitEarly:
             pay_date="2024-12-20",
         )
 
-        # Low gross: $5,000/period biweekly
-        # 401k limit $23,500 / $5,000 = 4.7 periods
-        # So 4 full periods + 1 partial + 21 with $0
+        # Low gross: $5,000/period biweekly with $200 health benefits
+        # max_401k = gross - benefits - FICA
+        #          = $5,000 - $200 - ($4,800 × 7.65%)
+        #          = $5,000 - $200 - $367.20 = $4,432.80/period
+        # 401k limit $23,500 / $4,432.80 = 5.3 periods
+        # So 5 full periods + 1 partial + 20 with $0
 
-        result = max_regular_401k_contribs(
+        result = model_401k_max_frontload(
             TEST_YEAR,
             "testparty",
             comp_plan_override={
@@ -716,33 +722,43 @@ class TestMax401kCapHitEarly:
         stubs_with_401k = [s for s in regular_stubs if s["pretax_401k"] > 0]
         stubs_without_401k = [s for s in regular_stubs if s["pretax_401k"] == 0]
 
-        # Should have exactly 5 stubs with 401k (4 full + 1 partial)
-        assert len(stubs_with_401k) == 5, (
-            f"Expected 5 periods with 401k (4 full + 1 partial), got {len(stubs_with_401k)}"
+        # Calculate expected max 401k per period
+        gross = 5000.00
+        benefits = 200.00
+        fica_taxable = gross - benefits  # $4,800 (Section 125 reduces FICA)
+        fica = round(fica_taxable * 0.0765, 2)  # SS 6.2% + Medicare 1.45%
+        max_401k_per_period = gross - benefits - fica  # $4,432.80
+
+        # How many periods to hit $23,500 limit?
+        # $23,500 / $4,432.80 = 5.30 periods
+        # 5 full + 1 partial = 6 periods with 401k
+        assert len(stubs_with_401k) == 6, (
+            f"Expected 6 periods with 401k (5 full + 1 partial), got {len(stubs_with_401k)}"
         )
 
-        # First 4 should be full $5,000 contributions
-        for i in range(4):
-            assert abs(stubs_with_401k[i]["pretax_401k"] - 5000.00) < 0.01, (
-                f"Period {i+1} should have full $5,000 401k, got ${stubs_with_401k[i]['pretax_401k']:.2f}"
+        # First 5 should be full ~$4,432.80 contributions
+        for i in range(5):
+            assert abs(stubs_with_401k[i]["pretax_401k"] - max_401k_per_period) < 0.01, (
+                f"Period {i+1} should have full ${max_401k_per_period:.2f} 401k, got ${stubs_with_401k[i]['pretax_401k']:.2f}"
             )
 
-        # 5th should be partial (remainder): $23,500 - $20,000 = $3,500
-        partial_401k = stubs_with_401k[4]["pretax_401k"]
-        expected_partial = K401_LIMIT - 20000.00  # 23,500 - 20,000 = 3,500
+        # 6th should be partial (remainder): $23,500 - (5 × $4,432.80) = $1,336.00
+        full_periods_total = 5 * max_401k_per_period
+        expected_partial = K401_LIMIT - full_periods_total
+        partial_401k = stubs_with_401k[5]["pretax_401k"]
         assert abs(partial_401k - expected_partial) < 0.01, (
             f"Partial 401k should be ${expected_partial:.2f}, got ${partial_401k:.2f}"
         )
 
-        # Remaining 21 stubs should have $0 401k
-        assert len(stubs_without_401k) == 21, (
-            f"Expected 21 periods with $0 401k, got {len(stubs_without_401k)}"
+        # Remaining 20 stubs should have $0 401k
+        assert len(stubs_without_401k) == 20, (
+            f"Expected 20 periods with $0 401k, got {len(stubs_without_401k)}"
         )
 
         # Verify that stubs after cap hit have higher net pay
         # (since no 401k is being deducted)
-        last_401k_stub = stubs_with_401k[-1]  # Period 5 (partial)
-        first_no_401k_stub = stubs_without_401k[0]  # Period 6
+        last_401k_stub = stubs_with_401k[-1]  # Period 6 (partial)
+        first_no_401k_stub = stubs_without_401k[0]  # Period 7
 
         # Net pay without 401k should be higher than net pay with partial 401k
         # (unless SS cap causes differences)

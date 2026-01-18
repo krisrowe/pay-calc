@@ -9,7 +9,7 @@ import pytest
 import yaml
 from pathlib import Path
 
-from paycalc.sdk.stub_model import model_stub
+from paycalc.sdk.modeling import model_stub
 
 
 # Zero YTD for period 1 tests
@@ -92,30 +92,21 @@ def write_profile(config_dir: Path, profile_data: dict):
 
 def test_model_first_period_all_registered(isolated_env, base_profile):
     """Model period 1 with comp, benefits, w4 all from registered profile."""
+    from paycalc.sdk.modeling.schemas import ModelResult
+
     write_profile(isolated_env["config_dir"], base_profile)
 
     result = model_stub("2026-01-10", "him", prior_ytd=ZERO_YTD, benefits=DEFAULT_BENEFITS)
 
-    # Should succeed
-    assert "error" not in result, f"Unexpected error: {result.get('error')}"
+    # Should succeed (ModelResult, not error dict)
+    assert isinstance(result, ModelResult), f"Unexpected error: {result.get('error') if isinstance(result, dict) else result}"
 
-    # Check structure
-    assert result["party"] == "him"
-    assert result["period_number"] == 1
-    assert result["periods_per_year"] == 26
-
-    # Check calculations
-    current = result["current"]
-    assert current["gross"] == 5000.00
-    assert current["pretax_401k"] == 500.00  # 10%
-    assert current["pretax_benefits"] == 225.00  # 200 + 25
-    assert current["fit_taxable"] == 4275.00  # 5000 - 500 - 225
-    assert current["net_pay"] > 0
-
-    # Check provenance
-    sources = result["sources"]
-    assert sources["comp_plan"]["type"] == "registered"
-    assert "w4" in sources  # W4 resolved (type varies by env)
+    # Check calculations via PaySummary structure
+    assert result.current.gross == 5000.00
+    assert result.current.deductions.retirement == 500.00  # 10% 401k
+    assert result.current.deductions.fully_pretax == 225.00  # health + dental
+    assert result.current.taxable.fit == 4275.00  # 5000 - 500 - 225
+    assert result.current.net_pay > 0
 
 
 # === COMP PLAN OVERRIDE TESTS ===
@@ -126,14 +117,15 @@ class TestCompPlanOverride:
 
     def test_comp_plan_override_changes_gross(self, isolated_env, base_profile):
         """Override comp plan changes gross and downstream calculations."""
+        from paycalc.sdk.modeling.schemas import ModelResult
+
         write_profile(isolated_env["config_dir"], base_profile)
 
         # Without override - uses profile (gross=5000)
         without = model_stub("2026-01-10", "him", prior_ytd=ZERO_YTD, benefits=DEFAULT_BENEFITS)
-        assert "error" not in without
-        assert without["current"]["gross"] == 5000.00
-        assert without["current"]["pretax_401k"] == 500.00  # 10% of 5000
-        assert without["sources"]["comp_plan"]["type"] == "registered"
+        assert isinstance(without, ModelResult), f"Error: {without.get('error') if isinstance(without, dict) else without}"
+        assert without.current.gross == 5000.00
+        assert without.current.deductions.retirement == 500.00  # 10% of 5000
 
         # With override - different gross
         with_override = model_stub(
@@ -146,14 +138,13 @@ class TestCompPlanOverride:
                 "target_401k_pct": 0.05,
             }
         )
-        assert "error" not in with_override
-        assert with_override["current"]["gross"] == 8000.00
-        assert with_override["current"]["pretax_401k"] == 400.00  # 5% of 8000
-        assert with_override["sources"]["comp_plan"]["type"] == "override"
+        assert isinstance(with_override, ModelResult), f"Error: {with_override.get('error') if isinstance(with_override, dict) else with_override}"
+        assert with_override.current.gross == 8000.00
+        assert with_override.current.deductions.retirement == 400.00  # 5% of 8000
 
         # Verify they're different
-        assert without["current"]["gross"] != with_override["current"]["gross"]
-        assert without["current"]["net_pay"] != with_override["current"]["net_pay"]
+        assert without.current.gross != with_override.current.gross
+        assert without.current.net_pay != with_override.current.net_pay
 
     def test_comp_plan_override_rejects_unknown_field(self, isolated_env, base_profile):
         """Unknown field in comp plan override causes validation error."""
@@ -182,13 +173,15 @@ class TestBenefits:
 
     def test_different_benefits_change_deductions(self, isolated_env, base_profile):
         """Different benefits values change pretax deductions and FIT taxable."""
+        from paycalc.sdk.modeling.schemas import ModelResult
+
         write_profile(isolated_env["config_dir"], base_profile)
 
         # With default benefits (health=200, dental=25)
         with_default = model_stub("2026-01-10", "him", prior_ytd=ZERO_YTD, benefits=DEFAULT_BENEFITS)
-        assert "error" not in with_default
-        assert with_default["current"]["pretax_benefits"] == 225.00
-        assert with_default["current"]["fit_taxable"] == 4275.00  # 5000 - 500 - 225
+        assert isinstance(with_default, ModelResult), f"Error: {with_default.get('error') if isinstance(with_default, dict) else with_default}"
+        assert with_default.current.deductions.fully_pretax == 225.00
+        assert with_default.current.taxable.fit == 4275.00  # 5000 - 500 - 225
 
         # With higher benefits
         higher_benefits = {
@@ -201,13 +194,13 @@ class TestBenefits:
             prior_ytd=ZERO_YTD,
             benefits=higher_benefits,
         )
-        assert "error" not in with_higher
-        assert with_higher["current"]["pretax_benefits"] == 750.00
-        assert with_higher["current"]["fit_taxable"] == 3750.00  # 5000 - 500 - 750
+        assert isinstance(with_higher, ModelResult), f"Error: {with_higher.get('error') if isinstance(with_higher, dict) else with_higher}"
+        assert with_higher.current.deductions.fully_pretax == 750.00
+        assert with_higher.current.taxable.fit == 3750.00  # 5000 - 500 - 750
 
         # Verify they're different
-        assert with_default["current"]["pretax_benefits"] != with_higher["current"]["pretax_benefits"]
-        assert with_default["current"]["fit_taxable"] != with_higher["current"]["fit_taxable"]
+        assert with_default.current.deductions.fully_pretax != with_higher.current.deductions.fully_pretax
+        assert with_default.current.taxable.fit != with_higher.current.taxable.fit
 
     def test_benefits_rejects_unknown_field(self, isolated_env, base_profile):
         """Unknown field in benefits causes validation error."""
@@ -235,12 +228,14 @@ class TestW4Override:
 
     def test_w4_override_changes_withholding(self, isolated_env, base_profile):
         """Override W-4 changes FIT withholding."""
+        from paycalc.sdk.modeling.schemas import ModelResult
+
         write_profile(isolated_env["config_dir"], base_profile)
 
         # Without override - uses profile or defaults
         without = model_stub("2026-01-10", "him", prior_ytd=ZERO_YTD, benefits=DEFAULT_BENEFITS)
-        assert "error" not in without
-        fit_without = without["current"]["fit_withheld"]
+        assert isinstance(without, ModelResult), f"Error: {without.get('error') if isinstance(without, dict) else without}"
+        fit_without = without.current.withheld.fit
 
         # With override - single filer, no dependents (higher withholding)
         with_override = model_stub(
@@ -252,9 +247,8 @@ class TestW4Override:
                 "step3_dependents": 0,
             }
         )
-        assert "error" not in with_override
-        assert with_override["sources"]["w4"]["type"] == "override"
-        fit_with = with_override["current"]["fit_withheld"]
+        assert isinstance(with_override, ModelResult), f"Error: {with_override.get('error') if isinstance(with_override, dict) else with_override}"
+        fit_with = with_override.current.withheld.fit
 
         # Single with no dependents should have higher withholding than MFJ with dependents
         assert fit_with > fit_without
